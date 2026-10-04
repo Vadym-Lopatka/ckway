@@ -5,7 +5,7 @@
 ;; This needs JDK 21 or newer. Alias needed: `:examples` (the alias has kotlinx.coroutines).
 (ns examples.08-suspend
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[kotlin.time :as t]

@@ -4,7 +4,7 @@
 ;; takes its Kotlin default. Alias needed: `:examples`.
 (ns examples.02-classes-and-arguments
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s])
 

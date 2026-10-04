@@ -5,7 +5,7 @@
 ;; a function has the prefix `.`, a property has not. Alias needed: `:examples`.
 (ns examples.11-reify
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[kotlinx.coroutines :as co])

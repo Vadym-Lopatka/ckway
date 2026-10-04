@@ -8,7 +8,7 @@
 (ns examples.13-everything-together
   (:require [clojure.string :as str]
             [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[shop.pricing :as pr]

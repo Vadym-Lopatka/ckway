@@ -7,7 +7,7 @@
   (:require [clojure.repl :refer [doc]]
             [clojure.string :as str]
             [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 ;; ## Make a namespace from a Kotlin package
 ;;

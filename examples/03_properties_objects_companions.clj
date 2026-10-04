@@ -5,7 +5,7 @@
 (ns examples.03-properties-objects-companions
   (:require [clojure.string :as str]
             [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s])
 

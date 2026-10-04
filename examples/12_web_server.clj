@@ -9,7 +9,7 @@
 ;; This file needs the Kotlin compiler (for the `reified` calls): the aliases are `:examples:kotlinc`.
 ;; Aliases: :kotlinc
 (ns examples.12-web-server
-  (:require [kt.core :as kt])
+  (:require [ckway.core :as kt])
   (:import [java.net InetSocketAddress URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]))
 

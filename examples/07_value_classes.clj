@@ -5,7 +5,7 @@
 ;; Alias needed: `:examples`.
 (ns examples.07-value-classes
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[kotlin.time :as t]

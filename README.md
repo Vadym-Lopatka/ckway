@@ -14,10 +14,10 @@ The forms follow the Kotlin text, so you can copy a Kotlin line and change it by
 * Add the library as a `:local/root` dependency. Its own `deps.edn` brings `kotlin-stdlib` and `kotlin-metadata-jvm` 2.4.20.
 * For `suspend` functions your class path needs `kotlinx-coroutines-core-jvm`. The alias `:coro` and the alias `:examples` add it.
 * A call with `:<>` to an `inline reified` Kotlin function needs the Kotlin compiler in the same JVM. Add the alias `:kotlinc` (`kotlin-compiler-embeddable`).
-  Without `:<>` on such a function you do not need it. A bridge that was compiled before (the cache `.kt-cache/`, or AOT-compiled code) needs no compiler either.
+  Without `:<>` on such a function you do not need it. A bridge that was compiled before (the cache `.ckway-cache/`, or AOT-compiled code) needs no compiler either.
 * Aliases in `deps.edn`: `:test`, `:coro` (kotlinx-coroutines from Maven Central), `:kotlinc`, `:examples` (kotlinx-coroutines and the Kotlin libraries `shop` and `web` of the examples).
 
-In your namespace, require `kt.core` as `kt`. Then call `kt/require` for each Kotlin package that you use (rule 1).
+In your namespace, require `ckway.core` as `kt`. Then call `kt/require` for each Kotlin package that you use (rule 1).
 
 The Kotlin code must be compiled to class files (or jars) on the class path.
 `kt` reads the Kotlin metadata of the classes. It does not read the Kotlin source.

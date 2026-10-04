@@ -32,13 +32,13 @@ before the class is initialised. So `kt/require` runs the `init` block of every 
 enum class: its entries are vars). Clojure vars have no hook on deref, so initialisation cannot be lazy without
 making the var something other than the instance.
 
-If an initialiser throws, `kt/require` still succeeds. The var holds a `kt.rt.FailedObject`. A kt call that gets it as
+If an initialiser throws, `kt/require` still succeeds. The var holds a `ckway.rt.FailedObject`. A kt call that gets it as
 an argument (static or dynamic path) throws `kt: object `Bad` (fx.init.Bad) failed to initialise: ...` with the
 original exception as the cause. The var is still a good type form (`:<> i/Bad`).
 
 ```clojure
 (i/x i/Bad)   ; ex-info "kt: object `Bad` (fx.init.Bad) failed to initialise: java.lang.IllegalStateException: boom ..."
-(.m i/Bad)    ; Clojure interop is not guarded: IllegalArgumentException, no matching field for kt.rt.FailedObject
+(.m i/Bad)    ; Clojure interop is not guarded: IllegalArgumentException, no matching field for ckway.rt.FailedObject
 (i/Bad)       ; compile error: `Bad` is an object, not a function
 ```
 
@@ -71,8 +71,8 @@ A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtua
   that sleeps in a swallowed interrupt and then 500 ms more completed 717 ms after the cancel, against 117 ms when the
   interrupt is passed on. Catch narrower types, or rethrow `InterruptedException`.
 * Without kotlinx.coroutines on the class path a body has no cancellation and no `ThreadContextElement` (from the code,
-  `kt.co`). With JDK 21 to 23, `synchronized` in a body pins the carrier thread (JEP 491 fixed this in 24; from the
-  `kt.co` docstring, not measured here).
+  `ckway.co`). With JDK 21 to 23, `synchronized` in a body pins the carrier thread (JEP 491 fixed this in 24; from the
+  `ckway.co` docstring, not measured here).
 
 ## 5. More than 20 parameters
 
@@ -124,7 +124,7 @@ A constructor parameter counts as a property when the class has a public propert
 * `inline reified` calls are compiled by the Kotlin compiler into a small bridge. The JVM that compiles needs the
   `:kotlinc` alias (`kotlin-compiler-embeddable`). Without it: an error that names the alias, unless the bridge is stored.
 * A stored bridge needs no compiler: AOT-compiled code carries it (it is written to `*compile-path*`), and the disk
-  cache `.kt-cache/` (or the directory in `-Dkt.cache.dir`; an empty value turns it off) keeps the others. A cache entry
+  cache `.ckway-cache/` (or the directory in `-Dckway.cache.dir`; an empty value turns it off) keeps the others. A cache entry
   is keyed on the source, the Kotlin version and the class files it depends on.
 * AOT-compiled code still runs `kt/require` at load time: it reads Kotlin metadata, so `kotlin-metadata-jvm` and the Kotlin
   classes must be on the run class path.

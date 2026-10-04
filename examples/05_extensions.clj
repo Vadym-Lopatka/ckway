@@ -6,7 +6,7 @@
 (ns examples.05-extensions
   (:require [clojure.repl :refer [doc]]
             [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[shop.pricing :as pr])

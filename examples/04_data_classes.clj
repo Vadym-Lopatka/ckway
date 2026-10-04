@@ -5,7 +5,7 @@
 ;; Alias needed: `:examples`.
 (ns examples.04-data-classes
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s])
 

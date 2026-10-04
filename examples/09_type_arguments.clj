@@ -6,7 +6,7 @@
 ;; Aliases: :kotlinc
 (ns examples.09-type-arguments
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s]
             '[kotlin.reflect :as r])

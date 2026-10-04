@@ -10,7 +10,7 @@ kotlinc -module-name fx -Xcontext-parameters -nowarn -cp "$CORO" test-fixtures/f
 kotlinc -module-name legacy -jvm-default=disable -nowarn test-fixtures/legacy/*.kt -d target/fixtures || exit 1
 # stdlib only (no kotlinx.coroutines): suspend calls and adapters must work without it
 kotlinc -module-name stdlib -nowarn test-fixtures/stdlib/*.kt -d target/fixtures || exit 1
-# the web library of the examples (examples/kotlin/web), the Kotlin side of kt.web-test
+# the web library of the examples (examples/kotlin/web), the Kotlin side of ckway.web-test
 kotlinc -module-name web -nowarn -cp "$CORO" examples/kotlin/web/*.kt examples/kotlin/web/*/*.kt -d target/fixtures || exit 1
-# Kotlin code against the web library (for kt.web-test)
+# Kotlin code against the web library (for ckway.web-test)
 kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures

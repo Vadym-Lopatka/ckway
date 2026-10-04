@@ -4,7 +4,7 @@
 ;; `(kt/ref X y)` is `X::y`. Alias needed: `:examples`.
 (ns examples.10-set-ref
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s])
 

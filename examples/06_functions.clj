@@ -4,7 +4,7 @@
 ;; value that you get is a Clojure function. Alias needed: `:examples`.
 (ns examples.06-functions
   (:require [examples.util :refer [err]]
-            [kt.core :as kt]))
+            [ckway.core :as kt]))
 
 (kt/require '[shop :as s])
 
