@@ -1,0 +1,17 @@
+#!/bin/sh
+# Build the Kotlin library of the examples, then check every example file (or the files given as arguments).
+# For each file: one JVM runs the forms and checks the markers, another fresh JVM loads the file with load-file.
+# A file lists the extra aliases that it needs on a line `;; Aliases: :kotlinc` (default: none).
+# Exit code 0 only if everything passed.
+cd "$(dirname "$0")/.." || exit 1
+examples/build || { echo "examples/build failed"; exit 1; }
+[ $# -gt 0 ] || set -- examples/[0-9]*.clj
+status=0
+for f in "$@"; do
+  extra=$(sed -n 's/^;; Aliases: *//p' "$f" | head -1 | tr -d ' ')
+  for mode in run load; do
+    clojure -M:examples$extra -m examples.runner "$mode" "$f" || status=1
+  done
+done
+[ $status -eq 0 ] && echo "ALL PASSED" || echo "SOME FAILED"
+exit $status

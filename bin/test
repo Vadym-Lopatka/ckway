@@ -1,0 +1,7 @@
+#!/bin/sh
+# Build the Kotlin fixtures, then run all tests. Exit non-zero on failure.
+cd "$(dirname "$0")/.." || exit 1
+bin/build-fixtures || exit 1
+clojure -M:test:coro:kotlinc -r 'kt\.(meta|call|fn|aot|value|bridge|co|suspend|types|reified|reified-jvm|hardening|static|set|ref|data|cache|reify|fixes|web)-test' || exit 1
+# stdlib only: no kotlinx.coroutines on the class path
+clojure -M:test -n kt.nocoro-test

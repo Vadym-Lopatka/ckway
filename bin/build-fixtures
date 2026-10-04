@@ -1,0 +1,16 @@
+#!/bin/sh
+# Compile the Kotlin test fixtures into target/fixtures. Exit non-zero if kotlinc fails.
+cd "$(dirname "$0")/.." || exit 1
+CORO=$(clojure -Spath -A:coro) || exit 1
+rm -rf target/fixtures && mkdir -p target/fixtures
+# each compilation has its own -module-name: the Kotlin compiler finds top-level functions of a
+# class path directory through META-INF/<module>.kotlin_module, and one name would be overwritten
+kotlinc -module-name fx -Xcontext-parameters -nowarn -cp "$CORO" test-fixtures/fx/*.kt test-fixtures/fx/other/*.kt test-fixtures/fx/init/*.kt -d target/fixtures || exit 1
+# an interface compiled the old way (no JVM default methods, bodies in $DefaultImpls)
+kotlinc -module-name legacy -jvm-default=disable -nowarn test-fixtures/legacy/*.kt -d target/fixtures || exit 1
+# stdlib only (no kotlinx.coroutines): suspend calls and adapters must work without it
+kotlinc -module-name stdlib -nowarn test-fixtures/stdlib/*.kt -d target/fixtures || exit 1
+# the web library of the examples (examples/kotlin/web), the Kotlin side of kt.web-test
+kotlinc -module-name web -nowarn -cp "$CORO" examples/kotlin/web/*.kt examples/kotlin/web/*/*.kt -d target/fixtures || exit 1
+# Kotlin code against the web library (for kt.web-test)
+kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures

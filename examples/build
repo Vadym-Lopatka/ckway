@@ -1,0 +1,10 @@
+#!/bin/sh
+# Compile the Kotlin libraries of the examples (examples/kotlin/shop and examples/kotlin/web) into
+# examples/target/classes. Exit non-zero if kotlinc fails.
+cd "$(dirname "$0")/.." || exit 1
+CORO=$(clojure -Spath -A:coro) || exit 1
+rm -rf examples/target/classes && mkdir -p examples/target/classes
+kotlinc -module-name shop -nowarn -cp "$CORO" \
+  examples/kotlin/shop/*.kt examples/kotlin/shop/pricing/*.kt -d examples/target/classes || exit 1
+kotlinc -module-name web -nowarn -cp "$CORO" \
+  examples/kotlin/web/*.kt examples/kotlin/web/*/*.kt -d examples/target/classes
