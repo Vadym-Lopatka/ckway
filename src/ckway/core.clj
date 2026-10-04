@@ -78,7 +78,7 @@
       :value (try (static-field-value (:class (:jvm d)) (or (:instance-field (:jvm d)) (:field (:jvm d))))
                   (catch LinkageError e
                     (rt/failed-object (if (= :object (:kind d)) "object" "enum entry") (:class (:jvm d)) e)))
-      :fn (let [f (fn [& args] (rt/call-dyn v (vec args) {}))]
+      :fn (let [f (fn [& args] (rt/call-var v args))]
             (if-let [c (:kt/class (meta v))] (with-meta f {:kt/class c}) f)))))
 
 (defn- with-factories
@@ -99,10 +99,21 @@
             d))
         decls))
 
+(defn- no-package!
+  "The error of a package with no declaration: a typo, a jar that is not on the class path (yet), or Java classes only."
+  [pkg]
+  (let [near (meta/similar-packages pkg)]
+    (throw (ex-info (str "kt/require: no Kotlin class found for package `" (if (str/blank? pkg) "<root>" pkg) "` on the class path. "
+                         "Is the name right, and is the jar or directory with its classes on the class path "
+                         "(a REPL can add one with add-lib)? A package with Java classes only has no vars."
+                         (when (seq near) (str "\n  Packages with a close name: " (str/join ", " near))))
+                    {:kt/error true :kt/package pkg :kt/similar near}))))
+
 (defn- intern-package!
   "Create or refresh the namespace for `pkg`, with one var per name."
   [pkg]
   (let [idx (meta/package-index pkg)
+        _ (when (empty? idx) (no-package! pkg))
         nsym (ns-sym pkg)
         the-ns (create-ns nsym)]
     (doseq [[s _] (ns-interns the-ns) :when (not (contains? idx (name s)))] (ns-unmap the-ns s))

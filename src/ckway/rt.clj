@@ -13,13 +13,16 @@
   An error is not cached. The key holds the Class objects of the arguments, so a class stays reachable
   while it is in a cache (at most 64 per var). `ckway.set` (the dynamic `kt/set!`) uses the same cache."
   (:require [ckway.co :as co]
+            [ckway.meta :as mt]
             [ckway.resolve :as r])
   (:import [java.lang.reflect Method Constructor Field Array InvocationTargetException Proxy InvocationHandler]
-           [java.lang.invoke MethodType]
+           [java.lang.invoke MethodHandle MethodHandles MethodType]
            [java.util Arrays]
            [java.util.concurrent ConcurrentHashMap]))
 
 (set! *warn-on-reflection* true)
+;; The conversions below must not depend on the compiler flags of the code that first loads this namespace.
+(set! *unchecked-math* false)
 
 ;; ---------------------------------------------------------------- value helpers (also used by emitted code)
 
@@ -31,34 +34,88 @@
     (r/fail (str "kt: expected an integer for an Int/Long/Short/Byte parameter, got "
                  (if (nil? x) "nil" (str (.getName (class x)) " " (pr-str x)))))))
 
+(defn- got-text*
+  [x]
+  (str (.getName (class x)) " " (let [s (pr-str x)] (if (> (count s) 40) (str (subs s 0 37) "...") s))))
+
+(defn- in-range? [x ^long lo ^long hi]
+  (if (or (instance? Long x) (instance? Integer x) (instance? Short x) (instance? Byte x))
+    (let [n (long x)] (and (<= lo n) (<= n hi)))
+    (let [b (biginteger x)] (and (<= (biginteger lo) b) (<= b (biginteger hi))))))
+
+(defn- narrow
+  "`x` checked for an integer parameter of the Kotlin type `tname` (range lo..hi); `what` says which value it is
+  (\"the argument `x` (Int)\"). A kt error for nil, a non-integer and a value out of range. Not the compiler's casts:
+  the consumer's `*unchecked-math*` would turn those into silent truncation."
+  [what tname lo hi x]
+  (cond
+    (nil? x) (r/fail (str "kt: nil where Kotlin expects a non-null " tname " (" what ")"))
+    (not (r/integral-class? (class x)))
+    (r/fail (str "kt: expected an integer for " what ", got " (got-text* x)))
+    (not (in-range? x lo hi))
+    (r/fail (str "kt: " what " is " x ", which is out of range for " tname))
+    :else x))
+
+(defn to-int "Integer for an Int parameter (see `narrow`)." [what x]
+  (Integer/valueOf (int (narrow what "Int" Integer/MIN_VALUE Integer/MAX_VALUE x))))
+(defn to-short "Short for a Short parameter." [what x]
+  (Short/valueOf (short (narrow what "Short" Short/MIN_VALUE Short/MAX_VALUE x))))
+(defn to-byte "Byte for a Byte parameter." [what x]
+  (Byte/valueOf (byte (narrow what "Byte" Byte/MIN_VALUE Byte/MAX_VALUE x))))
+(defn to-long "Long for a Long parameter." [what x]
+  (Long/valueOf (long (narrow what "Long" Long/MIN_VALUE Long/MAX_VALUE x))))
+(defn to-number
+  "The Number `x` for a Double or Float parameter; a kt error for nil and for a non-number."
+  ^Number [what x]
+  (cond (nil? x) (r/fail (str "kt: nil where Kotlin expects a non-null number (" what ")"))
+        (number? x) x
+        :else (r/fail (str "kt: expected a number for " what ", got " (got-text* x)))))
+(defn to-char
+  "The Character `x` for a Char parameter. Only a Clojure character is a Kotlin Char."
+  ^Character [what x]
+  (cond (nil? x) (r/fail (str "kt: nil where Kotlin expects a non-null Char (" what ")"))
+        (char? x) x
+        :else (r/fail (str "kt: expected a character for " what ", got " (got-text* x)))))
+(defn to-bool
+  "The Boolean `x` for a Boolean parameter."
+  ^Boolean [what x]
+  (cond (nil? x) (r/fail (str "kt: nil where Kotlin expects a non-null Boolean (" what ")"))
+        (boolean? x) x
+        :else (r/fail (str "kt: expected a Boolean for " what ", got " (got-text* x)))))
+
 (defn box
-  "Box `x` as the Java wrapper class `cname` (a nullable Kotlin Int?, Long?, ...). nil stays nil."
-  [^String cname x]
-  (when (some? x)
-    (case cname
-      "java.lang.Integer" (Integer/valueOf (int (integral x)))
-      "java.lang.Long" (Long/valueOf (long (integral x)))
-      "java.lang.Short" (Short/valueOf (short (integral x)))
-      "java.lang.Byte" (Byte/valueOf (byte (integral x)))
-      "java.lang.Double" (Double/valueOf (double x))
-      "java.lang.Float" (Float/valueOf (float x))
-      "java.lang.Character" (Character/valueOf (char x)))))
+  "Box `x` as the Java wrapper class `cname` (a nullable Kotlin Int?, Long?, ...). nil stays nil. `what` (optional)
+  names the value in the error of a value that does not fit."
+  ([cname x] (box "the argument" cname x))
+  ([what ^String cname x]
+   (when (some? x)
+     (case cname
+       "java.lang.Integer" (to-int what x)
+       "java.lang.Long" (to-long what x)
+       "java.lang.Short" (to-short what x)
+       "java.lang.Byte" (to-byte what x)
+       "java.lang.Double" (Double/valueOf (.doubleValue (to-number what x)))
+       "java.lang.Float" (Float/valueOf (.floatValue (to-number what x)))
+       "java.lang.Character" (to-char what x)))))
 
 (defn coerce
-  "Convert `v` for a JVM parameter of class `c`: Clojure number -> Kotlin width. Nothing else."
-  [^Class c v]
-  (let [n (.getName c)]
-    (case n
-      "int" (Integer/valueOf (int (integral v)))
-      "long" (Long/valueOf (long (integral v)))
-      "short" (Short/valueOf (short (integral v)))
-      "byte" (Byte/valueOf (byte (integral v)))
-      "double" (Double/valueOf (double v))
-      "float" (Float/valueOf (float v))
-      "char" (Character/valueOf (char v))
-      ("java.lang.Integer" "java.lang.Long" "java.lang.Short" "java.lang.Byte" "java.lang.Double"
-       "java.lang.Float" "java.lang.Character") (box n v)
-      v)))
+  "Convert `v` for a JVM parameter of class `c`: Clojure number -> Kotlin width, checked (a kt error for nil in a
+  primitive slot, a wrong class and a value out of range). Nothing else. `what` (optional) names the value."
+  ([^Class c v] (coerce c "the argument" v))
+  ([^Class c what v]
+   (let [n (.getName c)]
+     (case n
+       "int" (to-int what v)
+       "long" (to-long what v)
+       "short" (to-short what v)
+       "byte" (to-byte what v)
+       "double" (Double/valueOf (.doubleValue (to-number what v)))
+       "float" (Float/valueOf (.floatValue (to-number what v)))
+       "char" (to-char what v)
+       "boolean" (to-bool what v)
+       ("java.lang.Integer" "java.lang.Long" "java.lang.Short" "java.lang.Byte" "java.lang.Double"
+        "java.lang.Float" "java.lang.Character") (box what n v)
+       v))))
 
 (defn ->array
   "Array of JVM class `array-class-name` from the collection `xs` (an array of that class passes through)."
@@ -224,7 +281,7 @@
 
 (def ^:private fn-invoke-method
   "Documented cache: arity -> the invoke Method of kotlin.jvm.functions.FunctionN."
-  (memoize
+  (mt/memo ::fn-invoke-method
    (fn [n]
      (.getMethod ^Class (r/jvm-class (str "kotlin.jvm.functions.Function" n)) "invoke"
                  ^"[Ljava.lang.Class;" (into-array Class (repeat n Object))))))
@@ -301,7 +358,7 @@
 
 (def ^:private wrapper-factory
   "Documented cache: JVM arity -> (fn [g td] wrapper), compiled once with `eval` (like `adapter-factory`)."
-  (memoize
+  (mt/memo ::wrapper-factory
    (fn [m] (binding [*ns* (the-ns 'ckway.rt)] (eval (wrapper-form m))))))
 
 (deftype KtFn [g td]
@@ -371,7 +428,7 @@
   `eval` from the same reify form that the static path emits, so an adapter made at run time is a
   real class: a checked exception that the Clojure function throws reaches Kotlin as itself
   (a java.lang.reflect.Proxy would wrap it in UndeclaredThrowableException)."
-  (memoize
+  (mt/memo ::adapter-factory
    (fn [spec]
      (let [g (gensym "g")]
        (binding [*ns* (the-ns 'ckway.rt)]
@@ -419,6 +476,47 @@
         :fi (adapt-arg (r/fi-spec (:class td) (:class td)) v)
         (check-obj td v)))))
 
+;; ---------------------------------------------------------------- JVM members of a class that no bridge can name
+
+(def ^:private handle-cache
+  "Documented cache: [static? class name desc] -> MethodHandle."
+  (mt/track-cache! (ConcurrentHashMap.)))
+
+(defn jvm-handle
+  "The MethodHandle of the JVM method `cname`.`mname``desc`, found with a private lookup, so a non-public method and a
+  method of a package-private class (a part of a Kotlin multi-file class, `StringsKt__StringsJVMKt`) work. A bridge
+  class (`ckway.bridge`) cannot name such a class; emitted code calls this instead (`call-jvm`). Cached."
+  ^MethodHandle [static? ^String cname ^String mname ^String desc]
+  (let [^ConcurrentHashMap cache handle-cache
+        k [static? cname mname desc]]
+    (or (.get cache k)
+        (let [^Class c (r/jvm-class cname)
+              lk (MethodHandles/privateLookupIn c (MethodHandles/lookup))
+              mt (MethodType/fromMethodDescriptorString desc (clojure.lang.RT/baseLoader))
+              mh (if static? (.findStatic lk c mname mt) (.findVirtual lk c mname mt))
+              ;; a method with `Object...` is a variable-arity handle: invoked with Object arguments, it would
+              ;; wrap the array that the call already passes
+              mh (.asFixedArity mh)]
+          (.put cache k mh)
+          mh))))
+
+(defn jvm-ctor-handle
+  "The MethodHandle of the constructor `cname``desc` (\"(I)V\"), found with a private lookup. Cached."
+  ^MethodHandle [^String cname ^String desc]
+  (let [^ConcurrentHashMap cache handle-cache
+        k [:new cname desc]]
+    (or (.get cache k)
+        (let [^Class c (r/jvm-class cname)
+              lk (MethodHandles/privateLookupIn c (MethodHandles/lookup))
+              mh (.asFixedArity (.findConstructor lk c (MethodType/fromMethodDescriptorString desc (clojure.lang.RT/baseLoader))))]
+          (.put cache k mh)
+          mh))))
+
+(defn call-jvm
+  "Call the MethodHandle `mh` (`jvm-handle`) with the vector `args` (the receiver first for a virtual method)."
+  [^MethodHandle mh args]
+  (.invokeWithArguments mh ^java.util.List args))
+
 ;; ---------------------------------------------------------------- reflection
 
 (defn- descriptor ^String [^Class ret params]
@@ -426,7 +524,7 @@
 
 (def ^:private find-member
   "Documented cache: [class name desc] -> reflective member."
-  (memoize
+  (mt/memo ::find-member
    (fn [cname mname desc]
      (let [^Class c (r/jvm-class cname)
            m (cond
@@ -490,16 +588,26 @@
               (.isPrimitive c) true
               :else (.isInstance c v))]
     (if ok?
-      (coerce c v)
+      (coerce c (str "the argument `" pname "` (" ptext ")") v)
       (r/fail (str "kt: parameter `" pname "` (" ptext ") expects " (.getName c) ", got " (.getName (class v)) " " (pr-str v)
                    (when sig (str "\n  Kotlin: " sig)))))))
+
+(defn- int-literal-reader
+  "`get` (a reader of a written value), but an integer LITERAL of the call that fits Int is an Integer when the JVM
+  class `c` is a supertype of Integer other than Integer itself (Object for `Any` and `T`, Number, Comparable):
+  Kotlin types such a literal as Int. The static path does the same (`ckway.resolve/conv-form`)."
+  [e get ^Class c]
+  (if (and c (= :int (:lit (:info e))) (not (.isPrimitive c)) (not= c Integer) (.isAssignableFrom c Integer))
+    (fn [argv] (let [v (get argv)]
+                 (if (and (instance? Long v) (<= Integer/MIN_VALUE (long v) Integer/MAX_VALUE)) (Integer/valueOf (int (long v))) v)))
+    get))
 
 (defn- arg-fn
   "Function of [argument vector, continuation] that gives the JVM value for the plan argument `a`.
   `sig` is the Kotlin declaration, for messages."
   [a sig]
   (cond
-    (:entry a) (let [get (entry-reader (:entry a))]
+    (:entry a) (let [get (int-literal-reader (:entry a) (entry-reader (:entry a)) (some-> (:jvm-type a) r/jvm-class))]
                  (if-let [c (some-> (:jvm-type a) r/jvm-class)]
                    (cond (:adapt a) (let [ad (:adapt a)] (fn [argv _] (adapt-arg ad (get argv))))
                          (:vc a) (let [un (unboxer (:vc a))] (fn [argv _] (un (get argv))))
@@ -511,7 +619,8 @@
     (:mask a) (let [m (Integer/valueOf (int (:mask a)))] (fn [_ _] m))
     (:marker a) (fn [_ _] nil)
     (:cont a) (fn [_ k] k)
-    (:vararg a) (let [rs (mapv entry-reader (:vararg a))
+    (:vararg a) (let [ect (some-> ^Class (r/jvm-class (:jvm-type a)) .getComponentType)
+                      rs (mapv #(int-literal-reader % (entry-reader %) ect) (:vararg a))
                       un (when-let [vc (:elem-vc a)] (unboxer vc))
                       jt (:jvm-type a)]
                   (fn [argv _] (->array jt (map (fn [r] (let [x (r argv)] (if un (un x) x))) rs))))
@@ -536,9 +645,17 @@
         susp? (:suspend? p)
         op (:op p)
         cname (:class p)
-        member (case op
-                 (:static :virtual :new) (find-member cname (if (= :new op) "<init>" (:name p)) (:desc p))
-                 nil)
+        ;; a class that cannot reflect (a member needs a class that is not there): a MethodHandle finds just this member
+        mh (when (:partial? p)
+             (case op
+               :static (jvm-handle true cname (:name p) (:desc p))
+               :virtual (jvm-handle false cname (:name p) (:desc p))
+               :new (jvm-ctor-handle cname (:desc p))
+               nil))
+        member (when-not mh
+                 (case op
+                   (:static :virtual :new) (find-member cname (if (= :new op) "<init>" (:name p)) (:desc p))
+                   nil))
         ^java.lang.reflect.Field field (case op
                                          (:get-static :get-field :set-static :set-field)
                                          (.getField ^Class (r/jvm-class cname) ^String (:field p))
@@ -558,9 +675,9 @@
             _ (dotimes [i n] (aset args i ((nth fns i) argv k)))
             res (try
                   (case op
-                    :static (.invoke ^Method member nil args)
-                    :virtual (.invoke ^Method member (target argv) args)
-                    :new (.newInstance ^Constructor member args)
+                    :static (if mh (call-jvm mh (vec args)) (.invoke ^Method member nil args))
+                    :virtual (if mh (call-jvm mh (into [(target argv)] args)) (.invoke ^Method member (target argv) args))
+                    :new (if mh (call-jvm mh (vec args)) (.newInstance ^Constructor member args))
                     :get-static (.get field nil)
                     :get-field (.get field (target argv))
                     :set-static (.set field nil (aget args 0))
@@ -580,7 +697,7 @@
   "An empty call cache. `kt/require` puts one in the metadata of each var (`:kt/cache`); a new var
   metadata is a new, empty cache, so a package that is required again has no stale entry."
   ^ConcurrentHashMap []
-  (ConcurrentHashMap.))
+  (mt/track-cache! (ConcurrentHashMap.)))
 
 (defn cached
   "The value of `build` (a function of no arguments) for `key` in `cache`, computed once. `cache` nil:
@@ -649,6 +766,22 @@
         {:keys [decl items checks]} (r/choose var-name decls parsed false)]
     (r/check-supported! decl checks)
     (prepare (r/plan decl items))))
+
+(declare call-dyn)
+
+(defn call-var
+  "The call of the kt var `v` as a VALUE (`(apply p/f xs)`, `(map p/f xs)`): the root function of the var. A keyword is
+  an ordinary positional value here; a call that fails says that named arguments need the written form."
+  [v args]
+  (try (call-dyn v (vec args) {})
+       (catch clojure.lang.ExceptionInfo e
+         (if (and (:kt/error (ex-data e)) (some keyword? args))
+           (throw (ex-info (str (ex-message e)
+                                "\n  Note: a var called as a value (apply, map, ...) takes positional arguments only, so a keyword is a "
+                                "value like any other. Named arguments need the written form: (" (name (.sym ^clojure.lang.Var v))
+                                " x :name value).")
+                           (ex-data e) e))
+           (throw e)))))
 
 (defn call-dyn
   "Dynamic call of the kt var `v` with positional values `pos` and named values `named` ({name value}).

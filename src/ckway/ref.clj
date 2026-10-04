@@ -147,7 +147,7 @@
 
 (def ^:private ^ConcurrentHashMap table
   "Documented cache: spec -> the reference. One entry for each declaration that a compiled form refers to."
-  (ConcurrentHashMap.))
+  (ckway.meta/track-cache! (ConcurrentHashMap.)))
 
 (defn const
   "The reference that the quoted `spec` describes; made the first time, the same object afterwards."

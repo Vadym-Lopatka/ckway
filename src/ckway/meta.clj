@@ -128,6 +128,58 @@
 
 (set! *warn-on-reflection* true)
 
+;; ---------------------------------------------------------------- caches
+
+(defonce ^:private resets (atom {}))
+
+(defn register-reset!
+  "Register the function `f` under the key `k` (a keyword) as the reset of one cache of the library. `clear-caches!`
+  calls all of them. A namespace registers its caches when it is loaded; the same key replaces the old function."
+  [k f]
+  (swap! resets assoc k f)
+  nil)
+
+(defonce ^:private tracked-maps (atom []))
+
+(defn track-cache!
+  "Remember the java.util.Map `m` (a call cache), weakly (by identity: a map's hash changes with its content), so that
+  `clear-caches!` can empty it. => m."
+  [m]
+  (swap! tracked-maps (fn [refs]
+                        (let [refs (if (zero? (mod (count refs) 4096))   ; drop the dead ones now and then
+                                     (filterv #(some? (.get ^java.lang.ref.WeakReference %)) refs)
+                                     refs)]
+                          (conj refs (java.lang.ref.WeakReference. m)))))
+  m)
+
+(defn memo
+  "`(memoize f)` for the library: the cache is registered under `k` (`clear-caches!` empties it) and a nil result is
+  never kept (a class that is not on the class path yet may be tomorrow)."
+  [k f]
+  (let [c (atom {})]
+    (register-reset! k #(reset! c {}))
+    (fn [& args]
+      (let [key (vec args)]
+        (if-let [e (find @c key)]
+          (val e)
+          (let [v (apply f args)]
+            (when (some? v) (swap! c assoc key v))
+            v))))))
+
+(defn clear-caches!
+  "Forget everything the library has cached: the package indexes, the jar listings, the class facts, the
+  declared-members and Kotlin-class tables, every memoized lookup (`jvm-class`...), the cached run-time
+  calls of every var and the table of `kt/ref` values. For the REPL workflow in which the class path changes
+  (a jar added with `add-lib`, a directory recompiled). Not public API: a repeated `kt/require` already notices
+  a changed class path by itself (`package-index` compares the class path it scanned with the current one).
+  Vars that `kt/require` made before keep their (now empty) caches and declarations; require the package again."
+  []
+  (doseq [f (vals @resets)] (f))
+  (doseq [^java.lang.ref.WeakReference r @tracked-maps
+          :let [m (.get r)] :when m]
+    (.clear ^java.util.Map m))
+  nil)
+
 ;; ---------------------------------------------------------------- names
 
 (defn internal->binary
@@ -168,44 +220,122 @@
 
 ;; ---------------------------------------------------------------- classpath scan
 
+(defn- url->file
+  "The File of a `file:` URL, or of the jar of a `jar:file:...!/` URL; nil for anything else. The URL form
+  (`%20` for a space) is decoded; a URL with a raw space (`File.toURL`) is taken as it is."
+  ^File [^java.net.URL u]
+  (try
+    (case (.getProtocol u)
+      "file" (try (File. (.toURI u)) (catch java.net.URISyntaxException _ (File. (.getPath u))))
+      "jar" (let [spec (.getPath u) i (.indexOf spec "!/")]
+              (url->file (java.net.URL. (if (neg? i) spec (subs spec 0 i)))))
+      nil)
+    (catch Exception _ nil)))
+
+(def ^:private manifest-cache
+  "Documented cache: [jar path, modified time] -> the Files of the `Class-Path:` of its manifest."
+  (atom {}))
+
+(defn- manifest-class-path
+  "The Files named by the `Class-Path:` attribute of the manifest of `jar` (URLs relative to the jar, separated by
+  spaces), the ones that exist."
+  [^File jar]
+  (let [k [(.getPath jar) (.lastModified jar)]]
+    (or (get @manifest-cache k)
+        (let [fs (try
+                   (with-open [jf (JarFile. jar)]
+                     (let [cp (some-> (.getManifest jf) .getMainAttributes (.getValue "Class-Path"))
+                           base (.toURI jar)]
+                       (vec (for [e (str/split (str/trim (or cp "")) #"\s+") :when (not (str/blank? e))
+                                  :let [f (try (File. (.resolve base ^String e)) (catch Exception _ nil))]
+                                  :when (and f (.exists ^File f))]
+                              f))))
+                   (catch Exception _ []))]
+          (swap! manifest-cache assoc k fs)
+          fs))))
+
+(defn- with-manifest-class-paths
+  "`files` and, after each jar, the jars that the `Class-Path:` of its manifest names (what the JVM follows too),
+  each once."
+  [files]
+  (loop [queue (seq files) seen #{} out []]
+    (if-let [^File f (first queue)]
+      (let [k (.getPath f)]
+        (if (seen k)
+          (recur (rest queue) seen out)
+          (recur (concat (when (.isFile f) (manifest-class-path f)) (rest queue)) (conj seen k) (conj out f))))
+      out)))
+
 (defn classpath-files
   "Directories and jars of the classpath, from java.class.path and URLClassLoaders (what Clojure's
-  DynamicClassLoader added too), as Files. `ckway.bridge.kotlinc` compiles against the same list."
+  DynamicClassLoader added too), and the jars that their manifests' `Class-Path:` name, as Files that exist.
+  `ckway.bridge.kotlinc` compiles against the same list. (A class loader that is no URLClassLoader is asked for the
+  resources of a package by `package-roots`.)"
   []
   (let [props (str/split (System/getProperty "java.class.path" "") (re-pattern File/pathSeparator))
         loaders (take-while some? (iterate #(.getParent ^ClassLoader %) (clojure.lang.RT/baseLoader)))
         urls (for [l loaders :when (instance? java.net.URLClassLoader l)
-                   u (.getURLs ^java.net.URLClassLoader l) :when (= "file" (.getProtocol ^java.net.URL u))]
-               (.getPath ^java.net.URL u))]
-    (->> (concat props urls) (remove str/blank?) distinct (map #(File. ^String %)) (filter #(.exists ^File %)))))
+                   u (.getURLs ^java.net.URLClassLoader l) :let [f (url->file u)] :when f]
+               f)]
+    (->> (concat (map #(File. ^String %) (remove str/blank? props)) urls)
+         (filter #(.exists ^File %))
+         (reduce (fn [[seen out] ^File f] (let [k (.getPath f)] (if (seen k) [seen out] [(conj seen k) (conj out f)]))) [#{} []])
+         second
+         with-manifest-class-paths)))
+
+(defn- package-roots
+  "The classpath entries (Files: directories and jars) that can hold the package `pkg`: `classpath-files`, and what
+  the class loaders say about the resources `pkg/` (a loader that is no URLClassLoader, an entry the property
+  `java.class.path` does not list). Both are used: a jar without directory entries has no resource for a package
+  directory, and a custom loader has no URL list."
+  [pkg]
+  (let [dir (str/replace pkg "." "/")
+        loaders (distinct (remove nil? [(clojure.lang.RT/baseLoader) (.getContextClassLoader (Thread/currentThread))]))
+        found (when-not (str/blank? pkg)
+                (for [^ClassLoader l loaders
+                      ^java.net.URL u (try (enumeration-seq (.getResources l dir)) (catch Exception _ []))
+                      :let [f (url->file u)] :when f
+                      :let [root (if (.isDirectory f)
+                                   (let [p (.getPath f)]
+                                     (when (str/ends-with? p (str File/separator (str/replace dir "/" File/separator)))
+                                       (File. (subs p 0 (- (count p) (count dir) 1)))))
+                                   f)]
+                      :when root]
+                  root))]
+    (->> (concat (classpath-files) found)
+         (reduce (fn [[seen out] ^File f] (let [k (.getPath f)] (if (seen k) [seen out] [(conj seen k) (conj out f)]))) [#{} []])
+         second)))
 
 (def ^:private jar-cache
-  "Documented cache: jar path -> {package-dir -> [class simple names]}."
+  "Documented cache: jar path and modified time -> {package-dir -> [class simple names]}."
   (atom {}))
+(register-reset! ::jar-cache #(reset! jar-cache {}))
+(register-reset! ::manifest-cache #(reset! manifest-cache {}))
 
 (defn- jar-packages [^File jar]
-  (or (get @jar-cache (.getPath jar))
-      (let [idx (with-open [jf (JarFile. jar)]
-                  (->> (enumeration-seq (.entries jf))
-                       (map #(.getName ^JarEntry %))
-                       (filter #(str/ends-with? ^String % ".class"))
-                       (group-by #(let [i (.lastIndexOf ^String % "/")] (if (neg? i) "" (subs % 0 i))))
-                       (into {} (map (fn [[d ns]] [d (mapv #(subs % (inc (.lastIndexOf ^String % "/")) (- (count %) 6)) ns)])))))]
-        (swap! jar-cache assoc (.getPath jar) idx)
-        idx)))
+  (let [k [(.getPath jar) (.lastModified jar)]]
+    (or (get @jar-cache k)
+        (let [idx (with-open [jf (JarFile. jar)]
+                    (->> (enumeration-seq (.entries jf))
+                         (map #(.getName ^JarEntry %))
+                         (filter #(str/ends-with? ^String % ".class"))
+                         (group-by #(let [i (.lastIndexOf ^String % "/")] (if (neg? i) "" (subs % 0 i))))
+                         (into {} (map (fn [[d ns]] [d (mapv #(subs % (inc (.lastIndexOf ^String % "/")) (- (count %) 6)) ns)])))))]
+          (swap! jar-cache assoc k idx)
+          idx))))
 
 (defn- class-names-in
   "Binary names of the class files that sit directly in `pkg` on the classpath."
   [pkg]
   (let [dir (str/replace pkg "." "/")
         prefix (if (str/blank? pkg) "" (str pkg "."))]
-    (->> (classpath-files)
+    (->> (package-roots pkg)
          (mapcat (fn [^File f]
                    (if (.isDirectory f)
                      (for [^File c (or (.listFiles (File. f dir)) []) :let [n (.getName c)]
                            :when (str/ends-with? n ".class")]
                        (subs n 0 (- (count n) 6)))
-                     (get (jar-packages f) dir))))
+                     (get (try (jar-packages f) (catch Exception _ {})) dir))))
          distinct sort
          (remove #(contains? #{"module-info" "package-info"} %))
          (mapv #(str prefix %)))))
@@ -225,37 +355,94 @@
                                 " (written by a newer Kotlin than kotlin-metadata-jvm? update the dependency)")
                            {:class (.getName c)} e))))))
 
-(declare km-type tparams)
+(declare km-type tparams value-class-info*)
 
 (def ^:private class-info-cache
-  "Documented cache: Kotlin internal class name -> {:value-class? :value-class :fun-interface?}."
+  "Documented cache: Kotlin internal class name -> {:value-class? :value-class :fun-interface?}. A class that cannot
+  be loaded is not cached (it may be on the class path later)."
   (atom {}))
+(register-reset! ::class-info-cache #(reset! class-info-cache {}))
 
 (defn- method-desc ^String [^Method m]
   (.toMethodDescriptorString (MethodType/methodType (.getReturnType m) (.getParameterTypes m))))
 
 (defn- declared-method
-  "The declared method of `c` with this name and (when given) descriptor."
+  "The declared method of `c` with this name and (when given) descriptor, or nil. Also nil when the class cannot
+  reflect (a member mentions a class that is not on the class path): see `member-flags`."
   ^Method [^Class c ^String n desc]
-  (first (filter (fn [^Method m] (and (= n (.getName m)) (or (nil? desc) (= desc (method-desc m)))))
-                 (.getDeclaredMethods c))))
+  (try (first (filter (fn [^Method m] (and (= n (.getName m)) (or (nil? desc) (= desc (method-desc m)))))
+                      (.getDeclaredMethods c)))
+       (catch LinkageError _ nil)))
+
+;; Reflection on a class fails as a whole (NoClassDefFoundError from getDeclaredMethods) when ONE member mentions a
+;; class that is not there. The access flags are then read from the class file itself.
+
+(defn- class-file-members
+  "{:methods {[name desc] flags} :fields {name flags}} read from the bytes of the class `binary`, or nil."
+  [^String binary]
+  (when-let [in (.getResourceAsStream (clojure.lang.RT/baseLoader) (str (str/replace binary "." "/") ".class"))]
+    (with-open [in in]
+      (let [d (java.io.DataInputStream. (java.io.BufferedInputStream. in))
+            _ (do (.readInt d) (.readUnsignedShort d) (.readUnsignedShort d))
+            n (.readUnsignedShort d)
+            cp (object-array n)]
+        (loop [i 1]
+          (when (< i n)
+            (let [tag (.readUnsignedByte d)]
+              (case (int tag)
+                1 (do (aset cp i (.readUTF d)) (recur (inc i)))
+                (3 4) (do (.readInt d) (recur (inc i)))
+                (5 6) (do (.readLong d) (recur (+ i 2)))
+                (7 8 16 19 20) (do (.readUnsignedShort d) (recur (inc i)))
+                (9 10 11 12 17 18) (do (.readInt d) (recur (inc i)))
+                15 (do (.readUnsignedByte d) (.readUnsignedShort d) (recur (inc i)))))))
+        (.readUnsignedShort d) (.readUnsignedShort d) (.readUnsignedShort d)
+        (dotimes [_ (.readUnsignedShort d)] (.readUnsignedShort d))
+        (let [skip-attrs (fn [] (dotimes [_ (.readUnsignedShort d)] (.readUnsignedShort d) (.skipBytes d (.readInt d))))
+              members (fn [] (vec (for [_ (range (.readUnsignedShort d))]
+                                    (let [flags (.readUnsignedShort d) nm (aget cp (.readUnsignedShort d)) ds (aget cp (.readUnsignedShort d))]
+                                      (skip-attrs)
+                                      [nm ds flags]))))
+              fields (members)
+              methods (members)]
+          {:fields (into {} (map (fn [[n _ f]] [n f]) fields))
+           :methods (into {} (map (fn [[n ds f]] [[n ds] f]) methods))
+           :kotlin? (boolean (some #(= "Lkotlin/Metadata;" %) cp))})))))
+
+(defn- member-flags
+  "The access flags (an int) of the JVM method `binary`.`name``desc`, or nil if the class has none such. Reflection,
+  and the class file when the class cannot reflect."
+  [^String binary ^String n desc]
+  (when-let [c (load-class binary)]
+    (if-let [^Method m (declared-method c n desc)]
+      (.getModifiers m)
+      (when-not (try (.getDeclaredMethods c) true (catch LinkageError _ false))
+        (let [ms (:methods (class-file-members binary))]
+          (if desc
+            (get ms [n desc])
+            (some (fn [[[mn _] f]] (when (= mn n) f)) ms)))))))
 
 (defn static-method?
   "Is the JVM method `owner`.`name``desc` static? nil when it cannot be found."
   [owner name desc]
-  (when-let [m (some-> (load-class owner) (declared-method name desc))]
-    (Modifier/isStatic (.getModifiers ^Method m))))
+  (some-> (member-flags owner name desc) Modifier/isStatic))
 
 (defn static-field?
   "Is the JVM field `owner`.`name` static? nil when it cannot be found."
   [owner name]
   (when-let [c (load-class owner)]
-    (when-let [f (first (filter (fn [^java.lang.reflect.Field f] (= name (.getName f))) (.getDeclaredFields c)))]
-      (Modifier/isStatic (.getModifiers ^java.lang.reflect.Field f)))))
+    (if-let [f (first (filter (fn [^java.lang.reflect.Field f] (= name (.getName f)))
+                              (try (.getDeclaredFields c) (catch LinkageError _ nil))))]
+      (Modifier/isStatic (.getModifiers ^java.lang.reflect.Field f))
+      (some-> (get (:fields (class-file-members owner)) name) Modifier/isStatic))))
 
 (defn- value-class-info
   "Description of a value class (see the namespace docstring), or nil if the JVM class has no
-  box-impl/unbox-impl."
+  box-impl/unbox-impl (or cannot reflect)."
+  [binary ^Class c ^KmClass k]
+  (try (value-class-info* binary c k) (catch LinkageError _ nil)))
+
+(defn- value-class-info*
   [binary ^Class c ^KmClass k]
   (let [unbox (first (filter (fn [^Method m] (and (= "unbox-impl" (.getName m)) (zero? (.getParameterCount m))))
                              (.getDeclaredMethods c)))
@@ -270,6 +457,21 @@
        :box {:class binary :name "box-impl" :desc (method-desc box) :static? true}
        :unbox {:class binary :name "unbox-impl" :desc (method-desc unbox) :static? false}})))
 
+(defn- object-method? [^Method m]
+  (some (fn [^Method o] (and (= (.getName o) (.getName m)) (= (vec (.getParameterTypes o)) (vec (.getParameterTypes m)))))
+        (.getMethods Object)))
+
+(defn- java-sam?
+  "Is `c` a Java interface with exactly one abstract method (not counting those of Object)? Kotlin converts a lambda to
+  such an interface; so does kt (like a Kotlin `fun interface`, rule 6). Not a Kotlin built-in (`kotlin/Comparable`
+  is no SAM type in Kotlin) and not a Kotlin interface (its metadata says whether it is a `fun interface`)."
+  [^Class c internal]
+  (boolean (and c (.isInterface c) (not (.isAnnotation c)) (not (str/starts-with? internal "kotlin/"))
+                (nil? (read-meta c))
+                (try (= 1 (count (remove object-method?
+                                         (filter (fn [^Method m] (Modifier/isAbstract (.getModifiers m))) (.getMethods c)))))
+                     (catch LinkageError _ false)))))
+
 (defn class-info
   "{:value-class? :value-class :fun-interface?} of the Kotlin class with this internal name (\"kotlin/UInt\").
   Documented cache."
@@ -283,8 +485,8 @@
                      value? (boolean (and k (Attributes/isValue k)))]
                  {:value-class? value?
                   :value-class (when value? (value-class-info binary c k))
-                  :fun-interface? (boolean (and k (Attributes/isFunInterface k)))})]
-      (swap! class-info-cache assoc internal info)
+                  :fun-interface? (boolean (or (and k (Attributes/isFunInterface k)) (java-sam? c internal)))})]
+      (when (load-class (internal->binary internal)) (swap! class-info-cache assoc internal info))
       info)))
 
 ;; ---------------------------------------------------------------- types
@@ -371,6 +573,22 @@
 
 (defn- sig-map [owner static? ^JvmMethodSignature s]
   (when s {:class owner :name (.getName s) :desc (.getDescriptor s) :static? static?}))
+
+(defn- with-access
+  "A JVM member map of a top-level declaration of a multi-file class part (`:class` is the part that really
+  declares the method, `facade` the public class that inherits it). Adds what the call needs to know:
+  `:public?` (the method is public) and, when it is public but the part is not (the usual case: a part is a
+  package-private class), `:call-class` - the facade, through which the public method is called directly (a static
+  method is inherited). A method that is not public (an `@InlineOnly` function is `private` in its part) has no
+  :call-class: the call goes through a bridge (`ckway.bridge`) that looks the method up in :class. A member that
+  the JVM class does not have is returned as it is."
+  [facade {:keys [class name desc] :as jvm}]
+  (if-let [flags (and jvm facade (member-flags class name desc))]
+    (let [pub? (Modifier/isPublic (int flags))
+          cls-pub? (Modifier/isPublic (.getModifiers (load-class class)))]
+      (cond-> (assoc jvm :public? pub?)
+        (and pub? (not cls-pub?)) (assoc :call-class facade)))
+    jvm))
 
 (defn- field-map [owner static? ^JvmFieldSignature s]
   (when s {:class owner :field (.getName s) :desc (.getDescriptor s) :static? static?}))
@@ -462,12 +680,12 @@
 (defn- function-decl
   "ctx = {:owner :tps :dispatch <receiver>|nil :jvm-extra {...}|nil :static? bool :instance-desc str
           :value-self bool}   ; value-self: the members of a value class (see `self-static`)"
-  [{:keys [owner tps dispatch jvm-extra static? instance-desc value-self class-tparams]} ^KmFunction f]
+  [{:keys [owner jvm-owner tps dispatch jvm-extra static? instance-desc value-self class-tparams]} ^KmFunction f]
   (let [tps (merge tps (tparams [(.getTypeParameters f)]))
         sig (JvmExtensionsKt/getSignature f)
         self? (self-static? value-self owner sig)
         static? (or static? self? (jvm-static? value-self owner sig))
-        jvm (some-> (sig-map owner static? sig) (merge jvm-extra))
+        jvm (some->> (some-> (sig-map (or jvm-owner owner) static? sig) (merge jvm-extra)) (with-access (when jvm-owner owner)))
         dtypes (when jvm (:params (desc-types (:desc jvm))))
         dispatch (cond-> dispatch (and self? dtypes) (assoc :jvm-type (first dtypes)))
         vps (.getValueParameters f)
@@ -482,7 +700,8 @@
         ret (km-type tps (.getReturnType f))
         tp (type-params-of tps (.getTypeParameters f))
         flags (cond-> (fn-flags f (:name jvm)) (not dispatch) (conj :static))
-        jvm (when jvm (cond-> jvm (some :default? params) (assoc :default (default-jvm jvm nvalue false instance-desc))))
+        jvm (when jvm (cond-> jvm (some :default? params)
+                              (assoc :default (with-access (when jvm-owner owner) (default-jvm jvm nvalue false instance-desc)))))
         name (.getName f)]
     (cond->
      {:kind :function :name name :var-name (if (seq rcvs) (str "." name) name)
@@ -494,16 +713,18 @@
       (seq class-tparams) (assoc :class-type-params class-tparams))))
 
 (defn- property-decl
-  [{:keys [owner tps dispatch static? field-owner value-self]} ^KmProperty p]
+  [{:keys [owner jvm-owner tps dispatch static? field-owner value-self]} ^KmProperty p]
   (let [tps (merge tps (tparams [(.getTypeParameters p)]))
+        jo (or jvm-owner owner)
+        facade (when jvm-owner owner)
         gsig (JvmExtensionsKt/getGetterSignature p)
         self? (self-static? value-self owner gsig)
-        getter (sig-map owner (or static? self? (jvm-static? value-self owner gsig)) gsig)
+        getter (with-access facade (sig-map jo (or static? self? (jvm-static? value-self owner gsig)) gsig))
         ssig (JvmExtensionsKt/getSetterSignature p)
-        setter (sig-map owner (or static? (jvm-static? value-self owner ssig)) ssig)
+        setter (with-access facade (sig-map jo (or static? (jvm-static? value-self owner ssig)) ssig))
         fsig (JvmExtensionsKt/getFieldSignature p)
-        field (field-map (or field-owner owner)
-                         (boolean (or static? field-owner (and fsig (static-field? owner (.getName fsig)))))
+        field (field-map (or field-owner jo)
+                         (boolean (or static? field-owner (and fsig (static-field? jo (.getName fsig)))))
                          fsig)
         const? (Attributes/isConst p)
         jvm (cond const? field getter getter :else field)
@@ -529,13 +750,16 @@
   (not (contains? #{MemberKind/FAKE_OVERRIDE MemberKind/DELEGATION} kind)))
 
 (defn- container-decls [ctx ^KmDeclarationContainer c]
+  ;; a member that cannot be linked is left out (the rest of the class stays)
   (concat
    (for [^KmFunction f (.getFunctions c)
-         :when (and (visible? (Attributes/getVisibility f)) (own-member? (Attributes/getKind f)))]
-     (function-decl ctx f))
+         :when (and (visible? (Attributes/getVisibility f)) (own-member? (Attributes/getKind f)))
+         :let [d (try (function-decl ctx f) (catch LinkageError _ nil))] :when d]
+     d)
    (for [^KmProperty p (.getProperties c)
-         :when (and (visible? (Attributes/getVisibility p)) (own-member? (Attributes/getKind p)))]
-     (property-decl ctx p))))
+         :when (and (visible? (Attributes/getVisibility p)) (own-member? (Attributes/getKind p)))
+         :let [d (try (property-decl ctx p) (catch LinkageError _ nil))] :when d]
+     d)))
 
 (defn- class-type [internal tps-list]
   {:class internal :nullable? false :args (mapv (fn [n] {:class nil :type-param n :nullable? false :args []}) tps-list)
@@ -661,17 +885,20 @@
 ;; ---------------------------------------------------------------- inherited members
 
 (def ^:private kotlin-class-cache
-  "Documented cache: Kotlin internal class name -> {:binary :km :internal} or nil (not a Kotlin class)."
+  "Documented cache: Kotlin internal class name -> {:binary :km :internal} or nil (a loaded class that is not a Kotlin
+  class). A class that cannot be loaded is not cached."
   (atom {}))
+(register-reset! ::kotlin-class-cache #(reset! kotlin-class-cache {}))
 
 (defn- kotlin-class [internal]
   (if-let [e (find @kotlin-class-cache internal)]
     (val e)
     (let [binary (internal->binary internal)
-          m (some-> (load-class binary) read-meta)
+          c (load-class binary)
+          m (some-> c read-meta)
           r (when (instance? KotlinClassMetadata$Class m)
               {:binary binary :internal internal :km (.getKmClass ^KotlinClassMetadata$Class m)})]
-      (swap! kotlin-class-cache assoc internal r)
+      (when c (swap! kotlin-class-cache assoc internal r))
       r)))
 
 (defn- member-ctx
@@ -688,10 +915,13 @@
 (def ^:private declared-members-cache
   "Documented cache: Kotlin internal class name -> the members that class declares."
   (atom {}))
+(register-reset! ::declared-members-cache #(reset! declared-members-cache {}))
+
+(declare finish-decls)
 
 (defn- declared-members [{:keys [binary internal km]}]
   (or (get @declared-members-cache internal)
-      (let [ds (vec (container-decls (member-ctx binary internal km) km))]
+      (let [ds (vec (finish-decls binary (container-decls (member-ctx binary internal km) km)))]
         (swap! declared-members-cache assoc internal ds)
         ds)))
 
@@ -756,21 +986,100 @@
             own (remove #(contains? inherited-keys (member-key %)) (container-decls (member-ctx binary internal k) k))]
         (concat (class-var-decls ctx k) own inherited)))))
 
-(defn- package-decls [owner ^KmDeclarationContainer pkg]
-  (concat (container-decls {:owner owner :tps {} :dispatch nil :static? true} pkg)
+(defn- package-decls
+  "The declarations of a file facade or of a part of a multi-file class. `owner` is the Kotlin-visible class (for a
+  part: the facade); `jvm-owner` (parts only) is the class that really declares the JVM members."
+  [owner ^KmDeclarationContainer pkg & [jvm-owner]]
+  (concat (container-decls (cond-> {:owner owner :tps {} :dispatch nil :static? true} jvm-owner (assoc :jvm-owner jvm-owner)) pkg)
           (for [^KmTypeAlias a (.getTypeAliases pkg) :when (visible? (Attributes/getVisibility a))]
             (alias-decl owner a))))
 
-(defn- class-file-decls [binary]
-  (when-let [c (load-class binary)]
+(defn- load-class!
+  "`load-class`, but a LinkageError (the class needs a class that is not there) is thrown, not turned into nil."
+  ^Class [^String n]
+  (try (Class/forName n false (clojure.lang.RT/baseLoader))
+       (catch ClassNotFoundException _ nil)))
+
+(defn- missing-name
+  "The class that a LinkageError says is missing (`pbopt.Missing`), else `fallback`."
+  [^Throwable e fallback]
+  (let [m (.getMessage e)
+        n (some-> m (str/split #"[ ]") first)]
+    (if (and n (re-matches #"[\w$./]+" n) (not (str/starts-with? m "Could not initialize")))
+      (str/replace n "/" ".")
+      fallback)))
+
+(defn- unloadable
+  "nil if the class `n` (a Class.getName style name) can be loaded, else the name of the class that is missing."
+  [^String n]
+  (try (Class/forName n false (clojure.lang.RT/baseLoader)) nil
+       (catch ClassNotFoundException _ n)
+       (catch LinkageError e (missing-name e n))))
+
+(defn- desc-class-names
+  "The classes (not primitives) that the JVM descriptor `desc` mentions."
+  [desc]
+  (when desc
+    (let [{:keys [params return]} (if (str/starts-with? desc "(") (desc-types desc) {:params [] :return (desc-type desc)})]
+      (->> (conj (vec params) return)
+           (map #(str/replace % #"^\[+" ""))
+           (map #(if (and (str/starts-with? % "L") (str/ends-with? % ";")) (subs % 1 (dec (count %))) %))
+           (remove #{"int" "long" "short" "byte" "double" "float" "boolean" "char" "void" "I" "J" "S" "B" "D" "F" "Z" "C"})))))
+
+(defn- finish-decls
+  "The declarations `ds` of the class file `binary`, each JVM member marked: `:partial? true` when its class cannot
+  reflect (one of its other members needs a class that is not there: Clojure's own compiler could not look the method
+  up, so the call goes through a MethodHandle), and the declaration `:missing \"pbopt.Missing\"` when the JVM
+  signature of its member mentions a class that is not there. Calling such a declaration is a kt error that names the
+  class (`ckway.resolve/check-supported!`); the other declarations of the class and package stay."
+  [binary ds]
+  (let [refl (atom {}) miss (atom {})
+        reflectable? (fn [cn] (if-let [e (find @refl cn)] (val e)
+                                (let [r (if-let [c (load-class cn)]
+                                          (try (.getDeclaredMethods c) (.getDeclaredFields c) (.getDeclaredConstructors c) (.getMethods c) true
+                                               (catch LinkageError _ false))
+                                          true)]
+                                  (swap! refl assoc cn r) r)))
+        missing (fn [cn] (if-let [e (find @miss cn)] (val e) (let [r (unloadable cn)] (swap! miss assoc cn r) r)))
+        mark1 (fn [m] (cond-> m (and (:class m) (not (reflectable? (:class m)))) (assoc :partial? true)))
+        mark (fn [m] (when m (cond-> (mark1 m) (:default m) (update :default mark1))))]
+    (mapv (fn [d]
+            (if (and (#{:function :property} (:kind d)) (or (:jvm d) (:getter d)))
+              (let [d (cond-> d (:jvm d) (update :jvm mark) (:getter d) (update :getter mark) (:setter d) (update :setter mark))
+                    ms (remove nil? [(:jvm d) (:getter d) (:setter d) (:default (:jvm d))])
+                    bad (some missing (distinct (mapcat #(desc-class-names (:desc %)) ms)))]
+                (cond-> d bad (assoc :missing bad)))
+              d))
+          ds)))
+
+(defn- unlinkable-class-decls
+  "What a class that cannot be linked (`e`, the LinkageError of loading it) leaves in the index: for a Kotlin class (the
+  class file mentions kotlin.Metadata) with a plain name, a placeholder declaration of its var that cannot be called;
+  its error names the missing class. Nothing for any other class."
+  [binary ^LinkageError e]
+  (let [[pkg simple] (let [i (.lastIndexOf ^String binary ".")] [(subs binary 0 (max 0 i)) (subs binary (inc i))])
+        k (try (class-file-members binary) (catch Exception _ nil))]
+    (when (and (:kotlin? k) (re-matches #"[A-Za-z_][A-Za-z0-9_]*" simple) (not (str/ends-with? simple "Kt")))
+      (let [internal (str (str/replace pkg "." "/") (when (seq pkg) "/") simple)
+            miss (missing-name e binary)]
+        [{:kind :class :name simple :var-name simple :owner binary :receivers [] :params []
+          :return (class-type internal []) :type-params [] :flags #{:no-constructor :unlinkable}
+          :missing miss :jvm nil :signature (str "class " simple)}]))))
+
+(defn- class-file-decls* [binary]
+  (when-let [c (load-class! binary)]
     (let [m (read-meta c)]
       (cond
         (instance? KotlinClassMetadata$Class m) (class-decls binary (.getKmClass ^KotlinClassMetadata$Class m))
         (instance? KotlinClassMetadata$FileFacade m) (package-decls binary (.getKmPackage ^KotlinClassMetadata$FileFacade m))
         (instance? KotlinClassMetadata$MultiFileClassPart m)
         (let [part ^KotlinClassMetadata$MultiFileClassPart m]
-          (package-decls (internal->binary (.getFacadeClassName part)) (.getKmPackage part)))
+          (package-decls (internal->binary (.getFacadeClassName part)) (.getKmPackage part) binary))
         :else []))))
+
+(defn- class-file-decls [binary]
+  (try (finish-decls binary (vec (class-file-decls* binary)))
+       (catch LinkageError e (unlinkable-class-decls binary e))))
 
 (defn class-members
   "Declarations of the members that the JVM class `binary` declares itself (not inherited ones)."
@@ -835,25 +1144,104 @@
           [(.getName a) (:alias (alias-decl b a))])))
 
 (def ^:private package-cache
-  "Documented cache: package name -> index."
+  "Documented cache: package name -> {:sig the class path state it was built from, :idx the index}. A package that has
+  no declaration is not cached. An entry is used only while the class path (the roots that can hold the package, with
+  the modification time of the jar or of the package directory in it) is the one it was built from."
   (atom {}))
+(register-reset! ::package-cache #(reset! package-cache {}))
+
+(defn- same-function?
+  "Are `a` and `b` one Kotlin function (or property)? A function that sits in two parts of one multi-file facade
+  (kotlinx.coroutines 1.11: `runBlocking` in `BuildersKt__BuildersKt`, and its `@JvmName(\"runBlockingK\")` twin of
+  another source set) is two JVM methods but one declaration: same facade, same Kotlin signature."
+  [a b]
+  (and (#{:function :property} (:kind a)) (= (:kind a) (:kind b))
+       (:jvm a) (:jvm b)
+       (= (:owner a) (:owner b)) (= (:signature a) (:signature b))
+       (= (:flags a) (:flags b))
+       (not= (:class (:jvm a)) (:owner a))))
+
+(defn- add-decl
+  "`ds` with the declaration `d` added, unless it is already there or is the same Kotlin function as one that
+  is (see `same-function?`); then the one whose JVM name is the Kotlin name is kept."
+  [ds d]
+  (cond
+    (some #(= d %) ds) ds
+    :else
+    (if-let [i (first (keep-indexed #(when (same-function? d %2) %1) ds))]
+      (if (and (not= (:name (:jvm (nth ds i))) (:name d)) (= (:name d) (:name (:jvm d))))
+        (assoc ds i d)
+        ds)
+      (conj ds d))))
 
 (defn- build-index [pkg]
   (->> (class-names-in pkg)
        (mapcat class-file-decls)
        (mapcat (fn [d] (if (= :alias (:kind d)) (cons d (alias-target-decls d)) [d])))
-       (reduce (fn [m d] (update m (:var-name d) (fn [ds] (if (some #(= d %) ds) ds (conj (or ds []) d)))))
+       (reduce (fn [m d] (update m (:var-name d) #(add-decl (or % []) d)))
                (sorted-map))))
 
-(defn package-index
-  "Index of the Kotlin package `pkg` (see the namespace docstring). Cached per package."
+(defn- classpath-signature
+  "What of the class path decides the index of `pkg`: its roots, with the modification time of the jar or of the
+  package directory in it."
   [pkg]
-  (or (get @package-cache pkg)
+  (let [dir (str/replace pkg "." "/")]
+    (vec (for [^File f (package-roots pkg)]
+           [(.getPath f) (if (.isDirectory f) (.lastModified (File. f dir)) (.lastModified f))]))))
+
+(defn package-index
+  "Index of the Kotlin package `pkg` (see the namespace docstring). Cached per package as long as the class path
+  is the same one; an empty index is never cached."
+  [pkg]
+  (let [sig (classpath-signature pkg)
+        e (get @package-cache pkg)]
+    (if (and e (= sig (:sig e)))
+      (:idx e)
       (let [idx (build-index pkg)]
-        (swap! package-cache assoc pkg idx)
-        idx)))
+        (if (seq idx)
+          (swap! package-cache assoc pkg {:sig sig :idx idx})
+          (swap! package-cache dissoc pkg))
+        idx))))
+
+(defn- class-packages
+  "Names of the packages that hold class files on the class path (for the hint of a package that is not there)."
+  []
+  (let [dirs (fn walk [^File root ^File d depth]
+               (when (< depth 8)
+                 (let [kids (or (.listFiles d) [])
+                       here (when (some #(str/ends-with? (.getName ^File %) ".class") kids)
+                              [(str/replace (str (.relativize (.toPath root) (.toPath d))) File/separator ".")])]
+                   (concat here (mapcat #(when (.isDirectory ^File %) (walk root % (inc depth))) kids)))))]
+    (->> (classpath-files)
+         (mapcat (fn [^File f]
+                   (if (.isDirectory f)
+                     (dirs f f 0)
+                     (try (map #(str/replace % "/" ".") (remove str/blank? (keys (jar-packages f)))) (catch Exception _ [])))))
+         (remove #(str/starts-with? % "META-INF"))
+         distinct)))
+
+(defn- edit-distance [^String a ^String b]
+  (let [n (count b)]
+    (peek (reduce (fn [prev ^Character ca]
+                    (reduce (fn [row j]
+                              (conj row (min (inc (peek row)) (inc (nth prev (inc j)))
+                                             (+ (nth prev j) (if (= ca (.charAt b j)) 0 1)))))
+                            [(inc (first prev))] (range n)))
+                  (vec (range (inc n))) a))))
+
+(defn similar-packages
+  "Up to five packages on the class path whose names are close to `pkg` (a typo) or that lie below it. For the error of
+  a `kt/require` that finds no class."
+  [pkg]
+  (let [all (class-packages)
+        below (filter #(str/starts-with? % (str pkg ".")) all)
+        near (->> all (remove (set below))
+                  (map (fn [n] [(edit-distance pkg n) n]))
+                  (filter (fn [[d _]] (<= d (max 2 (quot (count pkg) 4)))))
+                  (sort-by identity) (map second))]
+    (vec (take 5 (concat (sort below) near)))))
 
 (defn clear-cache!
-  "Forget cached indexes (tests, or after the classpath changed)."
+  "Forget everything the library has cached. Same as `clear-caches!` (kept for the old name)."
   []
-  (reset! package-cache {}))
+  (clear-caches!))
