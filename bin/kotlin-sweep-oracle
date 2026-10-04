@@ -1,0 +1,37 @@
+#!/bin/sh
+# Kotlin's own choice for each call of the stdlib sweep (ckway.sweep, ckway.round7-test): which JVM method does
+# `fun k<id>(r: ..., a0: ...): Any? = r.name(a0)` call? The file is compiled with -Xno-inline (an inline function then
+# stays a call) and the first call of each function is read from the byte code. Nothing is run.
+#   <id> TAB STATIC TAB owner.name:descriptor   Kotlin calls this static method (an extension)
+#   <id> TAB MEMBER TAB owner.name:descriptor   Kotlin calls a member of the receiver
+#   <id> TAB AMBIGUOUS | NONE | ERROR           kotlinc refuses the call: overload resolution ambiguity; no candidate
+#                                               for these types; another error (a deprecation, a type it cannot infer)
+# Usage: bin/kotlin-sweep-oracle <Kotlin file> <output file>
+cd "$(dirname "$0")/.." || exit 1
+SRC="$1"; OUT="$2"
+W=target/oracle/sweep
+rm -rf "$W" && mkdir -p "$W/classes"
+: > "$OUT.tmp"
+if ! kotlinc -Xno-inline -module-name sweep -nowarn "$SRC" -d "$W/classes" 2> "$W/err.txt"; then
+  grep -E '\.kt:[0-9]+:[0-9]+: error: ' "$W/err.txt" | sed -E 's/^.*\.kt:([0-9]+):[0-9]+: error: (.*)$/\1 \2/' | awk '
+    { kind = "ERROR" }
+    /overload resolution ambiguity/ { kind = "AMBIGUOUS" }
+    /none of the following candidates is applicable|argument type mismatch|unresolved reference|too many arguments|no value passed for parameter/ { kind = "NONE" }
+    !($1 in seen) { seen[$1] = 1; print $1, kind }' > "$W/lines.txt"
+  [ -s "$W/lines.txt" ] || { cat "$W/err.txt" >&2; exit 1; }
+  awk -v out="$OUT.tmp" 'NR == FNR { ans[$1] = $2; next }
+    (FNR in ans) { if (match($0, /^fun k[0-9]+\(/)) { print substr($0, RSTART + 5, RLENGTH - 6) "\t" ans[FNR] >> out; print ""; next }
+                   print "bin/kotlin-sweep-oracle: a compiler error on a line that is no call: " $0 > "/dev/stderr"; exit 1 }
+    { print }' "$W/lines.txt" "$SRC" > "$W/Sweep.kt" || exit 1
+  kotlinc -Xno-inline -module-name sweep -nowarn "$W/Sweep.kt" -d "$W/classes" 2> "$W/err2.txt" || { cat "$W/err2.txt" >&2; exit 1; }
+fi
+pkg=$(sed -n 's/^package \(.*\)$/\1/p' "$SRC" | head -1)
+cls=$(basename "$SRC" .kt)Kt
+javap -p -c -cp "$W/classes" "$pkg.$cls" | awk '
+  / k[0-9]+\(/ { match($0, / k[0-9]+\(/); id = substr($0, RSTART + 2, RLENGTH - 3); done = 0; next }
+  /invoke(static|virtual|interface|special)/ && !done && id != "" {
+    target = $NF
+    if (target ~ /^kotlin\/jvm\/internal\/Intrinsics\./ || target ~ /^java\/lang\/(Integer|Long|Boolean|Character|Double|Float|Short|Byte)\.valueOf/ || target ~ /^kotlin\/coroutines\/jvm\/internal\/Boxing\./) next
+    kind = ($0 ~ /invokestatic/ && target ~ /^kotlin\//) ? "STATIC" : "MEMBER"
+    print id "\t" kind "\t" target; done = 1 }' >> "$OUT.tmp" || exit 1
+mv "$OUT.tmp" "$OUT"

@@ -225,6 +225,14 @@ A constructor parameter counts as a property when the class has a public propert
   `ClassCastException`.
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
+* A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
+  `@PublishedApi`; `protected`; `private`), and a hidden-deprecated one (`@Deprecated(level = DeprecationLevel.HIDDEN)`, or
+  `@DeprecatedSinceKotlin(hiddenSince = ...)`: the stdlib's old `maxBy` that returns `T?`, the one-parameter `Channel(capacity)`
+  of kotlinx.coroutines). The Kotlin metadata does not mark a hidden declaration; `kt` reads it from the class file
+  (the JVM member is synthetic and has the annotation). For a class that cannot reflect (19) that check is not made.
+  `@JvmSynthetic`, `@SinceKotlin` and `@RequiresOptIn` declarations ARE vars (Kotlin can call them). So is a declaration
+  with `@Deprecated(level = DeprecationLevel.ERROR)`: Kotlin refuses a call of it at compile time, `kt` makes the call
+  (`(kc/.sort xs f)` of the stdlib then throws `NotImplementedError`: that is its body).
 
 ## 11. Kotlin metadata
 
@@ -253,6 +261,11 @@ The keys are keywords there too (`":a"`). The remedy is to hand over a Java map 
 (`(java.util.HashMap. m)`) or a Kotlin data class (`kt/data` goes the other way: class to map). `(instance? Iterable m)`
 and `(instance? java.util.Map m)` are both true for a map; for a vector only the first is. kt does not change the value:
 a map is passed as it is.
+
+The choice between overloads sees the same two faces. `(kc/.toMap {1 2})` (`kc` is `kotlin.collections`) is ambiguous:
+`Iterable<Pair<K, V>>.toMap()` and `Map<K, V>.toMap()` both take a Clojure map, and neither type is a subtype of the
+other. Say which one you mean with a hint, `(kc/.toMap ^java.util.Map m)`, or pass a `java.util.HashMap`, which is no
+`Iterable`.
 
 ## 13. A value in a `def` var has no static type
 
@@ -480,8 +493,9 @@ number parameter (an `Int` literal prefers `Int`) never hides a disadvantage on 
 b: Int)` and `mx(a: String, b: Long)`, `(p/mx "s" 1)` is ambiguous (kotlinc says so for `mx("s", 1)`). A var used as a value
 has no literal: `(let [f p/mx] (f "s" 1))` passes a `Long`, which only the `Long` overload takes, as `mx("s", 1L)` in Kotlin.
 
-The whole choice is Kotlin's (`ckway.resolve/most-specific`; `test/ckway/round6_test.clj` compares 109 calls with what
-`kotlinc` itself chooses):
+The whole choice is Kotlin's (`ckway.resolve/most-specific`; `test/ckway/round6_test.clj` and `round7_test.clj` compare
+155 calls with what `kotlinc` itself chooses, and 1052 calls of the overloaded extension functions of `kotlin.collections`,
+`kotlin.sequences` and `kotlin.text`):
 
 * Two candidates are compared by the argument that each parameter receives, wherever a named argument puts it. With
   `oo(a: Int, b: Long)` and `oo(b: Int, a: Short)`, `(p/oo :a 1 :b 2)` is ambiguous, as in Kotlin.
@@ -496,15 +510,43 @@ The whole choice is Kotlin's (`ckway.resolve/most-specific`; `test/ckway/round6_
   With `s5(a: Long, b: String = "d")` and `s5(a: Int, b: CharSequence = "d", c: Int = 0)`, `(p/s5 1 "x")` is ambiguous (each
   is better on one parameter), though only the second leaves a default out.
 * A Clojure function at a `fun interface` parameter is compared as the function type of its method (Kotlin: SAM
-  conversion), by the number of parameters. Between a function type and a `fun interface` that are equally specific,
-  the function type is taken: `(c/.sort xs (fn [a b] ...))` is `sort(comparison: (T, T) -> Int)`, not `sort(comparator)`.
+  conversion), by the number of parameters. Between a function type and a Kotlin `fun interface` that are equally
+  specific, the function type is taken (`a3(f: (Int) -> Int)` before `a3(f: FI)`). A candidate that takes the
+  function at a JAVA functional interface (`Comparator`, `IntUnaryOperator`) is used only when every candidate does,
+  whatever the other parameters are: `a5(a: Any, f: FI)` is taken before `a5(a: String, f: IntUnaryOperator)`, as kotlinc does.
+* Two generic candidates: the type parameters of the less specific one are inferred from the parameter types of the
+  other, one binding for all parameters, within the declared bounds (`ckway.resolve`, `bind-var!`). So
+  `MutableList<T>.removeAll(predicate)` is more specific than `MutableIterable<T>.removeAll(predicate)`, and
+  `u5(a: MutableList<T>, b: MutableList<T>)` than `u5(a: MutableCollection<A>, b: MutableCollection<B>)`. What this cannot
+  decide (a bound such as `T : Comparable<T>`) makes the two unrelated, never a guess.
+* A value is passed as what it IS before it is passed as a function. A vector, a map, a set, a keyword and a var can all
+  be called (`clojure.lang.IFn`), and `kt` adapts them to a function type when that is the only way
+  (`(kc/.map xs {1 :a})`, `(let [k :name] (kc/.map xs k))`). That adapter is a conversion, like `kt`'s own conversion
+  of a number: a candidate that needs it is used only when no candidate takes the values as they are. `(kc/.removeAll ml
+  [1 2])` is `removeAll(elements: Collection<T>)`, not `removeAll(predicate)`. A Clojure function (`fn`) is a function:
+  no conversion. (The result of the adapted value is checked as any function's: a set as a predicate returns the
+  element, not a `Boolean`, so `(kc/.filter xs #{1 2})` is a `kt:` error; write `(fn [x] (contains? s x))`.)
+
+An override and the member that it overrides are one member, whatever the JVM does with them: `override fun amt(): W`
+(a value class: JVM name `amt-<hash>`) over `fun amt(): Any`, `override fun put(x: String)` in a `Box<String>` over
+`put(x: T)`. `ckway.meta` records the Kotlin override relation on the declaration (`:overrides`); for a receiver whose
+class overrides a member, the overridden declaration is no candidate. The call is the override's JVM method, with its
+narrowed result type.
 
 A member that a class has through two unrelated supertypes (`interface Q1 { fun run2(): String }`, `interface Q2 { fun
 run2(): String }`, `class QC : Q1, Q2`) is one member: `(p/.run2 (p/QC))` is one virtual call. Members are the same when
-they are both functions (or both properties) of one Kotlin name with the same JVM name and JVM parameter types; `pm(x:
-Int)` and `pm(x: Long)` stay two overloads. Not covered: two supertypes that declare the member with parameter types that
-differ only before erasure (`interface G<T> { fun f(x: T) }`, `interface H { fun f(x: String) }`, `class C : G<String>, H`):
-their JVM parameter types differ, so `(p/.f (p/C) "x")` is chosen by specificity (`H.f`), which is the same method here.
+they are both functions (or both properties) of one Kotlin name with the same written parameter types; `pm(x:
+Int)` and `pm(x: Long)` stay two overloads, and so do members whose parameter types name a type parameter of their
+class (`A<T>.f(x: T)`, `B<T>.f(x: T)`). A receiver that you hint as ONE of the interfaces can still leave out an argument
+whose default the other interface declares (`interface W1 { fun wd(x: Int = 1) }`, `interface W2 { fun wd(x: Int) }`,
+`class WC : W1, W2`: `(p/.wd ^W2 x)` is `"wd1"`); Kotlin refuses that for a `W2`. The hint is an upper bound there, and
+the object decides.
+
+What the JVM erases stays a limit in two more shapes. Two candidates on the SAME class that differ only in the bound of
+a type parameter (`fun <T> MutableList<T>.u4()`, `fun <T : Comparable<T>> MutableList<T>.u4()`): Kotlin chooses by what
+the list holds, `kt` says ambiguous. And a read-only `List` is a `java.util.List`, as a `MutableList` is: where the
+stdlib has one overload for each (`asReversed`, `withDefault` for maps), a `listOf` and a Clojure vector get the
+`MutableList` one (`(kc/.asReversed [1 2 3])` is a `ReversedList` view; reading it is fine).
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
 seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the
@@ -513,6 +555,10 @@ error says that the element type cannot be seen, and the way out is to pass the 
 
 An `inline` candidate has no public JVM method (`(c/.sumOf xs f)`: "no public JVM method (it is `inline`): write it in
 Clojure"). Write the loop in Clojure.
+
+A member of a Java class is not a var either, so where Kotlin would call the Java member, a Kotlin extension of the
+same name can be chosen: `(tx/.append sb 1)` (`tx` is `kotlin.text`) is the extension `StringBuilder.append(value: Short)`,
+Kotlin's `sb.append(1)` is Java's `append(int)`; the results are equal.
 
 The members of Kotlin's built-in types (`Int.rangeTo`, `Map.keys`, `Map.getOrDefault`) are not vars. Use the extensions (`until`, `downTo`, `step`:
 `(r/.until 1 4)` is an `IntRange`) or Clojure's functions. A var of the same name can be another declaration:

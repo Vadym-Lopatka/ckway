@@ -37,4 +37,9 @@ kotlinc -module-name late -nowarn test-fixtures/late/*.kt -d target/late-classes
 # Java interfaces next to the Kotlin ones (kt/reify: one written form for a Java and a Kotlin leaf of one member)
 javac -cp "target/fixtures:$CORO" -d target/fixtures test-fixtures/java/pj/*.java || exit 1
 # Kotlin's own answers for the selection comparison of ckway.round6-test (Z4): target/fixtures/round6-oracle.txt
-bin/kotlin-oracle "target/fixtures" target/fixtures/round6-oracle.txt || exit 1
+bin/kotlin-oracle "target/fixtures" target/fixtures/round6-oracle.txt test-fixtures/oracle/Round6Calls.kt || exit 1
+# the same for ckway.round7-test (W2 to W4)
+bin/kotlin-oracle "target/fixtures" target/fixtures/round7-oracle.txt test-fixtures/oracle/Round7Calls.kt || exit 1
+# the stdlib sweep of ckway.round7-test (W2): ckway.sweep writes the calls, kotlinc says which declaration each one is
+java -cp "src:test:$(clojure -Spath -A:coro)" clojure.main -m ckway.sweep target/gen-src/sweep/Sweep.kt target/fixtures/round7-sweep-cases.edn || exit 1
+bin/kotlin-sweep-oracle target/gen-src/sweep/Sweep.kt target/fixtures/round7-sweep-oracle.txt || exit 1

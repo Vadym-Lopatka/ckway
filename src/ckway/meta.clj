@@ -90,6 +90,9 @@
     :setter-visibility  (a `var` with an accessor) :public|:internal|:private|:protected - the Kotlin visibility of
                  the setter. `private set` has no JVM setter at all, `internal set` a mangled non-public one:
                  only a :public setter can be called (`ckway.set`).
+    :overrides   (an override only) the set of the JVM members ([class name descriptor], `jvm-member-id`) of every
+                 declaration that this one overrides, on all levels: the Kotlin override relation (`override-key`).
+                 `ckway.resolve` drops an overridden declaration when the class of the receiver has the override.
     :signature   the Kotlin signature as text (used in docs and errors); a generic function shows its
                  type parameters: `inline fun <reified T : Number> sumAs(vararg xs: Int): String`
 
@@ -370,13 +373,21 @@
 (defn- method-desc ^String [^Method m]
   (.toMethodDescriptorString (MethodType/methodType (.getReturnType m) (.getParameterTypes m))))
 
+(def ^:private method-table
+  "Documented cache: Class -> {[name descriptor] Method} of its declared methods, or nil when the class cannot reflect."
+  (memo ::method-table
+        (fn [^Class c]
+          (try (into {} (map (fn [^Method m] [[(.getName m) (method-desc m)] m])) (.getDeclaredMethods c))
+               (catch LinkageError _ nil)))))
+
 (defn- declared-method
   "The declared method of `c` with this name and (when given) descriptor, or nil. Also nil when the class cannot
   reflect (a member mentions a class that is not on the class path): see `member-flags`."
   ^Method [^Class c ^String n desc]
-  (try (first (filter (fn [^Method m] (and (= n (.getName m)) (or (nil? desc) (= desc (method-desc m)))))
-                      (.getDeclaredMethods c)))
-       (catch LinkageError _ nil)))
+  (if desc
+    (get (method-table c) [n desc])
+    (try (first (filter (fn [^Method m] (= n (.getName m))) (.getDeclaredMethods c)))
+         (catch LinkageError _ nil))))
 
 ;; Reflection on a class fails as a whole (NoClassDefFoundError from getDeclaredMethods) when ONE member mentions a
 ;; class that is not there. The access flags are then read from the class file itself.
@@ -797,6 +808,37 @@
      :setter-visibility (when-let [^KmPropertyAccessorAttributes a (.getSetter p)] (keyword (str/lower-case (str (Attributes/getVisibility a)))))
      :signature (str (if (Attributes/isVar p) "var " "val ") (subs (sig-text :property name rcvs [] ret) 4))}))
 
+;; A hidden-deprecated declaration: `@Deprecated(level = DeprecationLevel.HIDDEN)`, or `@DeprecatedSinceKotlin(hiddenSince
+;; = "1.6")` (the stdlib's old `maxBy`, which returned `T?`). Kotlin source cannot call it (the compiler keeps it for
+;; old binaries only), so it is no var. The Kotlin metadata does not say it; the class file does: kotlinc makes the
+;; JVM member ACC_SYNTHETIC and keeps the annotations (a property has them on its synthetic `...$annotations` method).
+;; ACC_SYNTHETIC alone is not enough: `@JvmSynthetic` sets it too, and Kotlin calls such a function.
+(defn- hidden-deprecated?
+  [^java.lang.reflect.AnnotatedElement e]
+  (boolean (when e
+             (try (or (when-let [^kotlin.Deprecated a (.getAnnotation e kotlin.Deprecated)]
+                        (= kotlin.DeprecationLevel/HIDDEN (.level a)))
+                      (when-let [^kotlin.DeprecatedSinceKotlin a (.getAnnotation e kotlin.DeprecatedSinceKotlin)]
+                        (not (str/blank? (.hiddenSince a)))))
+                  (catch Throwable _ false)))))
+
+(defn- hidden-method?
+  "Is the JVM method `sig` of the class `cname` a hidden-deprecated declaration? `annotations?`: it is the synthetic
+  method that holds the annotations of a property. false when the class cannot reflect."
+  [cname ^JvmMethodSignature sig annotations?]
+  (boolean (when-let [c (and sig (load-class cname))]
+             (when-let [m (declared-method c (.getName sig) (.getDescriptor sig))]
+               (and (or annotations? (.isSynthetic m)) (hidden-deprecated? m))))))
+
+(defn- hidden-ctor?
+  [^Class c ^JvmMethodSignature sig]
+  (boolean (when (and c sig)
+             (some (fn [^java.lang.reflect.Constructor k]
+                     (and (.isSynthetic k)
+                          (= (.getDescriptor sig) (.toMethodDescriptorString (MethodType/methodType Void/TYPE (.getParameterTypes k))))
+                          (hidden-deprecated? k)))
+                   (try (.getDeclaredConstructors c) (catch LinkageError _ nil))))))
+
 (defn- own-member?
   "A fake override or a delegation is not a declaration: the walk over the supertypes finds the original."
   [kind]
@@ -806,11 +848,14 @@
   ;; a member that cannot be linked is left out (the rest of the class stays)
   (concat
    (for [^KmFunction f (.getFunctions c)
-         :when (and (visible? (Attributes/getVisibility f)) (own-member? (Attributes/getKind f)))
+         :when (and (visible? (Attributes/getVisibility f)) (own-member? (Attributes/getKind f))
+                    (not (hidden-method? (or (:jvm-owner ctx) (:owner ctx)) (JvmExtensionsKt/getSignature f) false)))
          :let [d (try (function-decl ctx f) (catch LinkageError _ nil))] :when d]
      d)
    (for [^KmProperty p (.getProperties c)
-         :when (and (visible? (Attributes/getVisibility p)) (own-member? (Attributes/getKind p)))
+         :when (and (visible? (Attributes/getVisibility p)) (own-member? (Attributes/getKind p))
+                    (not (some #(hidden-method? % (JvmExtensionsKt/getSyntheticMethodForAnnotations p) true)
+                               (distinct (remove nil? [(:jvm-owner ctx) (:owner ctx) (:field-owner ctx)])))))
          :let [d (try (property-decl ctx p) (catch LinkageError _ nil))] :when d]
      d)))
 
@@ -851,7 +896,10 @@
       "OBJECT" [{:kind :object :name simple :var-name simple :owner binary :receivers [] :params [] :return ret
                  :type-params [] :flags flags :jvm {:class binary :instance-field "INSTANCE" :static? true}
                  :signature (sig-text :object simple [] [] ret)}]
-      (let [ctors (for [^KmConstructor c (.getConstructors k) :when (visible? (Attributes/getVisibility c))]
+      (let [jc (load-class binary)
+            ctors (for [^KmConstructor c (.getConstructors k)
+                        :when (and (visible? (Attributes/getVisibility c))
+                                   (not (hidden-ctor? jc (JvmExtensionsKt/getSignature c))))]
                     (ctor-decl ctx c))
             entries (for [n (.getEnumEntries k)]
                       {:kind :enum-entry :name n :var-name (str simple "." n) :owner binary :receivers [] :params []
@@ -965,14 +1013,6 @@
      :dispatch {:role :dispatch :type (cond-> self vc (assoc :value-class? true :value-class vc))}
      :instance-desc (str "L" (str/replace binary "." "/") ";")}))
 
-(defn- member-key
-  "Two members with the same key are the same Kotlin member (an override has the key of its original)."
-  [d]
-  (let [tt #(type-text (:type %))]
-    (case (:kind d)
-      :function [:function (:name d) (mapv tt (:params d)) (mapv tt (remove #(= :dispatch (:role %)) (:receivers d)))]
-      [(:kind d) (:name d)])))
-
 (defn- with-inherited-defaults
   "The override `d` with the default values of the declaration it overrides. Kotlin metadata marks a default value only on
   the ORIGINAL declaration (an override may not repeat it), and a call that omits the parameter runs the `$default`
@@ -994,24 +1034,65 @@
                                (sig-text :function (:name d) (:receivers d) params ret (:type-params d)))))
       d)))
 
+(defn- subst-type
+  "The <type> `t` with the type parameters that `env` ({name <type>}) names replaced."
+  [env t]
+  (cond
+    (or (nil? t) (:star? t) (empty? env)) t
+    (and (:type-param t) (contains? env (:type-param t)))
+    (let [r (get env (:type-param t))]
+      (cond-> r (and (:nullable? t) (not (:star? r))) (assoc :nullable? true)))
+    :else (cond-> t
+            (seq (:args t)) (update :args (fn [as] (mapv #(subst-type env %) as)))
+            (:fn-type t) (update :fn-type (fn [f] (-> f
+                                                      (update :args (fn [as] (mapv #(subst-type env %) as)))
+                                                      (update :return #(subst-type env %))))))))
+
+(defn- override-key
+  "The key of the Kotlin override relation: a member of a class overrides the member of a supertype that has the same
+  kind, name and parameter types (and extension and context receiver types), with the type arguments that the class
+  gives to the supertype put in place of the supertype's type parameters (`env`: `Box<String>` makes `put(x: T)` the
+  `put(x: String)` that a subclass overrides). The function's own type parameters count by position, not by name.
+  Nothing of the JVM is in the key: an override can have another JVM name (a value class in its signature mangles it)."
+  [d env]
+  (let [env (merge env (into {} (map-indexed (fn [i p] [(:name p) {:class nil :type-param (str "#" i) :nullable? false :args []}])
+                                             (when (= :function (:kind d)) (:type-params d)))))
+        tt #(type-text (subst-type env (:type %)))]
+    [(:kind d) (:name d) (mapv tt (:params d)) (mapv tt (remove #(= :dispatch (:role %)) (:receivers d)))]))
+
+(defn jvm-member-id
+  "The identity of the JVM member that `d` stands for: [declaring class, JVM name (or field), descriptor]; for a
+  declaration without a JVM member (the placeholder of a class without a constructor, an alias) the declaration itself."
+  [d]
+  (let [m (if (= :property (:kind d)) (or (:getter d) (:jvm d)) (:jvm d))]
+    (if (:class m)
+      [(:class m) (or (:name m) (:field m) (:instance-field m)) (:desc m)]
+      d)))
+
 (def ^:private declared-members-cache
   "Documented cache: Kotlin internal class name -> the members that class declares."
   (atom {}))
 (register-reset! ::declared-members-cache #(reset! declared-members-cache {}))
 
-(declare finish-decls inherited-decls)
+(declare finish-decls inherited-members)
 
 (defn- declared-members
   "The members that the Kotlin class declares itself, overrides included: THE declaration of each of them. Everything
   that shows such a member - the var of the class's own package, the var of a subclass in any package (`inherited-decls`),
   `own-declarations`, `primary-properties` - takes the map from here, so they all see one and the same declaration.
-  An override has the default values that it inherits (`with-inherited-defaults`): a fact about the member, not about
-  the path that reached it. Cached; `refresh?` reads the class again (the index of its own package is being built)."
+  What an override takes from the members it overrides (`override-key`) is established here, as facts about the member,
+  not about the path that reached it: the default values that it inherits (`with-inherited-defaults`), and `:overrides`,
+  the set of the `jvm-member-id`s of every declaration that it overrides, on all levels. Cached; `refresh?` reads the
+  class again (the index of its own package is being built)."
   [{:keys [binary internal km]} & [refresh?]]
   (or (when-not refresh? (get @declared-members-cache internal))
-      (let [originals (group-by member-key (inherited-decls km))
+      (let [originals (reduce (fn [m [d env]] (update m (override-key d env) (fnil conj []) d)) {} (inherited-members km))
             ds (->> (container-decls (member-ctx binary internal km) km)
-                    (map #(with-inherited-defaults % (originals (member-key %))))
+                    (map (fn [d]
+                           (let [os (originals (override-key d nil))
+                                 ids (into #{} (comp (mapcat #(cons (jvm-member-id %) (:overrides %))) (filter vector?)) os)]
+                             (cond-> (with-inherited-defaults d os)
+                               (seq ids) (assoc :overrides ids)))))
                     (finish-decls binary)
                     vec)]
         (swap! declared-members-cache assoc internal ds)
@@ -1031,28 +1112,42 @@
         (filter #(= (.getName c) (:owner %))
                 (declared-members {:binary (.getName c) :internal (.getName k) :km k}))))))
 
-(defn- supertype-names [^KmClass k]
-  (for [^KmType t (.getSupertypes k)
-        :let [c (.getClassifier t)]
-        :when (instance? KmClassifier$Class c)]
-    (.getName ^KmClassifier$Class c)))
+(defn- supertypes
+  "[internal name, type arguments] of the supertypes of the class `k` that are classes; the type arguments are in the
+  terms of `k` (its type parameters by name), with `env` (what the type parameters of `k` stand for) put in."
+  [^KmClass k env]
+  (let [tps (tparams [(.getTypeParameters k)])]
+    (for [^KmType t (.getSupertypes k)
+          :let [c (.getClassifier t)]
+          :when (instance? KmClassifier$Class c)]
+      [(.getName ^KmClassifier$Class c) (mapv #(subst-type env %) (:args (km-type tps t)))])))
 
-(defn- inherited-decls
-  "Public members that the Kotlin supertypes of `k` declare, transitively (superclass and
+(defn- inherited-members
+  "[declaration env] for the public members that the Kotlin supertypes of `k` declare, transitively (superclass and
   interfaces; they can be in another package or jar). The declarations are the ones of the
-  supertype itself (`declared-members`): owner and call target are the supertype, so the call is virtual. A supertype
-  that is reached on several paths (a diamond) is read once. A supertype
+  supertype itself (`declared-members`): owner and call target are the supertype, so the call is virtual. `env` says
+  what the type parameters of that supertype are for `k` ({\"T\" <type>}: `class SBox : Box<String>`), for
+  `override-key`. A supertype that is reached on several paths (a diamond) is read once. A supertype
   without Kotlin metadata (Java class, kotlin.Any, mapped types) ends the walk on its branch."
   [^KmClass k]
-  (loop [queue (supertype-names k) seen #{} out []]
-    (if-let [n (first queue)]
-      (let [sc (when-not (seen n) (kotlin-class n))]
-        (recur (if sc (concat (rest queue) (supertype-names (:km sc))) (rest queue))
+  (loop [queue (supertypes k nil) seen #{} out []]
+    (if-let [[n args] (first queue)]
+      (let [sc (when-not (seen n) (kotlin-class n))
+            ^KmClass sk (:km sc)
+            env (when sc
+                  (let [names (map #(.getName ^KmTypeParameter %) (.getTypeParameters sk))]
+                    (when (= (count names) (count args)) (into {} (remove (comp :star? val)) (zipmap names args)))))]
+        (recur (if sc (concat (rest queue) (supertypes sk env)) (rest queue))
                (conj seen n)
-               (if (and sc (visible? (Attributes/getVisibility ^KmClass (:km sc))))
-                 (into out (declared-members sc))
+               (if (and sc (visible? (Attributes/getVisibility sk)))
+                 (into out (map (fn [d] [d env])) (declared-members sc))
                  out)))
       out)))
+
+(defn- inherited-decls
+  "The declarations of `inherited-members`."
+  [^KmClass k]
+  (map first (inherited-members k)))
 
 (defn- class-decls
   "All declarations contributed by one Kotlin class (its own var, members, companion members)."
@@ -1066,6 +1161,7 @@
         self-type (class-type internal (map #(.getName ^KmTypeParameter %) (.getTypeParameters k)))]
     (cond
       (not (visible? vis)) []
+      (hidden-deprecated? (load-class binary)) []
       (contains? #{ClassKind/ENUM_ENTRY ClassKind/ANNOTATION_CLASS} kind) []
       (= ClassKind/COMPANION_OBJECT kind)
       ;; members of a companion hang off the outer class var
@@ -1081,7 +1177,10 @@
       (let [ctx {:binary binary :internal internal :kcls k :tps tps :flags flags :kind kind
                  :value-class (when (Attributes/isValue k) (:value-class (class-info internal)))}
             inherited (inherited-decls k)
-            by-key (group-by member-key inherited)
+            ;; what this class LISTS is decided on the types as they are written (`override-key` without the type
+            ;; arguments of the supertypes): `put(x: String)` over `put(x: T)` is listed, a caller must see the `String`
+            text-key #(override-key % nil)
+            by-key (group-by text-key inherited)
             ret-text #(some-> (:return %) type-text)
             ;; the class's own members are the declarations that every other reader gets (`declared-members`)
             own-all (declared-members {:binary binary :internal internal :km k} true)
@@ -1090,11 +1189,11 @@
             ;; must see (the result is a String), so it replaces the original
             ;; (not for the result type of the original that is a type parameter of its class: `T` made `String` by a
             ;; subclass of `Lazy<String>` is the same member, the original stands for it)
-            narrowing? (fn [d] (when-let [is (by-key (member-key d))]
+            narrowing? (fn [d] (when-let [is (by-key (text-key d))]
                                  (every? #(and (not= (ret-text d) (ret-text %)) (nil? (:type-param (:return %)))) is)))
-            narrowed-keys (set (map member-key (filter narrowing? own-all)))
-            own (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))) own-all)
-            inherited (remove #(contains? narrowed-keys (member-key %)) inherited)]
+            narrowed-keys (set (map text-key (filter narrowing? own-all)))
+            own (remove #(and (contains? by-key (text-key %)) (not (narrowing? %))) own-all)
+            inherited (remove #(contains? narrowed-keys (text-key %)) inherited)]
         (concat (class-var-decls ctx k) own inherited)))))
 
 (defn- package-decls
@@ -1271,15 +1370,6 @@
        (= (:owner a) (:owner b)) (= (:signature a) (:signature b))
        (= (:flags a) (:flags b))
        (not= (:class (:jvm a)) (:owner a))))
-
-(defn- jvm-member-id
-  "The identity of the JVM member that `d` stands for: [declaring class, JVM name (or field), descriptor]; for a
-  declaration without a JVM member (the placeholder of a class without a constructor, an alias) the declaration itself."
-  [d]
-  (let [m (if (= :property (:kind d)) (or (:getter d) (:jvm d)) (:jvm d))]
-    (if (:class m)
-      [(:class m) (or (:name m) (:field m) (:instance-field m)) (:desc m)]
-      d)))
 
 (defn- add-decl
   "`ds` with the declaration `d` added, unless its JVM member is already there (one Kotlin member is one declaration of

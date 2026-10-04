@@ -612,7 +612,12 @@
       ;; a reference type. How close the parameter type is to the class of the argument does not choose between
       ;; candidates: Kotlin's specificity rule does (`most-specific`), which compares the parameter types
       (.isAssignableFrom pc ac) [:ok (if (= pc Object) 3 1)]
-      (and (:adapt slot) (isa? ac clojure.lang.IFn)) [:adapter (:feature (:adapt slot))]
+      ;; a function goes to a function type or a `fun interface` through an adapter. For a value that is no function
+      ;; itself (a vector, a map, a set, a keyword, a var: all IFn) the adapter is a CONVERSION, like the library's own
+      ;; conversion of a number: `choose` uses a candidate that needs one only when no candidate takes the values as
+      ;; they are (a vector is a List before it is a function)
+      (and (:adapt slot) (isa? ac clojure.lang.IFn))
+      (cond-> [:adapter (:feature (:adapt slot))] (not (isa? ac clojure.lang.Fn)) (conj :conv))
       :else [:no (str "`" (:name slot) "` is " (.getSimpleName pc) " but got " (.getSimpleName ac))])))
 
 (defn- vararg-slot
@@ -697,13 +702,20 @@
 
 (defn- return-conv
   "Conversion of the result of `decl` (see `vc-conv`); the constructor of a value class returns
-  the underlying value."
-  [decl]
-  (cond
-    (and (= :class (:kind decl)) (:value-class decl)) {:vc (:value-class decl) :nullable? false}
-    ;; the JVM result of a suspend function is Object: a value class is the object itself
-    (:suspend (:flags decl)) nil
-    :else (vc-conv (:return decl) (return-jvm-name decl))))
+  the underlying value. `called` (optional) is the JVM member that the call really runs when it is not the member of
+  `decl` itself: the `$default` synthetic. For an override that inherits its defaults that is the synthetic of the
+  ORIGINAL, with the original's JVM result type: where the original returns `Any` (JVM Object) and the override a value
+  class over a primitive, the Object is the box, not the underlying value."
+  ([decl] (return-conv decl nil))
+  ([decl called]
+   (cond
+     (and (= :class (:kind decl)) (:value-class decl)) {:vc (:value-class decl) :nullable? false}
+     ;; the JVM result of a suspend function is Object: a value class is the object itself
+     (:suspend (:flags decl)) nil
+     :else (let [jt (or (some-> (:desc called) meta/desc-types :return) (return-jvm-name decl))]
+             (when-not (and called (= "java.lang.Object" jt)
+                            (not= "java.lang.Object" (:jvm-underlying (:value-class (:return decl)))))
+               (vc-conv (:return decl) jt))))))
 
 (defn- return-class
   "Boxed JVM class of the value that a call of `decl` returns, when it is known and more specific
@@ -815,36 +827,85 @@
 
 (declare type-eq? type-sub? args-sub?)
 
-(defn- own-var? [t own] (boolean (and (:type-param t) (contains? own (:type-param t)))))
+;; Two generic candidates. Kotlin asks whether the parameter types of X could be passed to Y, with the type parameters of
+;; Y as fresh variables that are inferred from X's types. `env` is that question for one pair of candidates:
+;;   :own     the names of Y's type parameters (the variables)
+;;   :bounds  {name [upper bounds]} of Y's type parameters, :xbounds the same for X's (they are fixed types here)
+;;   :binds   an atom, {name {:exact <type>} | {:lower [<type> ...]}}: what each variable has to be so far. It is one
+;;            for ALL parameters of the pair, so a variable is bound consistently (`u5(a: MutableList<T>, b: MutableList<T>)`).
+;; What this cannot decide is NOT a subtype: the candidates are then unrelated, never a guess.
+
+(def ^:private no-vars {:own #{}})
+
+(defn- own-var? [t env] (boolean (and (:type-param t) (contains? (:own env) (:type-param t)))))
+
+(defn- within-bounds?
+  "Does the type `t` (in X's terms) satisfy the declared upper bounds of Y's type variable `n`?"
+  [t n env]
+  (every? (fn [b]
+            (if (:type-param t)
+              (some #(type-sub? % b env) (get (:xbounds env) (:type-param t)))
+              (type-sub? t b env)))
+          (get (:bounds env) n)))
+
+(defn- bind-var!
+  "Y's type variable `ty` meets X's type `tx`: `:eq` - it has to BE that type (an invariant position), `:sub` - `tx`
+  has to be a subtype of it (it then is `tx` or a supertype). => true when the variable can still be bound so that
+  everything seen so far holds (and the binding is recorded), else false. `bounds?` false: the caller has checked
+  the upper bound itself (a parameter whose whole type is the variable: its JVM class is the bound)."
+  [tx ty env mode bounds?]
+  (let [n (:type-param ty)
+        binds (:binds env)
+        t (cond-> tx (:nullable? ty) (assoc :nullable? false))   ; `T?` takes `String?` with T = String
+        b (get @binds n)
+        sub? (fn [x y] (type-sub? x y no-vars))
+        ok (cond
+             (or (nil? tx) (:star? tx)) false
+             ;; `String` is not `T?`, whatever T is
+             (and (= :eq mode) (:nullable? ty) (not (:nullable? tx))) false
+             (:exact b) (if (= :eq mode) (type-eq? t (:exact b) no-vars) (sub? t (:exact b)))
+             (= :eq mode) (when (every? #(sub? % t) (:lower b)) {:exact t})
+             ;; several lower bounds: the variable is a common supertype. Without a declared bound there always is one;
+             ;; with one, only when the types are in line
+             (or (empty? (:lower b)) (empty? (get (:bounds env) n))
+                 (some #(sub? t %) (:lower b)) (every? #(sub? % t) (:lower b)))
+             {:lower (conj (vec (:lower b)) t)})]
+    (cond
+      (not ok) false
+      (true? ok) true
+      :else (let [before @binds]
+              (swap! binds assoc n ok)
+              (if (or (not bounds?) (within-bounds? t n env))
+                true
+                (do (reset! binds before) false))))))
 
 (defn- type-eq?
-  "Are the Kotlin types `tx` and `ty` the same type? `own`: the names of the type parameters of the declaration of `ty`
-  (unknown types that can be anything; here they are not decided: false)."
-  [tx ty own]
+  "Are the Kotlin types `tx` and `ty` the same type? A type variable of Y is bound to `tx` (`bind-var!`)."
+  [tx ty env]
   (cond
     (:star? ty) (boolean (:star? tx))
     (:star? tx) false
-    (own-var? ty own) false
+    (own-var? ty env) (bind-var! tx ty env :eq true)
     (:type-param ty) (and (= (:type-param tx) (:type-param ty)) (= (boolean (:nullable? tx)) (boolean (:nullable? ty))))
     (:type-param tx) false
     :else (and (= (:class tx) (:class ty))
                (= (boolean (:nullable? tx)) (boolean (:nullable? ty)))
                (= (count (:args tx)) (count (:args ty)))
-               (every? true? (map #(type-eq? %1 %2 own) (:args tx) (:args ty))))))
+               (every? true? (map #(type-eq? %1 %2 env) (:args tx) (:args ty))))))
 
 (defn- type-sub?
   "Is the Kotlin type `tx` (of a nested type argument) a subtype of `ty`? See `args-sub?`."
-  [tx ty own]
+  [tx ty env]
   (cond
     (:star? ty) true
     (:star? tx) false
-    (own-var? ty own) true
+    (own-var? ty env) (bind-var! tx ty env :sub true)
     (:type-param ty) (and (= (:type-param tx) (:type-param ty)) (or (:nullable? ty) (not (:nullable? tx))))
     (and (:class ty) (= "kotlin/Any" (:class ty)))
     (and (or (:nullable? ty) (not (:nullable? tx))) (not (and (:type-param tx) (not (:nullable? ty)))))
     (:type-param tx) false
     (not (or (:nullable? ty) (not (:nullable? tx)))) false
-    (or (:fn-type tx) (:fn-type ty)) (type-eq? (assoc tx :nullable? false) (assoc ty :nullable? false) own)
+    (or (:fn-type tx) (:fn-type ty)) (type-eq? (assoc tx :nullable? false) (assoc ty :nullable? false) env)
     :else
     (let [^Class jx (types/jvm-class tx) ^Class jy (types/jvm-class ty)]
       (cond
@@ -852,13 +913,13 @@
         (not (.isAssignableFrom jy jx)) false
         (and (mutable-kotlin? ty) (not (mutable-kotlin? tx))) false
         (empty? (:args ty)) true
-        :else (args-sub? tx ty jx jy own)))))
+        :else (args-sub? tx ty jx jy env)))))
 
 (defn- args-sub?
   "Do the type arguments of `tx` fit those of `ty`, where the class of `tx` (JVM `jx`) is a subtype of that of `ty` (`jy`)?
   The type arguments of `tx` are mapped to the parameters of `ty`'s class through the generic supertypes of `jx`; each
   pair is compared by the declared variance of `ty`'s class (a use-site projection overrides it)."
-  [tx ty ^Class jx ^Class jy own]
+  [tx ty ^Class jx ^Class jy env]
   (let [idxs (super-arg-indices jx jy)
         variances (meta/class-variances (:class ty))
         axs (:args tx) ays (:args ty)]
@@ -874,28 +935,32 @@
                          (:star? ay) true
                          (nil? ax) false
                          (and (:variance ax) (not= (:variance ax) v)) false
-                         (= v :out) (type-sub? ax ay own)
-                         (= v :in) (and (not-any? #(own-var? % own) (tree-seq :args :args ay)) (type-sub? ay ax own))
-                         :else (type-eq? ax ay own))))
+                         (= v :out) (type-sub? ax ay env)
+                         ;; a contravariant position does not bind a variable: it only checks one that is bound exactly
+                         (= v :in) (if (own-var? ay env)
+                                     (boolean (when-let [t (:exact (get @(:binds env) (:type-param ay)))] (type-sub? t ax no-vars)))
+                                     (and (not-any? #(own-var? % env) (tree-seq :args :args ay)) (type-sub? ay ax env)))
+                         :else (type-eq? ax ay env))))
                    ays))))))
 
 (defn- args-fit?
   "The type-argument part of `slot-subtype?`: true unless both types are generic, of different Kotlin classes, and
   the arguments of `sx`'s type do not fit those of `sy`'s."
-  [sx sy]
+  [sx sy env]
   (let [kx (:kotlin-type sx) ky (:kotlin-type sy)]
     (if (and (seq (:args kx)) (seq (:args ky)) (:class kx) (:class ky) (not= (:class kx) (:class ky))
              (not (:fn-type kx)) (not (:fn-type ky)))
       (let [jx (types/jvm-class kx) jy (types/jvm-class ky)]
-        (boolean (and jx jy (.isAssignableFrom ^Class jy ^Class jx) (args-sub? kx ky jx jy (:own sy)))))
+        (boolean (and jx jy (.isAssignableFrom ^Class jy ^Class jx) (args-sub? kx ky jx jy env))))
       true)))
 
 (defn- slot-subtype?
   "Is a value of the parameter slot `sx` always accepted where `sy` is declared (Kotlin: `sx` is a subtype of `sy`)?
   `T` is a subtype of `T?`; the JVM classes decide the rest, plus Kotlin's mapped types: `MutableList` is a subtype
   of `List`, not the other way round, though both are java.util.List; and the type arguments (`args-fit?`). A type
-  that is no class (`T`) is `Any?`."
-  [sx sy]
+  that is no class (`T`) is `Any?`; when it is a type variable of the candidate of `sy`, it is bound to the type of
+  `sx` (`env`, see above), so that it means the same type at every parameter."
+  [sx sy env]
   (let [cx (or (some-> ^Class (:class sx) box-class) Object)
         cy (or (some-> ^Class (:class sy) box-class) Object)
         kx (:kotlin-type sx) ky (:kotlin-type sy)]
@@ -904,7 +969,9 @@
           (.isAssignableFrom cy cx)
           ;; a read-only Kotlin collection is not a subtype of a mutable one
           (not (and (mutable-kotlin? ky) (not (mutable-kotlin? kx)) (:class kx)))
-          (args-fit? sx sy)))))
+          (if (and kx (own-var? ky env))
+            (bind-var! kx ky env :sub false)
+            (args-fit? sx sy env))))))
 
 (def ^:private interface-function-shape
   "[number of Kotlin parameters, suspend?] of the one abstract method of the interface `iface` (a JVM class name), or
@@ -945,11 +1012,10 @@
   and `:conv?` when it fits only after the library's own conversion of a number (`numeric-tier`); and `:fn-shape`
   when the argument is a Clojure function at a function type or a `fun interface` (`function-shape`)."
   [b]
-  (let [own (set (map :name (:type-params (:decl b))))
-        fit (fn [slot check entry]
+  (let [fit (fn [slot check entry]
               (assoc slot :conv? (= :conv (nth check 2 nil)) :tier (when (= :ok (first check)) (second check))
                      :fn-shape (function-shape slot (:info entry))))]
-    (loop [sl (map #(assoc % :own own) (slots (:decl b))) items (:items b) checks (:checks b) out {}]
+    (loop [sl (slots (:decl b)) items (:items b) checks (:checks b) out {}]
       (if (empty? sl)
         out
         (let [slot (first sl) item (first items)
@@ -987,18 +1053,31 @@
   `x` that takes it is a subtype of the type of the parameter of `y` that takes it (or the preferred number type, or,
   for a Clojure function, a function of the same shape: `function-shape`)."
   [x y]
-  (let [sx (entry-slots x) sy (entry-slots y)]
+  (let [sx (entry-slots x) sy (entry-slots y)
+        bounds (fn [tps] (into {} (map (fn [p] [(:name p) (vec (:bounds p))])) tps))
+        env {:own (set (map :name (:type-params (:decl y))))
+             :bounds (bounds (:type-params (:decl y)))
+             :xbounds (bounds (concat (:class-type-params (:decl x)) (:type-params (:decl x))))
+             :binds (atom {})}]
     (every? (fn [[i s]]
               (if-let [t (get sy i)]
-                (or (slot-subtype? s t) (number-preferred? s t)
+                (or (slot-subtype? s t env) (number-preferred? s t)
                     (and (:fn-shape s) (= (:fn-shape s) (:fn-shape t))))
                 true))
             sx)))
 
-(defn- sam-conversion?
-  "Does the candidate take a Clojure function at a `fun interface` parameter (Kotlin: a SAM conversion of a lambda)?"
+(def ^:private kotlin-interface?
+  "Is the interface `iface` (a JVM class name) written in Kotlin (a `fun interface`), not in Java? Documented cache."
+  (meta/memo ::kotlin-interface?
+             (fn [iface] (if-let [^Class c (jvm-class iface)] (some? (.getAnnotation c kotlin.Metadata)) false))))
+
+(defn- sam-conversion
+  "How the candidate takes a Clojure function where Kotlin would convert a lambda (SAM conversion): nil - only at
+  function types; :kotlin - at a Kotlin `fun interface`; :java - at a Java functional interface."
   [b]
-  (boolean (some #(and (:fn-shape %) (= :fi (:kind (:adapt %)))) (vals (entry-slots b)))))
+  (let [kinds (set (for [s (vals (entry-slots b)) :when (and (:fn-shape s) (= :fi (:kind (:adapt s))))]
+                     (if (kotlin-interface? (:iface (:adapt s))) :kotlin :java)))]
+    (or (:java kinds) (:kotlin kinds))))
 
 (defn- erased-same?
   "Do the candidates take the same JVM parameter types, though their Kotlin parameter types differ? Then they differ
@@ -1032,30 +1111,35 @@
 (defn most-specific
   "The choice among the applicable `candidates` (maps with :decl, :items and :checks), as Kotlin makes it; everything
   that compares two candidates is here.
+    0. A candidate that takes a function at a JAVA functional interface is used only when every candidate does
+       (kotlinc: `a(x: Any, f: FI)` is taken before `a(x: String, f: IntUnaryOperator)` for `a(\"s\") { it }`).
     1. The most specific candidates by parameter types: those that are at least as specific as every other one
        (`at-least-as-specific?`). One: it is chosen. Several: each is as specific as the other, and only then the
        shape decides (`best-shape`: no `vararg`, fewer defaults used).
     2. If that chose nothing: the same again, with a function that has no type parameters taken as more specific than
        a generic one, whatever their parameter types (not when only an erased type argument tells them apart).
     3. If that chose nothing: the same again among the candidates that take a function as a function type, when the
-       others take it as a `fun interface` (Kotlin: a candidate without SAM conversion is taken first).
+       others take it as a Kotlin `fun interface` (Kotlin: a candidate without SAM conversion is taken first).
   => [the candidate], or the candidates that the call is ambiguous between (those that no other candidate is strictly
   more specific than)."
   [candidates]
-  (if (< (count candidates) 2)
-    (vec candidates)
-    (let [top (fn [at-least?] (filter (fn [c] (every? #(or (identical? c %) (at-least? c %)) candidates)) candidates))
-          choose (fn [at-least?] (let [t (top at-least?)] (if (= 1 (count t)) (first t) (best-shape t))))
-          non-generic-first (fn [x y] (if (= (generic? x) (generic? y)) (at-least-as-specific? x y) (generic? y)))
-          plain (remove sam-conversion? candidates)]
-      (if-let [c (or (choose at-least-as-specific?)
-                     (when-not (type-argument-in-play? candidates) (choose non-generic-first))
-                     (when (< 0 (count plain) (count candidates))
-                       (let [r (most-specific plain)] (when (= 1 (count r)) (first r)))))]
-        [c]
-        (vec (remove (fn [c] (some #(and (not (identical? c %)) (at-least-as-specific? % c) (not (at-least-as-specific? c %)))
-                                   candidates))
-                     candidates))))))
+  (let [kotlin-only (remove #(= :java (sam-conversion %)) candidates)]
+    (cond
+      (< (count candidates) 2) (vec candidates)
+      (< 0 (count kotlin-only) (count candidates)) (most-specific kotlin-only)
+      :else
+      (let [top (fn [at-least?] (filter (fn [c] (every? #(or (identical? c %) (at-least? c %)) candidates)) candidates))
+            choose (fn [at-least?] (let [t (top at-least?)] (if (= 1 (count t)) (first t) (best-shape t))))
+            non-generic-first (fn [x y] (if (= (generic? x) (generic? y)) (at-least-as-specific? x y) (generic? y)))
+            plain (remove sam-conversion candidates)]
+        (if-let [c (or (choose at-least-as-specific?)
+                       (when-not (type-argument-in-play? candidates) (choose non-generic-first))
+                       (when (< 0 (count plain) (count candidates))
+                         (let [r (most-specific plain)] (when (= 1 (count r)) (first r)))))]
+          [c]
+          (vec (remove (fn [c] (some #(and (not (identical? c %)) (at-least-as-specific? % c) (not (at-least-as-specific? c %)))
+                                     candidates))
+                       candidates)))))))
 
 ;; ---------------------------------------------------------------- ambiguity messages
 
@@ -1090,7 +1174,7 @@
                                                "no public JVM method (it is `inline`): write it in Clojure")))))]
     (cond
       ;; every candidate needs the library's own conversion of a number (an integer for a Double or a Float...)
-      (every? (fn [b] (some #(= :conv (nth % 2 nil)) (:checks b))) best)
+      (every? (fn [b] (some #(and (= :ok (first %)) (= :conv (nth % 2 nil))) (:checks b))) best)
       (str "\n  Why: every candidate needs a number that the argument is not: kt would have to convert it (an integer "
            "to a Double or a Float, a Long to an Int...), and it cannot choose the target. Kotlin refuses such a call too."
            "\n  Way out: write the number as the type you mean: a floating-point literal (`4.0`) or a conversion "
@@ -1120,46 +1204,53 @@
        (str/join "\n" (for [{:keys [decl reason]} rejected]
                         (str "    " (:signature decl) "\n      -> " reason)))))
 
-(defn- virtual-key
-  "What makes member declarations ONE virtual call for an object that is an instance of each of their declaring
-  classes: the kind (a function or a property), the Kotlin name, the JVM name and the JVM parameter types of an instance
-  method, suspend or not, and the roles of the receivers. The JVM dispatches an instance method by its name and
-  parameter types to the one implementation that the class of the object has, whichever class or interface the call
-  names; an override may narrow the result type. nil for anything else: a top-level function or extension, a member
-  that the JVM has as a static method or a field, a member of a companion (its receiver is the class var)."
-  [d]
-  (let [m (if (= :property (:kind d)) (:getter d) (:jvm d))
-        desc (:desc m)
-        dispatch (first (filter #(= :dispatch (:role %)) (:receivers d)))]
-    (when (and (#{:function :property} (:kind d)) dispatch (not (:companion-of dispatch))
-               (:name m) desc (not (:field m)) (not (:static? m)))
-      [(:kind d) (:name d) (:name m) (subs desc 0 (inc (.indexOf ^String desc ")")))
-       (boolean (:suspend (:flags d))) (mapv :role (:receivers d))])))
+(defn- overridden-ids
+  "The `jvm-member-id`s of the declarations that one of the candidates (maps with :decl) overrides (`:overrides` of a
+  declaration: the Kotlin override relation that `ckway.meta` establishes)."
+  [candidates]
+  (into #{} (mapcat (comp :overrides :decl)) candidates))
 
 (defn drop-overridden
-  "Of the candidates (maps with :decl), drop a member that a candidate of a subclass overrides: they are one virtual
-  member (`virtual-key`), and the owner of the other is a strict subclass (`JobSupport.join` overrides `Job.join`).
-  They are one Kotlin member, so a call is not ambiguous."
+  "Of the candidates (maps with :decl), drop a member that another candidate overrides (`JobSupport.join` overrides
+  `Job.join`). They are one Kotlin member, whatever their JVM names and result types are, so a call is not ambiguous;
+  the override is the declaration that a caller sees."
   [candidates]
-  (let [owner (fn [c] (jvm-class (:owner (:decl c))))]
-    (remove (fn [c]
-              (when-let [k (virtual-key (:decl c))]
-                (some (fn [o]
-                        (let [oc (owner c) oo (owner o)]
-                          (and (not (identical? o c)) (= k (virtual-key (:decl o)))
-                               oc oo (not= oc oo) (.isAssignableFrom ^Class oc ^Class oo))))
-                      candidates)))
-            candidates)))
+  (let [ids (overridden-ids candidates)]
+    (remove #(contains? ids (meta/jvm-member-id (:decl %))) candidates)))
+
+(defn- receiver-fits?
+  "Is the dispatch receiver of the checked candidate `b` ({:decl :checks}) an instance of the declaring class for sure?"
+  [b]
+  (let [i (first (keep-indexed #(when (= :dispatch (:role %2)) %1) (:receivers (:decl b))))]
+    (boolean (and i (= :ok (first (nth (:checks b) i nil)))))))
+
+(defn- inherited-twice-key
+  "What makes members of UNRELATED classes one member of an object that is an instance of both (a class that implements
+  two interfaces with the same member, a superclass with the body and an interface): Kotlin gives such a class ONE
+  member for the same kind, name and parameter types, suspend or not. nil for anything else: a top-level function or
+  extension, a member of a companion (its receiver is the class var), and a member whose parameter types name a type
+  parameter of its class (`A<T>.f(x: T)` and `B<T>.f(x: T)` are two members of a `C : A<Int>, B<String>`)."
+  [d]
+  (let [dispatch (first (filter #(= :dispatch (:role %)) (:receivers d)))
+        class-vars (set (map :name (:class-type-params d)))
+        others (remove #(= :dispatch (:role %)) (:receivers d))
+        types (concat (map :type (:params d)) (map :type others))
+        names-class-var? (fn [t] (some #(contains? class-vars (:type-param %))
+                                       (tree-seq #(or (seq (:args %)) (:fn-type %))
+                                                 #(concat (:args %) (:args (:fn-type %)) (some-> (:return (:fn-type %)) vector))
+                                                 t)))]
+    (when (and (#{:function :property} (:kind d)) dispatch (not (:companion-of dispatch))
+               (not-any? names-class-var? types))
+      [(:kind d) (:name d) (mapv meta/type-text types) (mapv :role others) (boolean (:suspend (:flags d)))])))
 
 (defn- one-virtual-call
-  "The candidates, with those that are ONE virtual call (`virtual-key`) made one candidate. Every candidate fits for
-  sure, so the receiver is an instance of the declaring class of each: the JVM runs the same method of that object for
-  all of them. An override stands for what it overrides (`drop-overridden`). Of declaring classes that are not related
-  (a class that implements two interfaces with the same member; a superclass with the body and an interface) the first
-  stands for all, or the one whose JVM result type is narrower."
+  "The candidates, with those that are ONE member of the receiver made one candidate. Every candidate fits for
+  sure, so the receiver is an instance of the declaring class of each (and what one of them overrides is no candidate:
+  `choose*`). Of declaring classes that are not related (`inherited-twice-key`) the first
+  stands for all, or the one whose JVM result type is narrower: the JVM runs the same method of the object for each."
   [candidates]
-  (let [cs (vec (drop-overridden candidates))
-        key-of (fn [c] (or (virtual-key (:decl c)) c))
+  (let [cs (vec candidates)
+        key-of (fn [c] (or (inherited-twice-key (:decl c)) c))
         ret (fn [c] (some-> (return-jvm-name (:decl c)) jvm-class))
         narrower (fn [a b] (let [^Class ra (ret a) ^Class rb (ret b)]
                              (if (and ra rb (not= ra rb) (.isAssignableFrom ra rb)) b a)))
@@ -1205,19 +1296,17 @@
       ok)))
 
 (defn- same-member-root
-  "Of candidates that are all ONE virtual member (`virtual-key`: an original and the overrides that narrow its result
-  type), the candidate of the most general declaring class, if there is one that every other declaring class extends;
-  else nil. The call of that member is virtual, so it runs the override of the object. Only used where the receiver is
-  of unknown class (`choose*`): with several candidates of REAL overloads (other JVM name or other parameter types, or
-  unrelated classes) this is nil."
+  "Of candidates that are all ONE member (an original and its overrides: `:overrides`), the original: the candidate
+  that every other candidate overrides; else nil. The call of that member is virtual, so it runs the
+  override of the object. Only used where the receiver is of unknown class (`choose*`): with several candidates
+  of REAL overloads (other parameter types, or unrelated classes) this is nil."
   [viable]
   (when (> (count viable) 1)
-    (let [ks (map (comp virtual-key :decl) viable)
-          owner (fn [b] (some-> (:owner (:decl b)) jvm-class))]
-      (when (and (every? some? ks) (apply = ks))
-        (first (filter (fn [b] (let [c (owner b)]
-                                 (and c (every? (fn [o] (let [oc (owner o)] (and oc (.isAssignableFrom ^Class c ^Class oc)))) viable))))
-                       viable))))))
+    (first (filter (fn [r]
+                     (let [id (meta/jvm-member-id (:decl r))]
+                       (and (vector? id)
+                            (every? #(or (identical? r %) (contains? (:overrides (:decl %)) id)) viable))))
+                   viable))))
 
 (defn- choose*
   "Pick exactly one declaration (rule 7).
@@ -1251,7 +1340,10 @@
             {:kt/candidates (map :signature decls)}))
     (let [checked (for [b ok :let [sl (slots (:decl b))]] (assoc b :checks (check-items sl (:items b))))
           no-reason (fn [b] (some #(when (= :no (first %)) (second %)) (:checks b)))
-          viable (remove no-reason checked)]
+          ;; a member that the class of the receiver overrides is no candidate for that receiver: the override is the
+          ;; member, also when the arguments do not fit it (`Two : A<Int>` with `f(x: Int)`: `A<T>.f(x: T)` is gone)
+          overridden (overridden-ids (filter receiver-fits? checked))
+          viable (remove #(or (no-reason %) (contains? overridden (meta/jvm-member-id (:decl %)))) checked)]
       (when (empty? viable)
         (fail (reasons-text var-name args (concat (map #(hash-map :decl (:decl %) :reason (:error %)) failed)
                                                   (map #(hash-map :decl (:decl %) :reason (no-reason %)) checked)))
@@ -1391,7 +1483,7 @@
                    (not (str/ends-with? (str (:desc jvm)) ")V")))
         p (plan* decl jvm defaults? other pargs masks target disp-item unit? self)
         desc (if (= :property (:kind decl)) (:desc (:getter decl)) (:desc jvm))
-        ret-vc (return-conv decl)]
+        ret-vc (return-conv decl (when defaults? jvm))]
     (cond-> (assoc p :desc desc :sig (:signature decl))
       ;; a public method of a multi-file class part is called through the public facade that inherits it
       (and (#{:static :virtual} (:op p))
