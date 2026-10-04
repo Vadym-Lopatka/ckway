@@ -1,5 +1,5 @@
 (ns ckway.ref
-  "`(kt/ref X y)` is the Kotlin `X::y`, `(kt/ref y)` is `::y` (DESIGN-2 rule 9).
+  "`(kt/ref X y)` is the Kotlin `X::y`, `(kt/ref y)` is `::y` (README rule 9).
 
   What the form gives, and how it is made. Nothing needs the Kotlin compiler and nothing needs
   kotlin-reflect: the objects are the classes that kotlinc itself emits for a reference
@@ -61,7 +61,7 @@
   (when-not (= n (count s))
     (throw (clojure.lang.ArityException. (count s) "kt/ref"))))
 
-;; Every reference is also a Clojure IFn (DESIGN-2 rule 6: a Kotlin function value that Clojure gets is a
+;; Every reference is also a Clojure IFn (README rule 6: a Kotlin function value that Clojure gets is a
 ;; Clojure function), so `(map (kt/ref f/Person firstName) people)` and `((kt/ref f/Person .greet) p "Hi")` work.
 ;; `invoke` of the IFn and of FunctionN is the same JVM method.
 (defn- bound-instance

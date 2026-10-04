@@ -1,3 +1,15 @@
-.ckway-cache/
+# build output
 target/
+examples/target/
+# tools
 .cpcache/
+.nrepl-port
+# the old bridge cache (the cache is now per user, outside the repository)
+.ckway-cache/
+# editors and OS
+.idea/
+.vscode/
+*.iml
+*.swp
+*~
+.DS_Store

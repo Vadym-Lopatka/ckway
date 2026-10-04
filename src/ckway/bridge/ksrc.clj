@@ -1,5 +1,5 @@
 (ns ckway.bridge.ksrc
-  "Kotlin source of a reified-call bridge (DESIGN-2 rule 5). Pure text, no compiler.
+  "Kotlin source of a reified-call bridge (README rule 5). Pure text, no compiler.
 
   `inline fun <reified T> ...` cannot be called from the JVM: the call must be compiled by Kotlin with the
   type argument. The bridge is a tiny Kotlin file with ONE function `call` that does exactly this call
@@ -19,7 +19,7 @@
       every instance of the class.
     - A value-class type is passed as `Any?` and cast inside, and a value-class result is declared `Any?`:
       the JVM name of a function with a value class in its signature is mangled, and Clojure holds the
-      boxed object anyway (DESIGN-2 rule 7).
+      boxed object anyway (README rule 7).
     - A top-level or extension function is imported under the alias `ktFn`, an outer class of a companion
       under `KtOwner`, so no name of the user's parameters can hide them.
     - `suspend` declarations give a `suspend fun call`; the caller waits through ckway.co.

@@ -1,5 +1,5 @@
 (ns ckway.set
-  "`(kt/set! read-form value)`: DESIGN-2 rule 8, the Kotlin `a.p = v`.
+  "`(kt/set! read-form value)`: README rule 8, the Kotlin `a.p = v`.
 
   `read-form` is exactly the form that reads the property, `(f/level g)`, `(db/applicationName conn)`,
   `(f/topVar)`. Its variable is a kt var; of its declarations only the properties count (a function of
@@ -15,8 +15,8 @@
   reflection, no `ckway.rt/call-dyn`), in a `let` that evaluates the receivers and the value once, in the
   written order, and returns the value (like `set!`).
 
-  Unknown receiver type with several property declarations of that name: the same as a call (DESIGN-2
-  3.1, `ckway.resolve/expand`): the dynamic path `set-dyn`, with a reflection warning. It selects at run
+  Unknown receiver type with several property declarations of that name: the same as a call
+  (`ckway.resolve/expand`): the dynamic path `set-dyn`, with a reflection warning. It selects at run
   time with the classes of the values and keeps the prepared assignment in the call cache of the var
   (`ckway.rt/call-dyn`).
 

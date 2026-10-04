@@ -1,7 +1,7 @@
 (ns ckway.core
   "Call Kotlin code from Clojure. Public API, exactly: `require`, `set!`, `ref`, `data`, `reify`.
 
-    (kt/require '[pkg :as alias])      DESIGN-2 rule 1
+    (kt/require '[pkg :as alias])      README rule 1
     (kt/set! (alias/p x) value)        rule 8, see `ckway.set`
     (kt/ref X y) (kt/ref y)            rule 9, see `ckway.ref`
     (kt/data x)                        rule 11, see `ckway.data`

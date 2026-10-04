@@ -10,7 +10,7 @@
     (package-index \"fx\")  ; \"\" is the root package
     => {var-name [declaration ...]}
 
-  `var-name` is the string name of the Clojure var (DESIGN-2 rules 2, 3):
+  `var-name` is the string name of the Clojure var (README rules 2, 3):
     top-level function f            -> \"f\"
     function with a receiver        -> \".f\"   (member or extension)
     property (any)                  -> \"p\"
@@ -18,7 +18,7 @@
     enum entry                      -> \"E.ENTRY\"
   All declarations with the same var-name share one var.
 
-  Inherited members (DESIGN-2 rule 1): a class var set also holds the public members that
+  Inherited members (README rule 1): a class var set also holds the public members that
   the class inherits from its Kotlin supertypes (superclass and interfaces, transitively,
   also from another package or jar; includes interface members with a default body and
   members of an interface that the class delegates to). Such a member is the declaration of
@@ -101,7 +101,7 @@
   :args [T A], :arity 2, :return R. The JVM type is Function<arity+1> (the Continuation is the last
   parameter, the result is Object); the metadata writes it that way and `suspend-fn-type` undoes it.
 
-  Value class (DESIGN-2 rule 7, 3.1): a <type> of a value class also has
+  Value class (see README rule 7): a <type> of a value class also has
     :value-class {:class \"kotlin.time.Duration\"   ; the JVM class of the boxed object
                   :property \"rawValue\"            ; name of the underlying property
                   :underlying <type>                ; its Kotlin type
@@ -1088,7 +1088,7 @@
 
 (defn primary-properties
   "The properties that the primary constructor of the Kotlin class `c` declares, in constructor order
-  (`kt/data`, DESIGN-2 rule 11). => nil when `c` has no Kotlin class metadata, else
+  (`kt/data`, README rule 11). => nil when `c` has no Kotlin class metadata, else
   {:class \"fx.Person\" :primary? bool :props [{:name \"id\" :decl <property declaration>} ...]}.
   A constructor parameter is a property when the class declares a public member property of the same
   name and type (the metadata has no link between them: `class C(b: Int) { val b: Int = b * 2 }`

@@ -1,5 +1,5 @@
 (ns ckway.data
-  "`(kt/data x)`: DESIGN-2 rule 11, a read-only map of the properties that the primary constructor of the
+  "`(kt/data x)`: README rule 11, a read-only map of the properties that the primary constructor of the
   class of `x` declares (the Kotlin `val (id, name) = user`).
 
     keys      keywords with the Kotlin names (`:firstName`), in constructor order

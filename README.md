@@ -2,25 +2,54 @@
 
 ckway is the Clojure to Kotlin way. The library namespace is `kt`.
 
+Status: version 0.1.0, alpha. The API may change.
+
 ## What it is
 
 `kt` lets Clojure call Kotlin code as if the code were Clojure.
 A Kotlin package becomes a Clojure namespace, and each Kotlin function, property and class becomes a var.
 The forms follow the Kotlin text, so you can copy a Kotlin line and change it by rule.
 
-## Install / run
+## Install
 
-* Clojure 1.12 and JDK 21 or newer. (Coroutine bodies run on virtual threads.)
-* Add the library as a `:local/root` dependency. Its own `deps.edn` brings `kotlin-stdlib` and `kotlin-metadata-jvm` 2.4.20.
-* For `suspend` functions your class path needs `kotlinx-coroutines-core-jvm`. The alias `:coro` and the alias `:examples` add it.
-* A call with `:<>` to an `inline reified` Kotlin function needs the Kotlin compiler in the same JVM. Add the alias `:kotlinc` (`kotlin-compiler-embeddable`).
-  Without `:<>` on such a function you do not need it. A bridge that was compiled before (the cache `.ckway-cache/`, or AOT-compiled code) needs no compiler either.
-* Aliases in `deps.edn`: `:test`, `:coro` (kotlinx-coroutines from Maven Central), `:kotlinc`, `:examples` (kotlinx-coroutines and the Kotlin libraries `shop` and `web` of the examples).
+ckway is a git dependency. Add it to the `deps.edn` of your own project:
+
+```edn
+{:deps
+ {io.github.vadym-lopatka/ckway {:git/url "https://github.com/Vadym-Lopatka/ckway"
+                                 :git/tag "v0.1.0"
+                                 :git/sha "GIT_SHA_PLACEHOLDER"}
+
+  ;; Only if your Kotlin code uses kotlinx.coroutines (a `suspend` function that calls `delay`, a `Flow`, ...).
+  org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.10.2"}}
+
+ :aliases
+ {;; Only to COMPILE a `:<>` call to an `inline reified` Kotlin function (rule 5).
+  :kotlinc {:extra-deps {org.jetbrains.kotlin/kotlin-compiler-embeddable
+                         {:mvn/version "2.4.20"
+                          :exclusions [org.jetbrains.kotlin/kotlin-reflect]}}}}}
+```
+
+The library brings `org.jetbrains.kotlin/kotlin-stdlib` and `org.jetbrains.kotlin/kotlin-metadata-jvm` 2.4.20.
+Your own build compiles your Kotlin code. The compiled classes (a directory or a jar) must be on the class path of the JVM that runs Clojure.
+
+* **kotlinx-coroutines.** Add it when your Kotlin code uses it. Without it, `suspend` functions that use only `kotlin-stdlib` still work, but a Clojure function that runs as a suspend lambda cannot be cancelled ([`doc/limits.md`](doc/limits.md), 4 and 16).
+  If you add the compiler (below), also keep this dependency at the top level: it replaces the old 1.8.0 that the compiler brings.
+* **The Kotlin compiler (`:kotlinc`).** A call with `:<>` to an `inline reified` function makes `kt` write a short Kotlin source and compile it in the same JVM. Start that JVM with the alias: `clojure -M:kotlinc ...`.
+  The compiler is not needed at run time when the bridge was compiled before: the per-user bridge cache keeps it, and AOT-compiled code carries it.
+  So you can compile once with `:kotlinc` (for example `clojure -M:kotlinc -e "(compile 'my.app)"`) and run without it.
+  A call without `:<>`, and a `reified` function that you do not call with `:<>`, never need the compiler.
 
 In your namespace, require `ckway.core` as `kt`. Then call `kt/require` for each Kotlin package that you use (rule 1).
 
-The Kotlin code must be compiled to class files (or jars) on the class path.
-`kt` reads the Kotlin metadata of the classes. It does not read the Kotlin source.
+`kt` reads the Kotlin metadata of the compiled classes. It does not read the Kotlin source.
+
+## Requirements
+
+* **JDK 21 or newer.** A Clojure function that Kotlin runs as a `suspend` lambda runs on a virtual thread (JDK 21). Without that, `kt` stops with an error that says so. The code uses no other JDK 21 feature that we know of, but we ran the tests on JDK 21.0.8 and 25.0.4 only. We did not try an older JDK.
+* **Clojure 1.12 or newer.** `kt` names a function that has a receiver with a leading dot (`s/.count`). Clojure 1.11 reads such a form as a Java method call and ignores the alias; the errors on 1.11.4 are `No matching method add found taking 1 args for class shop.Cart`. On Clojure 1.11.4, `ckway.core` loads and `kt/require` works, and a call of a function with no receiver works, but every call with a leading dot fails. Of the example files, only 01 and 10 pass on 1.11.4; the others fail. All of them pass on 1.12.0 and 1.12.1. So 1.11 is not supported.
+* **Kotlin.** `kt` reads `@Metadata` with `kotlin-metadata-jvm` 2.4.20 in strict mode. It reads the classes of any Kotlin whose metadata version the reader knows. We read classes that were compiled by Kotlin 2.2.0, 2.4.0 and 2.4.20, by 2.4.20 with `-language-version 2.0`, and by 2.2.0 with `-language-version 1.9` (metadata version 1.9.0). A class that a newer Kotlin wrote fails the `kt/require` of its package with `kt: cannot read Kotlin metadata of ... (written by a newer Kotlin than kotlin-metadata-jvm? update the dependency)`. The reader accepts metadata up to one minor version above its own (the error of a 2.2.0 reader says `maximum supported version is 2.3.0`), so 2.4.20 should read the classes of Kotlin up to 2.5. We could not try it: no newer compiler exists here. When the error appears, put a newer `org.jetbrains.kotlin/kotlin-metadata-jvm` in your own `deps.edn`.
+* **The `kotlinc` command is not a requirement of your project.** Only the tests and the examples of this repository run it ([Development](#development)). You use your own build tool to compile your Kotlin code.
 
 ## The rules
 
@@ -37,6 +66,8 @@ The snippets use the `shop` library of the examples. `tea`, `cake`, `cart` and `
 ```
 
 Example 01.
+`kt/require` of a package with no Kotlin class is an error.
+A class that mentions a class that is not on the class path (an optional dependency) is skipped: the rest of the package works, and a call of what was skipped is a `kt:` error that names the missing class.
 
 ### 2. Name and call
 
@@ -101,6 +132,7 @@ Positional arguments bind in sequence; a keyword literal names the parameter of 
 ```
 
 Example 02.
+A var that you pass as a value (`(apply s/joinLabel xs)`, `(map s/welcome names)`) takes positional arguments only; a keyword in `xs` is an ordinary value. Named arguments need the written form.
 In Kotlin you write a trailing lambda after the parentheses. `kt` has no such syntax: when you skip a defaulted parameter before a lambda, name the lambda (`(s/cart :build (fn [c] ...))`, example 06).
 
 ### 5. Type arguments
@@ -121,7 +153,7 @@ In Kotlin you write a trailing lambda after the parentheses. `kt` has no such sy
 ;; => "String?"
 ```
 
-Example 09. This needs the alias `:kotlinc`.
+Example 09. This needs the Kotlin compiler in the JVM, or a stored bridge (see Install). The examples use the alias `:kotlinc` for it.
 The default Kotlin names (`Int`, `String`, `Any`, `List`, `Map`, ...) are known without a `kt/require`. `Object` means `Any`.
 
 ### 6. Functions
@@ -144,6 +176,7 @@ A Clojure function goes where Kotlin wants a function type or a `fun interface`;
 ```
 
 Example 06.
+A Clojure function also goes where a Java interface with exactly one abstract method is expected (`Function`, `Predicate`, `Runnable`, `Comparator`, ...), as Kotlin converts a lambda there (example 14).
 
 ### 7. No guess
 
@@ -164,6 +197,15 @@ Example 06.
 ```
 
 Examples 02 and 01. `err` is a helper of the examples (`examples/util.clj`): `(err form)` evaluates the form and returns the first line of the `kt:` error message as a string, so that an error can be shown as a value. A raw number is not a value class (`(s/.plus price 5)` is an error, example 07).
+
+More about the choice and the numbers (example 14 shows them with the Kotlin standard library):
+
+* An applicable member always wins over an extension, as in Kotlin.
+* Among several applicable declarations `kt` picks the most specific one by Kotlin's rule (each parameter type a subtype of the other's; `T` before `T?`; no vararg, not generic, no default needed on a tie). If none is clearly most specific, the call is an error.
+* An integer literal that fits `Int` is a Kotlin `Int` wherever the declared type does not say otherwise (`Any`, `Any?`, `Number`, a type parameter that no other argument shares, a vararg of those): `(c/listOf 1 2)` (`c` is `kotlin.collections`) holds `Int`s, as Kotlin's `listOf(1, 2)` does. A literal that does not fit `Int`, and a value that is not a literal, keeps its Clojure type.
+  A literal at a type parameter that another argument or the receiver also has stays a `Long` (limits, 1).
+* Only a Clojure character is a Kotlin `Char`.
+* A number outside the range of an `Int`, `Short` or `Byte` parameter is a `kt:` error that names the parameter.
 
 ### 8. Write a property
 
@@ -311,6 +353,14 @@ A good error (example 02):
 ;; => "kt: (welcome \"Ann\" :greetings \"Hi\"): unknown parameter name `greetings`. Parameters: name, greeting, punct."
 ```
 
+The Kotlin standard library is a Kotlin library too (example 14; `c` is `kotlin.collections`):
+
+```clojure
+;; Kotlin: listOf(1, 2, 3).map { it * 10 }
+(c/.map (c/listOf 1 2 3) (fn [x] (* x 10)))
+;; => [10 20 30]
+```
+
 ## Examples
 
 The Kotlin libraries of the examples are `examples/kotlin/shop` and `examples/kotlin/web` (a small web server, example 12).
@@ -331,10 +381,11 @@ Each file is a tutorial. Read it from top to bottom. The files go from simple to
 | [`11_reify.clj`](examples/11_reify.clj) | `kt/reify`: properties, defaults, suspend member, overload hints, two interfaces |
 | [`12_web_server.clj`](examples/12_web_server.clj) | A web server written in Kotlin (`web`), started, called with an HTTP client and stopped (needs `:kotlinc`) |
 | [`13_everything_together.clj`](examples/13_everything_together.clj) | One small program that uses most features (needs `:kotlinc`) |
+| [`14_kotlin_stdlib.clj`](examples/14_kotlin_stdlib.clj) | The Kotlin standard library as a Kotlin library: collections, text, `require`, `runCatching`, integer literals, a Java functional interface, erased overloads |
 
 ### Check all examples
 
-Run the commands in the library directory.
+Run the commands in the root directory of this repository (they need the tools of [Development](#development)).
 
 ```sh
 examples/run
@@ -361,7 +412,7 @@ A line `;; Aliases:` near the top of a file names the extra aliases. Without tha
 
 ```sh
 examples/build
-clojure -M:examples -r                  # examples 01 to 08, 10, 11
+clojure -M:examples -r                  # examples 01 to 08, 10, 11 and 14
 clojure -M:examples:kotlinc -r          # examples 09, 12 and 13
 ```
 
@@ -380,8 +431,8 @@ Or send the forms of a file one by one from your editor. To send a whole file as
 2. Each var carries its declarations as metadata and is a function with an `:inline` expansion.
 3. When your code compiles, the expansion sees the argument forms. It selects the declaration with the Kotlin overload rules and writes a direct JVM call (the static path). There is no reflection.
 4. If the receiver type is not known (for example a value from a `def`), the call takes the dynamic path. The same rules select the declaration at run time, and a cache keeps the result.
-5. A Kotlin member that the JVM hides (a value class parameter, a default value, an `inline` function) is called through a small generated bridge class.
-6. For an `inline reified` function, `kt` writes a short Kotlin source, compiles it with the Kotlin compiler in the JVM, and caches the class.
+5. A Kotlin member that the JVM hides (a value class parameter, a default value, an inline function, a method of a multi-file facade part) is called through a small generated bridge class or a MethodHandle.
+6. For an `inline reified` function, `kt` writes a short Kotlin source, compiles it with the Kotlin compiler in the JVM, and caches the class. The bridge cache is a per-user directory (`$XDG_CACHE_HOME/ckway`, else `~/.cache/ckway`; `-Dckway.cache.dir` overrides it, and an empty value turns it off). Each cached class is checked against a SHA-256 hash before it is loaded (details: [`doc/limits.md`](doc/limits.md), 15).
 7. A Clojure function that goes where Kotlin wants a function type or a `fun interface` is wrapped in an adapter class. A `suspend` call waits for its result, and a suspend lambda runs on a virtual thread with the coroutine context.
 8. Errors come from the same place: they show the Kotlin declaration and say which argument does not fit.
 
@@ -389,8 +440,32 @@ Or send the forms of a file one by one from your editor. To send a whole file as
 
 The full list is in [`doc/limits.md`](doc/limits.md). The five most important:
 
-1. A number at a generic position (`T`) keeps the Clojure `Long`: `(f/boxedT 1)` fails when Kotlin expects an `Int`. Use `(int 1)`, or give the type with `:<>`.
+1. At a generic position (`T`) only an integer literal that fits `Int` becomes an `Int`. A `Long` value that is not a literal, and a literal at a `T` that another argument or the receiver also has, stay `Long`: `(c/.minus (c/listOf 1 2 3) 2)` removes nothing. Write `(int 2)`, or give the type with `:<>`.
 2. `kt/require` runs the `init` block of every `object` and every enum class of the package, so a failing initializer shows up when you call something that uses the object.
 3. A Clojure function that runs as a suspend lambda has its own virtual thread. A `ThreadLocal` is not visible in it, and `(catch Exception ...)` also catches the interrupt of a cancel.
 4. `:<>` needs the static path and, for `reified` functions, the Kotlin compiler in the JVM (alias `:kotlinc`). Reified properties are not supported.
 5. `kt/reify` takes interfaces only. `kt/ref` refuses bound references (except to an `object`), and references to `suspend` and `reified` functions.
+
+## Development
+
+Run the commands in the root directory of this repository.
+
+```sh
+bin/test        # builds the Kotlin test fixtures, then runs all tests
+examples/run    # builds the Kotlin libraries of the examples, then checks every example file
+```
+
+Both commands exit with 0 only if everything passed.
+They need:
+
+* `kotlinc` 2.4.x on the `PATH` (the tests and the examples compile Kotlin code with it),
+* the Clojure CLI (`clojure`),
+* JDK 21 or newer,
+* network access on the first run: Maven Central for the dependencies, and GitHub for the test runner (a git dependency).
+
+The tests and the examples never touch your own bridge cache: the scripts point `XDG_CACHE_HOME` to a directory under `target/`.
+Aliases in `deps.edn` (for development only; a consumer does not see them): `:test`, `:coro` (kotlinx-coroutines from Maven Central), `:coro-next` (the newest kotlinx-coroutines), `:kotlinc` (`kotlin-compiler-embeddable`), `:examples` (kotlinx-coroutines and the Kotlin libraries `shop` and `web` of the examples).
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

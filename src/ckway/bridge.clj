@@ -30,7 +30,7 @@
   The generator (`ckway.bridge.gen`, uses `clojure.asm`) is loaded only when a bridge is created. Code
   that was AOT-compiled with its bridges runs without loading it.
 
-  Kotlin bridges (kind `K`, DESIGN-2 rule 5): the bridge of a reified call is a Kotlin class that the
+  Kotlin bridges (kind `K`, README rule 5): the bridge of a reified call is a Kotlin class that the
   Kotlin compiler makes from generated source (`ckway.bridge.ksrc`, `ckway.bridge.kotlinc`).
   `(kotlin-bridge-class spec)` => the Class, in this order:
     1. already defined in this JVM, or (outside AOT) a class of that name on the class path;
@@ -240,7 +240,7 @@
   (atom {}))
 
 (defn reify-class
-  "Name of the class of a `kt/reify` form (kind `R`, DESIGN-2 rule 10): it implements the interfaces of
+  "Name of the class of a `kt/reify` form (kind `R`, README rule 10): it implements the interfaces of
   `spec` ({:ifaces [binary names] :methods [...]}, see `ckway.bridge.gen/reify-class-bytes`) with methods that
   call Clojure functions. Same storage as a call bridge (`install!`), so a namespace that is AOT-compiled
   carries the class and runs without the generator. `readable` is for the class name only.

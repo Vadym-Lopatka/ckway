@@ -4,25 +4,36 @@ Each item was checked against the code or run. `hardening_test.clj` pins most of
 
 ## 1. Number width at a generic position
 
-Kotlin's `Int` is `java.lang.Integer`. A Clojure integer is a `Long`. At a parameter or result whose Kotlin type is a
-type parameter (`T`, JVM `Object`), kt does not know the width and leaves the `Long` alone.
+Kotlin's `Int` is `java.lang.Integer`. A Clojure integer is a `Long`.
+At a parameter or result whose Kotlin type is a type parameter (`T`, JVM `Object`) `kt` gives an integer literal that fits
+`Int` the width `Int`; any other Clojure integer keeps the `Long`. A literal at a `T` that another argument or the receiver
+also has stays a `Long`, because Kotlin infers `T` from the other one and `kt` does not
+(`(c/.minus (c/listOf 1 2 3) 2)` removes nothing: write `(int 2)`).
 
 ```clojure
-(f/boxedT 1)        ; fun <T> boxedT(x: T) = (x as Int).toString()
+(f/boxedT 1)             ; fun <T> boxedT(x: T) = (x as Int).toString()
+;; "1"                      the literal fits Int and nothing else shares T: it is an Int
+(let [n 1] (f/boxedT n)) ; n is not a literal: it keeps the Long
 ;; ClassCastException: class java.lang.Long cannot be cast to class java.lang.Integer
 ;;   at fx.HardeningKt.boxedT(Hardening.kt:66)      <- the Kotlin frame is the first one
-(f/boxedT (int 1))  ; the remedy: say the width yourself
+(f/boxedT (int 1))       ; the remedy: say the width yourself
+
+(c/.minus (c/listOf 1 2 3) 2)         ; [1 2 3]  the 2 is a Long (T is also the receiver's T); no element is equal to it
+(c/.minus (c/listOf 1 2 3) (int 2))   ; [1 3]
+(c/.contains (c/listOf 1 2 3) 2)      ; false     the same reason
+(f/listOfT 1 2)                       ; fun <T> listOfT(a: T, b: T): the two literals share T, so both are Longs
 ```
 
-kt converts when it knows the type: a call with `:<>` on a non-reified generic function (`(f/boxedT 1 :<> Int)`) converts
+`kt` converts when it knows the type: a call with `:<>` on a non-reified generic function (`(f/boxedT 1 :<> Int)`) converts
 a `T` parameter and result, a `vararg T`, and function types and fun interfaces that mention `T`
 (`(f/applyT 1 inc :<> Int)` gives Kotlin an `Integer` back from `inc`).
 
-kt does NOT convert: the elements of a `List<T>`/`Map` that you pass, a call without `:<>`, a member of a generic
+`kt` does NOT convert: a `Long` that is not a literal (a `let` local, a result of `inc`), a literal at a `T` that another
+argument or the receiver has, the elements of a `List<T>`/`Map` that you pass, a member of a generic
 class (`Box<Int>.put(x)`), and the members of a `kt/reify` object of a generic interface (`kt/reify Visitor` returns a
 `Long` for `Visitor<Int>`; `kt/reify` has no type-argument syntax). Use `(int x)`, `(long x)`, `(mapv int xs)`.
 
-kt never rewrites the `ClassCastException`: it is the JVM's own, thrown inside the Kotlin function, on the static and
+`kt` never rewrites the `ClassCastException`: it is the JVM's own, thrown inside the Kotlin function, on the static and
 the dynamic path.
 
 ## 2. Objects are initialised by `kt/require`
@@ -149,10 +160,10 @@ A constructor parameter counts as a property when the class has a public propert
 * Two context parameters of the same type on a reified function are refused: Kotlin binds a context argument by type, so
   both would get the same value (a hand-written `with(x) { with(y) { both<Int>() } }` returns `"y|y"`). A function that is
   not reified is called directly and binds each parameter.
-* The `:kotlinc` alias brings `kotlinx-coroutines-core-jvm` 1.8.0 (the compiler fails with INTERNAL_ERROR without it).
-  `clojure -Spath -A:kotlinc` shows that jar. If your application uses another version, make it a dependency of
-  your own project (as `:coro` does with 1.10.2 in `deps.edn`): it replaces 1.8.0, and `clojure -Spath -A:coro:kotlinc`
-  has only the 1.10.2 jar. The compiler runs with it.
+* `kotlin-compiler-embeddable` brings `kotlinx-coroutines-core-jvm` 1.8.0 (the compiler fails with INTERNAL_ERROR without it).
+  In this repository `clojure -Spath -A:kotlinc` shows that jar. If your application uses another version, make it a
+  dependency of your own project, at the top level (the README shows 1.10.2): it replaces 1.8.0, and `clojure -Spath -A:coro:kotlinc`
+  has only the 1.10.2 jar. The compiler runs with it (the consumer project of the README check ran so).
 
 ## 10. Other declarations
 
@@ -166,9 +177,13 @@ A constructor parameter counts as a property when the class has a public propert
 
 ## 11. Kotlin metadata
 
-`kt` reads metadata with `kotlin-metadata-jvm` 2.4.20. A class written by a newer Kotlin than the reader fails the
-`kt/require` of its package with "cannot read Kotlin metadata of ... (written by a newer Kotlin than
-kotlin-metadata-jvm? update the dependency)" (from the code; not run, no newer Kotlin is installed here).
+`kt` reads metadata with `kotlin-metadata-jvm` 2.4.20 (`readStrict`). Classes compiled by Kotlin 2.2.0, 2.4.0, 2.4.20,
+2.4.20 with `-language-version 2.0`, and 2.2.0 with `-language-version 1.9` (metadata version 1.9.0) were read and called.
+A class written by a newer Kotlin than the reader fails the `kt/require` of its package with "cannot read Kotlin
+metadata of ... (written by a newer Kotlin than kotlin-metadata-jvm? update the dependency)"; the cause says
+`Provided Metadata instance has version 2.4.0, while maximum supported version is 2.3.0`. We saw this with a 2.2.0
+reader on classes of Kotlin 2.4.0 (no Kotlin newer than 2.4.20 is installed here). The fix is a newer
+`org.jetbrains.kotlin/kotlin-metadata-jvm` in your own `deps.edn`.
 `@file:JvmPackageName` is not a limit: the Kotlin compiler refuses it in user code ("internal in file", and "not supported
 for files with class declarations"), so only the stdlib uses it.
 
@@ -274,3 +289,35 @@ The embedded Kotlin compiler would print JVM warnings to the stderr of your proc
 a compiling run printed nothing to stderr on JDK 25 / Kotlin 2.4.20 (`review_b_test`, B14). What remains is outside kt's
 control: the JVM's own start-up messages for your flags, and a warning that a future compiler or JDK may print; the JVM option
 `--sun-misc-unsafe-memory-access=allow` silences the Unsafe one for good, if a compiler version brings it back.
+
+## 18. Erased overloads
+
+`(c/.sum xs)`, `(c/.sumOf xs f)`, `(c/.maxOrNull xs)` and `(c/.flatMap xs f)` are several Kotlin declarations with the same
+JVM parameter types: they differ in a type argument or in the result type of a lambda, which the JVM erases. `kt` does
+not guess. The error lists each candidate with its Java interop call:
+
+```clojure
+(c/.sum (c/listOf 1 2 3))
+;; kt: (.sum (c/listOf 1 2 3)) is ambiguous. Candidates: ...
+;;   fun collections.Iterable<Int>.sum(): Int
+;;     ->  (kotlin.collections.CollectionsKt/sumOfInt x)    ; JVM descriptor (Ljava/lang/Iterable;)I
+(kotlin.collections.CollectionsKt/sumOfInt (c/listOf 1 2 3))   ; 6
+```
+
+An `inline` candidate has no public JVM method (`(c/.sumOf xs f)`: "no public JVM method (it is `inline`): write it in
+Clojure"). Write the loop in Clojure.
+
+The members of Kotlin's built-in types (`Int.rangeTo`, `Map.keys`, `Map.getOrDefault`) are not vars. Use the extensions (`until`, `downTo`, `step`:
+`(r/.until 1 4)` is an `IntRange`) or Clojure's functions. A var of the same name can be another declaration:
+`(r/.rangeTo 1 5)` is the extension for `Comparable` and gives a `ComparableRange`, not an `IntRange`; `c/keys` is
+the property of `AbstractMap` only, so `(c/keys {})` or a `HashMap` is an error. `c/.getOrDefault` is not a var.
+
+A top-level function and a property of the same name share one var. A call that fits both is an error that gives the
+interop forms of both.
+
+## 19. A class that cannot be linked
+
+A class that mentions a class which is not on the class path (an optional dependency) is skipped, and a call of what
+was skipped is a `kt:` error that names the missing class (README, rule 1). A top-level class with a plain name gets a
+placeholder var for that error. A nested class and a file facade (`...Kt`) that cannot be linked are dropped without a
+placeholder, so there is no var for them (from the code of `ckway.meta/unlinkable-class-decls`; not run).

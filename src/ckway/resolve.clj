@@ -4,7 +4,7 @@
   Pure functions (parse, bind, choose, plan) are shared with the run-time path
   in `ckway.rt`.  Only `emit` and the `kt-call` macro run at compile time.
 
-  Type arguments (`:<>`, DESIGN-2 rule 5): `choose` takes the pair out of the named arguments, keeps
+  Type arguments (`:<>`, README rule 5): `choose` takes the pair out of the named arguments, keeps
   only the declarations with that number of type parameters (a call without `:<>` never selects a
   declaration with a reified type parameter) and returns the form as :tform. `expand` resolves it
   (`ckway.types`). For a reified declaration the call goes through a Kotlin bridge (`expand-reified`: a
@@ -1716,7 +1716,7 @@
 
 (defn type-literals
   "A `fn` literal at an adapter slot gets the Kotlin parameter types as local type information, so
-  kt calls on its parameters are resolved statically (DESIGN-2 section 2.5)."
+  kt calls on its parameters are resolved statically (the static path, see README How it works)."
   [decl items]
   (vec (map (fn [slot item]
               (let [ad (:adapt slot)]

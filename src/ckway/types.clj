@@ -1,5 +1,5 @@
 (ns ckway.types
-  "Type forms (DESIGN-2 rule 5): the literal that follows `:<>`, and Kotlin types as source text.
+  "Type forms (README rule 5): the literal that follows `:<>`, and Kotlin types as source text.
 
   A type form is
     a class symbol         json/JsonBody  Int  java.util.UUID

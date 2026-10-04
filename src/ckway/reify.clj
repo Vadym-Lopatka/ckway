@@ -1,5 +1,5 @@
 (ns ckway.reify
-  "`kt/reify` (DESIGN-2 rule 10): implement Kotlin (and Java) interfaces from Clojure.
+  "`kt/reify` (README rule 10): implement Kotlin (and Java) interfaces from Clojure.
 
     (kt/reify jobs/Job
       (.run [this] (co/delay 10) (purge))        ; a Kotlin function: `.` prefix
