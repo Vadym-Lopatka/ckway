@@ -183,20 +183,8 @@
     (when (= (count jts) (count ks))
       (mapv (fn [k jt] (assoc k :jvm-type jt)) ks jts))))
 
-(defn- own-declarations
-  "The declarations of the members that the Kotlin interface `c` declares itself, an override that narrows a type
-  included. (`meta/class-members` leaves out an override whose parameters equal the ones of the member it
-  overrides, `fun get(): String` over `fun get(): T`, because both are one member to a caller; here both are
-  written members of their JVM method.) The two `meta` functions are private there."
-  [^Class c]
-  (let [m (@#'meta/read-meta c)]
-    (when (instance? KotlinClassMetadata$Class m)
-      (let [k (.getKmClass ^KotlinClassMetadata$Class m)]
-        (filter #(= (.getName c) (:owner %))
-                (@#'meta/declared-members {:binary (.getName c) :internal (.getName k) :km k}))))))
-
 (defn- kotlin-members [^Class c]
-  (for [d (own-declarations c)
+  (for [d (meta/own-declarations c)
         :when (and (#{:function :property} (:kind d)) (some #(= :dispatch (:role %)) (:receivers d)))
         m (case (:kind d)
             :function
@@ -341,12 +329,10 @@
                      (every? true? (map #(slot-fits? %1 %2 %3 env) (:slots a) (:slots b) (.getGenericParameterTypes ma))))]
       [(jvm-key a) (jvm-key b)])))
 
-(defn- bridged
-  "{[name desc] [name desc]}: an abstract method of a super-interface and the most specific method that overrides
-  it with other types (`Vis<T>.visit(Object)Object` and `StrVis.visit(String)String` for `StrVis : Vis<String>`;
-  `Src.get()Object` and `StrSrc.get()String`). Through any number of levels the target is the last override
-  (`L1.g()Object`, `L2.g()CharSequence`, `L3.g()String`: both of the first two map to the third). The JVM
-  class needs a bridge method for each key, as kotlinc and javac make."
+(defn- bridge-leaves
+  "{[name desc] [leaf-key ...]}: an abstract method of a super-interface and ALL the most specific methods that override
+  it with other types, through any number of levels (`Src.get()Object` and the two leaves `S1.get()CharSequence`
+  and `S2.get()Comparable` of `S1 : Src`, `S2 : Src`)."
   [chain]
   (let [pairs (distinct (remove (fn [[a b]] (= a b)) (concat (reflection-pairs chain) (kotlin-pairs chain))))
         next-of (reduce (fn [m [a b]] (update m a (fnil conj []) b)) {} pairs)
@@ -355,9 +341,19 @@
                    (mapcat #(leaves % (conj seen k)) ns)
                    (when (seq seen) [k])))]
     (into {} (for [k (keys next-of)
-                   :let [leaf (first (leaves k #{}))]
-                   :when leaf]
-               [k leaf]))))
+                   :let [ls (vec (distinct (leaves k #{})))]
+                   :when (seq ls)]
+               [k ls]))))
+
+(defn- bridged
+  "{[name desc] [name desc]}: an abstract method of a super-interface and the most specific method that overrides
+  it with other types (`Vis<T>.visit(Object)Object` and `StrVis.visit(String)String` for `StrVis : Vis<String>`;
+  `Src.get()Object` and `StrSrc.get()String`). Through any number of levels the target is the last override
+  (`L1.g()Object`, `L2.g()CharSequence`, `L3.g()String`: both of the first two map to the third). With several
+  leaves (`S1.get()CharSequence`, `S2.get()Comparable`) it is the first one. The JVM class needs a bridge method for
+  each key, as kotlinc and javac make."
+  [chain]
+  (into {} (for [[k ls] (bridge-leaves chain)] [k (first ls)])))
 
 (defn- hints-fit?
   "Do the type hints of a written form fit the slots of member `m`? A hint that is exactly the class of the slot
@@ -477,7 +473,7 @@
       (and tag (symbol? tag) (#{'int 'long 'short 'byte 'double 'float 'char 'boolean} tag))
       (vary-meta p assoc :tag (symbol (.getName (r/box-class ^Class (r/tag->class *ns* tag)))))
       tag p
-      hint (vary-meta p assoc :tag (symbol hint))
+      hint (r/lib-tag p hint)
       :else p)))
 
 (defn- member-fn
@@ -594,6 +590,33 @@
            {:impl :abstract :name n :desc d
             :message (str "kt/reify: the abstract member `" (sig-of k class) "` was called, but the kt/reify form does not write it")}))))))
 
+(defn- serve-siblings
+  "`written` with one more entry for each leaf override that a written form can serve as well. The interfaces of one
+  `kt/reify` can override one member in different ways (`S1.get(): CharSequence`, `S2.get(): Comparable<*>` over
+  `Src.get(): Any`): a JVM method for each. The form that is written for one is the body of the others too, with the
+  result checked against the result type of each (a kt error when it does not fit), unless the user writes that member
+  too. When the leaves differ in their PARAMETER types one body cannot serve them: a kt error that says so."
+  [written members leaf-groups]
+  (let [explicit (set (map #(jvm-key (:member %)) written))
+        extra (reduce
+               (fn [{:keys [taken out] :as acc} w]
+                 (let [m (:member w) k (jvm-key m)
+                       ks (disj (set (mapcat identity (filter #(contains? (set %) k) leaf-groups))) k)
+                       sibs (for [m2 members
+                                  :when (and (contains? ks (jvm-key m2)) (not (explicit (jvm-key m2))) (not (taken (jvm-key m2)))
+                                             (= (:kind m2) (:kind m)) (= (:key m2) (:key m)))]
+                              m2)]
+                   (doseq [m2 sibs
+                           :when (not= (mapv :jvm-type (:slots m2)) (mapv :jvm-type (:slots m)))]
+                     (fail (str "kt/reify: `" (:key m) "` is overridden with different parameter types in " (:iface m) " and "
+                                (:iface m2) ", so one body cannot serve both:\n    " (:signature m) "\n    " (:signature m2)
+                                "\n  Write the member under each interface: (kt/reify " (simple-name (:iface m)) " " (written-form m)
+                                " " (simple-name (:iface m2)) " " (written-form m2) ")")))
+                   {:taken (into taken (map jvm-key sibs))
+                    :out (into out (map #(assoc w :member %) sibs))}))
+               {:taken #{} :out []} written)]
+    (vec (map-indexed (fn [i w] (assoc w :idx i)) (concat written (:out extra))))))
+
 (defn expand
   "Expansion of `(kt/reify spec...)` (see the namespace docstring)."
   [specs]
@@ -614,6 +637,7 @@
         _ (doseq [[k ws] (group-by #(let [j (:jvm (:member %))] [(:name j) (:desc j)]) written)
                   :when (> (count ws) 1)]
             (fail (str "kt/reify: the member `" (:key (:member (first ws))) "` is written twice (" (str/join ", " (map #(r/short-pr (list (:name %) (vec (:params %)))) ws)) ")")))
+        written (serve-siblings written members (vals (bridge-leaves chain)))
         spec {:ifaces (mapv #(.getName ^Class %) classes) :iface-classes classes :methods (vec (class-methods written jvm members))}
         cname (bridge/reify-class (simple-name (.getName ^Class (first classes))) spec)
         frame (gensym "frame")

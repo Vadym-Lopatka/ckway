@@ -960,6 +960,20 @@
         (swap! declared-members-cache assoc internal ds)
         ds)))
 
+(defn own-declarations
+  "The declarations that the Kotlin class (or interface) `c`, a Class, declares itself, an override included: the
+  members of its own metadata with `:owner` = its binary name, as `declared-members` reads them. Unlike
+  `class-members` it does not leave out an override that has the parameters of the member it overrides (`override fun
+  get(): String` over `fun get(): Any`): each is a member of its own JVM method, which `kt/reify` must be able to write.
+  nil for a class without Kotlin class metadata (a Java class, a facade). Types are Kotlin types, as in the other
+  declarations."
+  [^Class c]
+  (let [m (read-meta c)]
+    (when (instance? KotlinClassMetadata$Class m)
+      (let [k (.getKmClass ^KotlinClassMetadata$Class m)]
+        (filter #(= (.getName c) (:owner %))
+                (declared-members {:binary (.getName c) :internal (.getName k) :km k}))))))
+
 (defn- supertype-names [^KmClass k]
   (for [^KmType t (.getSupertypes k)
         :let [c (.getClassifier t)]
@@ -1017,8 +1031,19 @@
       (let [ctx {:binary binary :internal internal :kcls k :tps tps :flags flags :kind kind
                  :value-class (when (Attributes/isValue k) (:value-class (class-info internal)))}
             inherited (inherited-decls k)
-            inherited-keys (set (map member-key inherited))
-            own (remove #(contains? inherited-keys (member-key %)) (container-decls (member-ctx binary internal k) k))]
+            by-key (group-by member-key inherited)
+            ret-text #(some-> (:return %) type-text)
+            own-all (container-decls (member-ctx binary internal k) k)
+            ;; an override is one member with the original (same key), and the original stands for it - unless it has
+            ;; another result type: `override fun get(): String` over `fun get(): Any` is the member that a caller
+            ;; must see (the result is a String), so it replaces the original
+            ;; (not for the result type of the original that is a type parameter of its class: `T` made `String` by a
+            ;; subclass of `Lazy<String>` is the same member, the original stands for it)
+            narrowing? (fn [d] (when-let [is (by-key (member-key d))]
+                                 (every? #(and (not= (ret-text d) (ret-text %)) (nil? (:type-param (:return %)))) is)))
+            narrowed-keys (set (map member-key (filter narrowing? own-all)))
+            own (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))) own-all)
+            inherited (remove #(contains? narrowed-keys (member-key %)) inherited)]
         (concat (class-var-decls ctx k) own inherited)))))
 
 (defn- package-decls

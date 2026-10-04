@@ -64,8 +64,9 @@
 (defn- has-job? [^CoroutineContext ctx] (some? (job-of ctx)))
 
 (defn- new-job
-  "A Job without a parent, for a suspend call made outside any coroutine body."
-  ^Job [] (let [^Job parent nil] (kotlinx.coroutines.JobKt/Job parent)))
+  "A Job for a suspend call made outside any coroutine body: without a parent, or (a call from a thread that inherited
+  the context of a body) a child of the Job of `ctx`."
+  ^Job [ctx] (let [^Job parent (job-of ctx)] (kotlinx.coroutines.JobKt/Job parent)))
 
 (defn- cancelling?
   "Has the Job of `ctx` been cancelled (the body is being cancelled)?"

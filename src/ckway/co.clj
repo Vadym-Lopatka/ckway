@@ -23,9 +23,14 @@
          - a call with its own Job (see 1), as `runBlocking` does: the interrupt cancels that Job and the thread keeps
            waiting for the callee to finish its cancellation, then throws InterruptedException (the interrupt flag
            is clear, the exception replaces it; the callee's result, if any, is dropped). Unlike `runBlocking`
-           the wait is bounded: after the grace time (system property `ckway.interrupt.grace.ms`, default 5000)
+           the wait is bounded: after the grace time (system property `ckway.interrupt.grace.ms`, see `grace-ms`)
            or at a second interrupt the exception is thrown although the callee has not resumed `k` (a callee
            that does not support cancellation), and the late result is dropped.
+       A thread that only inherited the context of a body (`future`, `bound-fn`; `*body-thread*` is not this
+       thread) has no body thread of its own that the cancellation of the Job interrupts: its call is a call from
+       outside a body, in the context of the body, with a Job of its own that is a child of the Job of the body. An
+       interrupt of that thread cancels that Job (the last case above), cancelling the body cancels the call, and
+       the interrupt flag of such a thread is never set again.
     3. `run-body k frame f`: the adapter of a suspend function type / fun interface. Runs `(f)` on a new
        virtual thread and returns COROUTINE_SUSPENDED. The thread sees `frame` (a Clojure binding frame
        from `capture-frame`, taken when the adapter was created) and `*context*` = (.getContext k).
@@ -42,6 +47,7 @@
        disposed when the body ends.
     5. A body is not on the dispatcher thread: a ThreadLocal that no ThreadContextElement carries is
        not visible in it. `synchronized` pins the carrier on JDK 21-23 (not on 24+)."
+  (:require [clojure.string :as str])
   (:import [clojure.lang Var]
            [java.util.concurrent.locks LockSupport]
            [kotlin.coroutines Continuation ContinuationInterceptor CoroutineContext EmptyCoroutineContext]))
@@ -50,6 +56,12 @@
 
 (def ^:dynamic *context*
   "The CoroutineContext of the coroutine body that runs on this thread, or nil (outside any body)."
+  nil)
+
+(def ^:dynamic *body-thread*
+  "The thread of the coroutine body that runs here (the one that the cancellation of its Job interrupts), or nil
+  outside any body. A thread that only inherited the bindings of the body (`future`, `bound-fn`) sees the
+  body's `*context*` but is not this thread."
   nil)
 
 (def SUSPENDED
@@ -64,12 +76,23 @@
 
 (declare kx)
 
+(def ^:private max-grace-ms
+  "The longest grace time (24 hours): a larger `ckway.interrupt.grace.ms` is this."
+  (* 24 60 60 1000))
+
+(defn grace-ms
+  "The grace time of a top-level wait in ms, from the text `s` of `ckway.interrupt.grace.ms`: not a number (or
+  nil) is the default 5000; a negative number is 0 (no grace: the exception comes as soon as the callee has been told
+  to cancel); a number above 24 hours is 24 hours."
+  ^long [s]
+  (let [n (try (Long/parseLong (str/trim (str s))) (catch NumberFormatException _ 5000))]
+    (long (max 0 (min n max-grace-ms)))))
+
 (defn- grace-nanos
   "How long a top-level wait keeps waiting for a callee that was cancelled by an interrupt: the system property
-  `ckway.interrupt.grace.ms` (read at each wait), default 5000 ms."
+  `ckway.interrupt.grace.ms` (read at each wait), see `grace-ms`."
   ^long []
-  (* 1000000 (try (Long/parseLong (System/getProperty "ckway.interrupt.grace.ms" "5000"))
-                  (catch NumberFormatException _ 5000))))
+  (* 1000000 (grace-ms (System/getProperty "ckway.interrupt.grace.ms" "5000"))))
 
 (deftype Waiter [^CoroutineContext ctx own-job ^:volatile-mutable result ^:volatile-mutable ^Thread waiter]
   Continuation
@@ -122,11 +145,16 @@
 (defn continuation
   "The Continuation for one suspend call (see the contract)."
   ^Continuation []
-  (let [ctx (or *context* EmptyCoroutineContext/INSTANCE)]
+  (let [ctx (or *context* EmptyCoroutineContext/INSTANCE)
+        ;; a thread that only inherited the context of a body (`future`, `bound-fn`) is not the body's thread
+        child? (let [bt *body-thread*] (and bt (not (identical? bt (Thread/currentThread)))))]
     (if-let [h @kx]
-      (if ((:has-job? h) ctx)
+      (if (and ((:has-job? h) ctx) (not child?))
         (->Waiter ctx nil UNSET nil)
-        (let [job ((:new-job h))]
+        ;; a call from outside a body, or from a child thread of one: it has a Job of its own, the interrupt of this
+        ;; thread cancels it. In a child thread that Job is a child of the Job of the body: when the body is
+        ;; cancelled, so is the call.
+        (let [job ((:new-job h) ctx)]
           (->Waiter (.plus ^CoroutineContext ctx job) job UNSET nil)))
       (->Waiter ctx nil UNSET nil))))
 
@@ -208,7 +236,7 @@
         res (try
               (vreset! cancel ((:on-cancel hooks) ctx (Thread/currentThread)))
               (vreset! entered ((:enter hooks) ctx))
-              (try (with-bindings* {#'*context* ctx} f)
+              (try (with-bindings* {#'*context* ctx #'*body-thread* (Thread/currentThread)} f)
                    (catch Throwable e
                      (failure (try ((:map-exception hooks) ctx e) (catch Throwable _ e)))))
               (catch Throwable e (failure e)))
@@ -227,7 +255,7 @@
               (let [ctx (.getContext k)]
                 (if hooks
                   (run-hooked ctx f hooks)
-                  (try (with-bindings* {#'*context* ctx} f)
+                  (try (with-bindings* {#'*context* ctx #'*body-thread* (Thread/currentThread)} f)
                        (catch Throwable e (failure e)))))
               (catch Throwable e (failure e)))]
     (resume! k res)))

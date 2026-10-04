@@ -6,16 +6,20 @@
     $XDG_CACHE_HOME/ckway     when XDG_CACHE_HOME is set (and absolute)
     %LOCALAPPDATA%\\ckway      on Windows (else <home>\\AppData\\Local\\ckway)
     ~/.cache/ckway            otherwise
-  A directory that kt creates gets owner-only permissions where the file system has POSIX permissions. Every
-  directory that exists, the default one and the one of the property, is used only when (after symbolic links
-  are resolved) it is a directory that belongs to the current user and is not writable by group or others;
-  otherwise the cache is off. For the default directory this is silent (`-Dckway.debug` says why); for the
+  The directory that is named (the default one or the one of the property) is only the PARENT of the cache: kt
+  works in its own subdirectory `<dir>/bridges-v1`, which it creates itself, and never reads, writes or deletes
+  anything else in `<dir>`. A directory that kt creates gets owner-only permissions where the file system has POSIX
+  permissions. The named directory, when it exists, and the subdirectory, when it exists, are each used only when
+  (after symbolic links are resolved) they are a directory that belongs to the current user and is not writable by
+  group or others, and the subdirectory is not itself a symbolic link; otherwise the cache is off. (The directories
+  ABOVE the named one are not checked: see doc/limits.md section 15.) For the default directory this is silent (`-Dckway.debug` says why); for the
   directory of the property, which is an explicit setting, one warning line on stderr says why and how to fix it.
   The default directory must be absolute: when the home directory is unknown (`user.home` is `?` for a user
   that has no passwd entry, as in many containers) the cache is off, it never falls back to the working
   directory. The owner is compared with the owner of a file that this process creates, not with a user name.
 
-  ENTRY. One entry is a directory `<bridge class name>-<key>` that holds the class files `<binary name>.class`
+  ENTRY. One entry is a directory `<bridge class name>-<key>` (the bridge class name starts with `ckway.bridge.`,
+  the key is 32 hex digits) in the subdirectory. It holds the class files `<binary name>.class`
   and `entry.txt`, written last:
     ckway-cache-entry 1
     base <sha-256 of everything the bridge depends on, except the compiler>
@@ -29,9 +33,12 @@
   An entry is written to a temporary directory and renamed (atomic): a reader sees all of an entry or none, and two
   JVMs that write the same entry cannot mix their files. Every failure of the cache (read-only directory, no
   space...) means \"no cache\", never an error.
-  PRUNING (on every store): the entries of one bridge name are kept up to `keep-per-bridge`, the most recently
+  PRUNING (on every store; only in the subdirectory, and only what kt can prove that it created: a directory whose
+  name is exactly an entry name or a `.ckway-tmp-<uuid>` name, that is a real directory (never a symbolic link) directly
+  inside the cache directory, and whose files are class files and `entry.txt` only; a plain file or any other
+  directory is never touched, and nothing is deleted through a symbolic link): the entries of one bridge name are kept up to `keep-per-bridge`, the most recently
   used first, so two projects with different versions of one Kotlin library do not evict each other; an entry
-  that was not used for `max-age-ms` goes whatever its bridge; a temporary directory older than `stale-tmp-ms`
+  that was not used for `max-age-ms` goes whatever its bridge; a temporary directory (`.ckway-tmp-<uuid>`) older than `stale-tmp-ms`
   (a JVM that was killed while it wrote) goes. \"Used\" is the modification time of the entry directory: a hit
   sets it to now (at most once per `touch-after-ms`), which changes neither the class files nor `entry.txt`."
   (:require [clojure.java.io :as io]
@@ -132,25 +139,40 @@
     (swap! warned conj text)
     (binding [*out* *err*] (println text))))
 
+(def entries-dirname
+  "The subdirectory of the named cache directory in which kt keeps its entries (and deletes). The number is the layout."
+  "bridges-v1")
+
+(defn- reason-for
+  "Why neither the named directory `d` nor its subdirectory of entries may be used (a string), or nil."
+  [^File d]
+  (or (try (unsafe-reason d) (catch Throwable e (str "cannot be checked (" e ")")))
+      (let [sub (io/file d entries-dirname)]
+        (try (if (and (.exists sub) (Files/isSymbolicLink (.toPath sub)))
+               (str "has a subdirectory " entries-dirname " that is a symbolic link")
+               (when-let [why (unsafe-reason sub)] (str "has a subdirectory " entries-dirname " that " why)))
+             (catch Throwable e (str "cannot be checked (" e ")"))))))
+
 (defn dir-for
-  "The cache directory for the value `p` of -Dckway.cache.dir (or nil), the environment `env` and the system
-  properties `props`, or nil when the cache is off. See the namespace docstring."
+  "The cache directory - the subdirectory `bridges-v1` of the directory that is named - for the value `p` of
+  -Dckway.cache.dir (or nil), the environment `env` and the system properties `props`, or nil when the cache is
+  off. See the namespace docstring."
   ^File [p env props]
   (cond
     (nil? p) (let [d (default-dir env props)]
                (cond (nil? d) (do (debug "not used (no home directory for the default location)") nil)
                      (not (.isAbsolute d)) (do (debug "not used (the default location is not absolute: " d ")") nil)
-                     :else (if-let [why (try (unsafe-reason d) (catch Throwable e (str "cannot be checked (" e ")")))]
+                     :else (if-let [why (reason-for d)]
                              (do (debug "not used (" d " " why ")") nil)
-                             d)))
+                             (io/file d entries-dirname))))
     (str/blank? p) nil
     :else (let [d (io/file p)]
-            (if-let [why (try (unsafe-reason d) (catch Throwable e (str "cannot be checked (" e ")")))]
+            (if-let [why (reason-for d)]
               (do (warn! (str "ckway: the bridge cache is OFF: the directory " (.getPath d) " of -Dckway.cache.dir " why
                               ". Run `chmod 700 " (.getPath d) "` (as the owner), or name a directory that only you can write, "
                               "or set -Dckway.cache.dir= to turn the cache off and silence this line."))
                   nil)
-              d))))
+              (io/file d entries-dirname)))))
 
 (defn dir
   "The cache directory, or nil when the cache is off. See the namespace docstring."
@@ -170,11 +192,65 @@
 (defn- entry-name [cname base compiler]
   (str cname "-" (subs (sha256-str (str base "|" compiler)) 0 32)))
 
-(defn- delete-tree! [^File f]
+(def ^:private nofollow (into-array java.nio.file.LinkOption [java.nio.file.LinkOption/NOFOLLOW_LINKS]))
+
+(defn- real-dir?
+  "Is `f` a directory itself, not a symbolic link to one?"
+  [^File f]
+  (Files/isDirectory (.toPath f) nofollow))
+
+(defn- delete-tree!
+  "Delete `f` and, when it is a real directory, what is in it. A symbolic link is deleted as a link: its target is
+  never entered or changed."
+  [^File f]
   (try
-    (when (.isDirectory f) (doseq [c (.listFiles f)] (delete-tree! c)))
-    (.delete f)
+    (let [p (.toPath f)]
+      (when (Files/isDirectory p nofollow)
+        (let [kids (with-open [ds (Files/newDirectoryStream p)] (vec (iterator-seq (.iterator ds))))]
+          (doseq [^Path c kids] (delete-tree! (.toFile c)))))
+      (Files/deleteIfExists p))
     (catch Throwable _ nil)))
+
+(def ^:private entry-name-re
+  "The name of an entry: the bridge class (`ckway.bridge.` + name) and the 32 hex digits of the key."
+  #"ckway\.bridge\.[A-Za-z0-9_$.]+-[0-9a-f]{32}")
+
+(def temp-prefix
+  "The prefix of the temporary directory that a store writes before it renames it. Specific to this library: any
+  other directory is never taken for one."
+  ".ckway-tmp-")
+
+(def ^:private temp-name-re #"\.ckway-tmp-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+(defn- own-child?
+  "Is `f` a real directory (not a link) that lies directly inside `root`, after both are resolved?"
+  [^File root ^File f]
+  (try (and (real-dir? f)
+            (= (.toRealPath (.toPath root) no-link-options)
+               (.toRealPath (.getParent (.toAbsolutePath (.toPath f))) no-link-options)))
+       (catch Throwable _ false)))
+
+(defn- ours-shaped?
+  "Does the directory hold only what an entry holds: class files and `entry.txt`, as plain files?"
+  [^File d]
+  (try (with-open [ds (Files/newDirectoryStream (.toPath d))]
+         (every? (fn [^Path c]
+                   (let [n (str (.getFileName c))]
+                     (and (Files/isRegularFile c nofollow)
+                          (or (= "entry.txt" n) (boolean (re-matches #"[A-Za-z0-9_$.]+\.class" n))))))
+                 (iterator-seq (.iterator ds))))
+       (catch Throwable _ false)))
+
+(defn- entry-dir?
+  "Is `f` an entry directory that kt created in `root`? The exact entry name, a real directory directly in `root`,
+  and only class files and `entry.txt` in it."
+  [^File root ^File f]
+  (and (boolean (re-matches entry-name-re (.getName f))) (own-child? root f) (ours-shaped? f)))
+
+(defn- temp-dir?
+  "Is `f` a temporary directory of kt in `root`?"
+  [^File root ^File f]
+  (and (boolean (re-matches temp-name-re (.getName f))) (own-child? root f)))
 
 (def ^:private binary-name-re #"[A-Za-z0-9_$.]+")
 
@@ -199,7 +275,7 @@
   (* 90 24 60 60 1000))
 
 (def stale-tmp-ms
-  "A `.tmp-` directory older than this (one hour) was left by a JVM that was killed while it wrote."
+  "A `.ckway-tmp-<uuid>` directory older than this (one hour) was left by a JVM that was killed while it wrote."
   (* 60 60 1000))
 
 (def touch-after-ms
@@ -247,8 +323,8 @@
     (when (and cache-dir (.isDirectory cache-dir))
       (let [direct (when compiler (io/file cache-dir (entry-name cname base compiler)))
             cands (if direct
-                    (when (.isDirectory ^File direct) [direct])
-                    (filter (fn [^File f] (and (.isDirectory f) (str/starts-with? (.getName f) (str cname "-"))))
+                    (when (entry-dir? cache-dir direct) [direct])
+                    (filter (fn [^File f] (and (str/starts-with? (.getName f) (str cname "-")) (entry-dir? cache-dir f)))
                             (.listFiles cache-dir)))]
         (some (fn [^File d]
                 (let [r (verified d cname base)]
@@ -262,7 +338,7 @@
   [^File cache-dir cname base compiler]
   (try
     (doseq [^File f (.listFiles cache-dir)
-            :when (and (.isDirectory f) (str/starts-with? (.getName f) (str cname "-")))
+            :when (and (str/starts-with? (.getName f) (str cname "-")) (entry-dir? cache-dir f))
             :let [mf (io/file f "entry.txt")
                   m (when (.isFile mf) (try (parse-manifest mf) (catch Throwable _ nil)))]
             :when (or (nil? m) (and (= base (:base m)) (or (nil? compiler) (= compiler (:compiler m)))))]
@@ -272,14 +348,14 @@
 (defn- prune!
   "Delete what is stale in `cache-dir`: temporary directories of killed JVMs, entries not used for `max-age-ms`,
   and the entries of the bridge `cname` beyond `keep-per-bridge` (the least recently used first). The entry
-  `keep` is never deleted."
+  `keep` is never deleted. Only what kt can prove it created is touched (`entry-dir?`, `temp-dir?`): anything
+  else in the directory - a file, another directory, a `.tmp-*` of another tool, a symbolic link - stays."
   [^File cache-dir cname keep]
   (let [now (System/currentTimeMillis)
-        dirs (filter #(.isDirectory ^File %) (.listFiles cache-dir))
-        tmp? (fn [^File f] (str/starts-with? (.getName f) ".tmp-"))]
-    (doseq [^File f dirs :when (and (tmp? f) (> (- now (.lastModified f)) stale-tmp-ms))]
+        kids (vec (.listFiles cache-dir))]
+    (doseq [^File f kids :when (and (temp-dir? cache-dir f) (> (- now (.lastModified f)) stale-tmp-ms))]
       (delete-tree! f))
-    (let [entries (remove tmp? dirs)
+    (let [entries (filter #(entry-dir? cache-dir %) kids)
           old? (fn [^File f] (> (- now (.lastModified f)) max-age-ms))
           [old live] ((juxt filter remove) #(and (not= keep (.getName ^File %)) (old? %)) entries)
           same (->> live
@@ -293,13 +369,17 @@
   damaged: it is deleted and written again."
   [^File cache-dir cname base compiler classes]
   (try
-    (when (make-dirs! cache-dir)
+    (when (and (make-dirs! cache-dir)
+               ;; created by another process in the meantime? then it must pass the check too
+               (if-let [why (unsafe-reason cache-dir)] (do (debug cache-dir " not used (" why ")") false) true))
       (let [name (entry-name cname base compiler)
             final (io/file cache-dir name)
-            tmp (io/file cache-dir (str ".tmp-" (java.util.UUID/randomUUID)))]
+            tmp (io/file cache-dir (str temp-prefix (java.util.UUID/randomUUID)))]
         (when (and (.exists final) (not (valid-manifest final)))
-          (debug "entry " final " has no valid entry.txt, replaced")
-          (delete-tree! final))
+          (if (entry-dir? cache-dir final)
+            (do (debug "entry " final " has no valid entry.txt, replaced")
+                (delete-tree! final))
+            (throw (ex-info (str final " is not an entry of kt and is not touched") {}))))
         (when-not (.exists final)
           (try
             (when-not (make-dirs! tmp) (throw (ex-info "no temp dir" {})))

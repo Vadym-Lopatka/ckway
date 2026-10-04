@@ -123,7 +123,17 @@
         (.isPrimitive ^Class c) {:class c :upper true}
         :else {:class c :static true}))
 
-(defn- user-hinted? [^Compiler$LocalBinding lb] (some? (.-tag lb)))
+(defn lib-tag
+  "The symbol `p` with the class name `h` as a type hint that the LIBRARY adds (a `fn` literal at a function-type
+  parameter, a `kt/reify` member). It is marked, so that it is never mistaken for a hint the user wrote: it is only
+  an upper bound of the class of the value (see `user-hinted?`)."
+  [p h]
+  (vary-meta p assoc :tag (symbol h) :ckway/lib-tag true))
+
+(defn- user-hinted?
+  "Did the USER write a type hint on the local? A tag that the library added (`lib-tag`) does not count."
+  [^Compiler$LocalBinding lb]
+  (and (some? (.-tag lb)) (not (:ckway/lib-tag (meta (.-sym lb))))))
 
 (defn- literal-info
   "Info for a literal. An integer literal is a Long to Clojure; Kotlin types it by size (Int if it fits)."
@@ -598,7 +608,9 @@
       (if-let [[t conv?] (numeric-tier pc ac (:lit info) (:val info))]
         (if conv? [:ok t :conv] [:ok t])
         [:no (str "`" (:name slot) "` is " (.getSimpleName pc) " but got " (.getSimpleName ac) (lit-note info))])
-      (.isAssignableFrom pc ac) [:ok (cond (= pc ac) 0 (= pc Object) 3 :else 1)]
+      ;; a reference type: the tier only tells `Object` (3) from any other type (1). How close the parameter type is to
+      ;; the class of the argument does not choose between candidates: Kotlin's specificity rule does (`most-specific`)
+      (.isAssignableFrom pc ac) [:ok (if (= pc Object) 3 1)]
       (and (:adapt slot) (isa? ac clojure.lang.IFn)) [:adapter (:feature (:adapt slot))]
       :else [:no (str "`" (:name slot) "` is " (.getSimpleName pc) " but got " (.getSimpleName ac))])))
 
@@ -966,6 +978,13 @@
                                                (str f "    ; JVM descriptor " (jvm-desc d))
                                                "no public JVM method (it is `inline`): write it in Clojure")))))]
     (cond
+      ;; every candidate needs the library's own conversion of a number (an integer for a Double or a Float...)
+      (every? (fn [b] (some #(= :conv (nth % 2 nil)) (:checks b))) best)
+      (str "\n  Why: every candidate needs a number that the argument is not: kt would have to convert it (an integer "
+           "to a Double or a Float, a Long to an Int...), and it cannot choose the target. Kotlin refuses such a call too."
+           "\n  Way out: write the number as the type you mean: a floating-point literal (`4.0`, `4.0f`) or a conversion "
+           "(`(double x)`, `(float x)`, `(int x)`, `(long x)`).")
+
       (and (contains? kinds :function) (contains? kinds :property))
       (str "\n  Why: a function and a property are both named `" var-name "`, so they share one var, and this call fits both. "
            "Kotlin tells them apart by its syntax (`f(a)` or `a.f`), a var call has only one form. kt does not guess."
@@ -1047,7 +1066,7 @@
               {:kt/candidates (map :signature decls)}))
       ok)))
 
-(defn choose
+(defn- choose*
   "Pick exactly one declaration (rule 7).
   => {:decl d :items items :checks checks [:tform form]}      one candidate
      {:dynamic? true [:tform form]}                            several candidates, types unknown
@@ -1083,7 +1102,7 @@
       (when (empty? viable)
         (fail (reasons-text var-name args (concat (map #(hash-map :decl (:decl %) :reason (:error %)) failed)
                                                   (map #(hash-map :decl (:decl %) :reason (no-reason %)) checked)))
-              {:kt/candidates (map :signature decls)}))
+              {:kt/candidates (map :signature decls) :kt/no-fit true}))
       (let [;; the library's own conversion of a number (an integer to a Double, a Long to an Int...) is the last
             ;; resort: Kotlin accepts no such value, so it counts only when no candidate takes the values as they are
             conv? (fn [b] (some #(= :conv (nth % 2 nil)) (:checks b)))
@@ -1133,6 +1152,30 @@
                            (or (ambiguity-help var-name best)
                                "\n  Add a type hint to an argument, or use Java interop (.getX) for this call."))
                       {:kt/candidates (map (comp :signature :decl) best)})))))))))
+
+(defn- relax-hints
+  "`parsed` with every type hint that the user wrote (`:static`) taken as an upper bound (`:upper`)."
+  [parsed]
+  (let [relax (fn [e] (cond-> e (:static (:info e)) (update :info #(-> % (dissoc :static) (assoc :upper true)))))]
+    (-> parsed
+        (update :positional #(mapv relax %))
+        (update :named #(mapv (fn [[n e]] [n (relax e)]) %)))))
+
+(defn- has-static-hint? [parsed]
+  (boolean (some (comp :static :info) (concat (:positional parsed) (map second (:named parsed))))))
+
+(defn choose
+  "Pick exactly one declaration (rule 7; `choose*`). A type hint that the user wrote decides between the candidates
+  that it fits for sure, as a declared type does in Kotlin. When it fits no candidate for sure, but the value could still
+  fit (the hint is an interface, or a class that a parameter type extends), it is only an upper bound: the call is
+  selected on the other information or checked at run time. A hint that can never fit stays an error."
+  [var-name decls parsed compile?]
+  (try (choose* var-name decls parsed compile?)
+       (catch clojure.lang.ExceptionInfo e
+         (if (and compile? (:kt/no-fit (ex-data e)) (has-static-hint? parsed))
+           (try (choose* var-name decls (relax-hints parsed) compile?)
+                (catch clojure.lang.ExceptionInfo e2 (if (:kt/no-fit (ex-data e2)) (throw e) (throw e2))))
+           (throw e)))))
 
 ;; ---------------------------------------------------------------- plan
 
@@ -1284,10 +1327,11 @@
 
 (defn- fits?
   "Is a value with the compile-time `info` sure to be an instance of the class `cname`? (A trusted entry is, a
-  class that is only an upper bound is if that class is a subtype.)"
+  class that is only an upper bound is if that class is a subtype. The type hint that the USER wrote (`:static`) is
+  not sure: a wrong hint is a `kt:` error at run time, `checked-form`.)"
   [cname info]
   (boolean (or (:trusted info)
-               (when-let [^Class ic (:class info)]
+               (when-let [^Class ic (when-not (:static info) (:class info))]
                  (when-let [^Class jc (jvm-class cname)]
                    (.isAssignableFrom jc (box-class ic)))))))
 
@@ -1864,7 +1908,7 @@
   [params hints]
   (let [[fixed more] (split-with #(not= '& %) params)]
     (if (= (count fixed) (count hints))
-      (vec (concat (map (fn [p h] (if (and (symbol? p) h (not (:tag (meta p)))) (vary-meta p assoc :tag (symbol h)) p))
+      (vec (concat (map (fn [p h] (if (and (symbol? p) h (not (:tag (meta p)))) (lib-tag p h) p))
                         fixed hints)
                    more))
       params)))

@@ -73,7 +73,7 @@
       (is (= 2 (:compiled sa)))
       (is (= 0 (:cache-hits sa)))
       ;; an entry is a directory <bridge>-<key> with the class files and entry.txt (hashes), see ckway.bridge.cache
-      (let [entries (filter #(.isDirectory ^File %) (.listFiles cache))]
+      (let [entries (filter #(.isDirectory ^File %) (.listFiles (io/file cache "bridges-v1")))]
         (is (= 2 (count entries)))
         (is (= 2 (count (filter #(.isFile (io/file ^File % "entry.txt")) entries))))
         (is (= 2 (count (mapcat (fn [^File e] (filter #(str/ends-with? (.getName ^File %) ".class") (.listFiles e))) entries))))))

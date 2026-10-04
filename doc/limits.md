@@ -152,11 +152,19 @@ A constructor parameter counts as a property when the class has a public propert
   (`override fun id(): Uid` over `fun id(): Any`: the bridge unboxes and boxes), over any number of levels and when two
   super-interfaces declare the same member (`R3Both : R3Left, R3Right`). Each Kotlin member is ONE writable member, the
   most specific one; the class gets that JVM method and a bridge method for every JVM signature it overrides.
-  kt reads the declarations of the interface itself from its Kotlin metadata, because `ckway.meta` lists an override
-  only when its Kotlin parameter types differ from the original's (`kt/reify` calls two private functions of
-  `ckway.meta` for this). Overloads that differ only in `Int` and `Int?` (`f(Int?)`, `f(Int)`: JVM `Integer` and `int`) are
+  kt reads the declarations of the interface itself from its Kotlin metadata (`ckway.meta/own-declarations`, public),
+  because `ckway.meta/class-members` lists an override of the same parameter types only when its result type differs
+  from the original's: `override fun get(): String` over `fun get(): Any` is the member that a caller sees (its result is a
+  `String`; before, the original hid it). Overloads that differ only in `Int` and `Int?` (`f(Int?)`, `f(Int)`: JVM `Integer` and `int`) are
   two members: write them with the hints `^Integer` and `^int` (a hint that is exactly the JVM class of the parameter is
   the exact fit; `^Integer` alone for an `Int` still fits when no other overload does).
+* One member that two interfaces narrow in different ways (`interface Src { fun get(): Any }`, `S1 : Src { override fun get():
+  CharSequence }`, `S2 : Src { override fun get(): Comparable<*> }`): `(kt/reify S1 S2 (.get [this] "ab"))` implements the JVM
+  method of each leaf (`S1.get()`, `S2.get()`) and of the original (`Src.get()`, which calls the first leaf): one
+  written form serves every leaf override that takes the same parameter types. Its result is checked against the result type
+  of each leaf when that leaf is called (a `kt:` error "expected CharSequence ... got ..."). A member that you write under
+  each interface is used as written. If the leaves take different parameter types (`G1 : G<String>`, `G2 : G<Int>`) one body
+  cannot serve both: a compile error that says to write the member under each interface.
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
@@ -262,10 +270,42 @@ name, how to write it: "`weigh` is a property of fx.Cart2: write (f/weigh cart)"
 
 A type hint that you write is the static type of the argument, as the declared type of a variable is in Kotlin: with a member
 `mu(x: String)` and an extension `B.mu(x: CharSequence)`, `(let [^CharSequence s "s"] (p/.mu b s))` calls the extension, and
-`(let [s "s"] (p/.mu b s))` the member. A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`,
-the element of a `doseq`) is an upper bound: the class of the value decides at run time. `^Object` says nothing. One
-exception: `^Number` for an argument that goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of
-the value decides, as for an inferred type.
+`(let [s "s"] (p/.mu b s))` the member. There are three cases, each shown by an evaluated example (`examples/14_kotlin_stdlib.clj`):
+
+```clojure
+;; 1. The hint fits some candidates for sure: it decides between them (kind has overloads for Int, Long and String).
+(let [^String x (identity "a")] (s/kind x))
+;; => "String"
+
+;; 2. It fits no candidate for sure, but the value could still fit (the hint is an interface, or a non-final class that a
+;;    parameter type extends): it is only an upper bound, the call is checked at run time.
+(let [^clojure.lang.IPersistentVector v [1 2 3]] (c/.first v))
+;; => 1
+
+;; 3. It can never fit (a final class that is unrelated to every candidate): a compile error.
+(err (let [^Long n (identity 1)] (c/.first n)))
+;; => "kt: no Kotlin declaration of `.first` fits (.first n)"
+```
+
+(In case 2 a value of the wrong class is a `kt:` error at run time, with the candidates.) A hint that the static path
+trusts and that is wrong at run time is a `kt:` error too, never the JVM's `ClassCastException`: it names the call, the
+parameter, the Kotlin declaration and the actual class. A correct call costs one `instance?` check.
+A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`, the element of a `doseq`) is an upper
+bound: the class of the value decides at run time. `^Object` says nothing. One exception: `^Number` for an argument that
+goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of the value decides, as for an inferred type.
+
+A type that the LIBRARY puts on a local is never a hint that you wrote, so it is an upper bound too: the parameters of a
+`fn` literal that you pass at a Kotlin function type (the library tags them with the Kotlin parameter types so that nested
+`kt` calls stay direct), and `this` and the parameters of a `kt/reify` member. With `interface Ev`, `class Click : Ev { fun pos() }`
+and `fun eachEv(xs: List<Ev>, f: (Ev) -> String)`, `(p/eachEv xs (fn [e] (p/.pos e)))` works: `e` is an `Ev` for the
+library, and the call on it is checked at run time, as it is for a local that Clojure inferred. Your own hint on such a
+parameter, `(fn [^Click e] (p/handle e))`, is the static type, as everywhere.
+
+Among candidates that all take the value as it is, the choice is the most specific one by Kotlin's rule (type arguments
+included); how close a parameter type is to the class of the value does not choose. So a value that comes out of a nested
+call (`(p/gl (c/listOf 1))`), a literal (`(p/gl [1])`), a local, a var used as a value and the dynamic path give the same
+answer. Two candidates that are unrelated in Kotlin's rule (`vc(xs: MutableList<Int>)` and `vc(xs: Collection<String>)`)
+are ambiguous for the result of `listOf` too, as for a vector.
 
 ## 14. `fun interface` with a value class in its method
 
@@ -283,14 +323,22 @@ type or member is checked for a value class only; any other class there is passe
 Where. `-Dckway.cache.dir=<dir>` selects the directory; an empty value turns the cache off. Without the property:
 `$XDG_CACHE_HOME/ckway` (if set and absolute), `%LOCALAPPDATA%\ckway` on Windows, else `~/.cache/ckway`. It is never the
 working directory: if the resolved default directory is not absolute (the JDK sets `user.home` to `?` for a user with no
-passwd entry, common in containers), the cache is off. kt creates the directory with owner-only permissions (`rwx------`)
-where the file system has POSIX permissions. An existing directory is used only if, after symbolic links are resolved,
-it is a directory that belongs to the current user and neither group nor others can write it. This holds for the default
-directory and for the one you name with the property. The owner is compared with the owner of a file that the process
-creates (not with `user.name`, which is `?` for such a user). For the default directory a failed check is silent
-(`-Dckway.debug=true` says why). For `-Dckway.cache.dir` it is an explicit setting, so kt turns the cache off and prints
-ONE line to stderr (once per JVM), for example `ckway: the bridge cache is OFF: the directory /tmp/c of -Dckway.cache.dir
-can be written by its group. Run `chmod 700 /tmp/c` ...`.
+passwd entry, common in containers), the cache is off.
+
+The directory that is named (`<dir>`) is only the PARENT of the cache. kt works in its own subdirectory `<dir>/bridges-v1`,
+which it creates itself, and it never reads, writes or deletes anything else in `<dir>`: you can name a directory that holds
+other things (`target`, `~/.cache`, your home directory). kt creates what is missing with owner-only permissions
+(`rwx------`) where the file system has POSIX permissions.
+
+What the check requires. When they exist, BOTH `<dir>` and `<dir>/bridges-v1` must be, after symbolic links are resolved,
+a directory that belongs to the current user and that neither group nor others can write; `<dir>/bridges-v1` must also not
+be a symbolic link itself. Otherwise the cache is off. So a directory that you create must have mode 700 (or 755, 750...;
+`mkdir -m 700`): a plain `mkdir -p` under `umask 002` makes it group-writable, and kt refuses it (`bin/test` and
+`examples/run` create theirs with mode 700, or let kt create it). The owner is compared with the owner of a file that the
+process creates (not with `user.name`, which is `?` for such a user). The directories ABOVE `<dir>` are not checked
+(see below). For the default directory a failed check is silent (`-Dckway.debug=true` says why). For `-Dckway.cache.dir` it
+is an explicit setting, so kt turns the cache off and prints ONE line to stderr (once per JVM), for example `ckway: the
+bridge cache is OFF: the directory /tmp/c of -Dckway.cache.dir can be written by its group. Run `chmod 700 /tmp/c` ...`.
 
 What an entry is. A directory `<bridge class>-<key>` with the class files and `entry.txt` (written last, the directory
 is renamed into place, so a reader sees all of an entry or none, and two JVMs that write the same entry cannot mix it).
@@ -304,12 +352,21 @@ compiled at every start). A cache directory that cannot be created or written
 means "no cache": no error, the bridge is compiled every run. `-Dckway.debug=true` prints one line for each such case.
 A JVM without the compiler on its class path cannot name the compiler version; it finds the entry by the rest of the key.
 
-Pruning. Every store prunes: of one bridge name the 8 most recently used entries are kept (two projects, or two branches,
-with different versions of one Kotlin library do not evict each other), an entry that was not used for 90 days is deleted
-whatever its bridge, and a `.tmp-<uuid>` directory older than one hour (a JVM that was killed while it wrote) is deleted.
-"Used" is the modification time of the entry directory; a hit sets it to now when it is older than one hour. That does not
-touch the class files or `entry.txt`, so the atomic write and the hash check stay as they were. The numbers are
-`keep-per-bridge`, `max-age-ms`, `stale-tmp-ms` and `touch-after-ms` in `ckway.bridge.cache`.
+Pruning. Every store prunes, in `<dir>/bridges-v1` only: of one bridge name the 8 most recently used entries are kept (two
+projects, or two branches, with different versions of one Kotlin library do not evict each other), an entry that was not
+used for 90 days is deleted whatever its bridge, and a `.ckway-tmp-<uuid>` directory older than one hour (a JVM that was
+killed while it wrote) is deleted. "Used" is the modification time of the entry directory; a hit sets it to now when it is
+older than one hour. That does not touch the class files or `entry.txt`, so the atomic write and the hash check stay as they
+were. The numbers are `keep-per-bridge`, `max-age-ms`, `stale-tmp-ms` and `touch-after-ms` in `ckway.bridge.cache`.
+
+kt deletes only what it can prove that it created. A directory is deleted (by a prune, a failed verification or a repair)
+only if (a) it lies directly inside `<dir>/bridges-v1` (the resolved parent is that directory), (b) it is a real directory,
+not a symbolic link, (c) its name is exactly the name that kt generates, `ckway.bridge.<class>-<32 hex digits>` for an
+entry or `.ckway-tmp-<uuid>` for a temporary directory, and (d) for an entry, everything in it is a plain file named
+`*.class` or `entry.txt`. A plain file, any other directory (also `.tmp-*` of another tool, or a `.ckway-tmp-` name that
+is not a uuid), a directory with an entry name that holds anything else, and a symbolic link are never touched; a
+delete never follows a symbolic link (a link inside an entry is removed as a link, its target stays). Entries that an
+earlier layout wrote directly in `<dir>` are not read and not deleted.
 
 What this protects against: a class file in the cache that is damaged, truncated, replaced by a stale or foreign
 class, or edited without the matching hash; a cache that a different project or user left in the working directory
@@ -318,7 +375,13 @@ class, or edited without the matching hash; a cache that a different project or 
 What it does NOT protect against: someone who can write both the class file and `entry.txt` in the cache directory can
 plant code that runs with your privileges, because the hash lives next to the class. That is why the default directory
 is per user, owner-only, and refused if others can write it. A `ckway.cache.dir` that others can write (`/tmp`, a shared
-build directory) is refused with a warning. Do not share the cache between trust domains. If in doubt, turn the
+build directory) is refused with a warning. The argument is this: a reader trusts `<dir>/bridges-v1` only while it and
+`<dir>` belong to you and nobody else can write them; to swap the subdirectory someone must write `<dir>`, and a directory
+that someone else made fails the owner check at the next use. What is not checked: the directories above `<dir>`. Someone
+who can rename an ancestor of `<dir>` (an ancestor that others can write and that has no sticky bit) can replace the
+whole tree; the replacement belongs to that someone, and fails the owner check at the next use, but a JVM that checked
+just before the swap and reads just after it has a (very small) window. Name a directory under a parent that only you
+can write. Do not share the cache between trust domains. If in doubt, turn the
 cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files are then part of your build).
 
 ## 16. Waiting for a Kotlin suspend call: cancellation and interrupts
@@ -342,10 +405,19 @@ cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files 
   threw `InterruptedException` after 412 ms, flag clear, after the cleanup (`cleaned=true`). With a callee that never
   resumes (`suspendCoroutine { }`) `runBlocking` stayed blocked for ever, in `TIMED_WAITING`, also after a second
   interrupt. kt differs there on purpose: the wait is bounded. It ends with `InterruptedException` when the grace time
-  has passed (system property `ckway.interrupt.grace.ms`, read at each wait, default 5000 ms) or at a second interrupt of
+  has passed (system property `ckway.interrupt.grace.ms`, read at each wait, default 5000 ms; a number that is not a number is 5000, a negative one is 0, so the exception comes as soon as the callee has been told to cancel, and one above 24 hours is 24 hours) or at a second interrupt of
   the thread, so `ExecutorService.shutdownNow` stops such a thread. The callee is not stopped by that (it ignored the
   cancellation); its late result is dropped. Measured with a grace of 400 ms: `InterruptedException` after 406 ms, flag clear.
   The in-body wait has no bound (a cancelled body waits for its callee: structured concurrency).
+* The interrupt flag that is set again (above) is set only on the thread of the body itself, the one that the cancellation
+  of the Job interrupts. A thread that only inherited the context of the body (`future`, `bound-fn`, a pool task started in
+  the body) has no such thread: its flag is never set because of the cancellation. A suspend call that it makes is a call
+  from outside a body, in the context of the body (its dispatcher and other elements): it gets a Job of its own, which is a
+  child of the Job of the body. So (a) an interrupt of that thread cancels that Job, waits for the callee (at most the grace
+  time) and ends with `InterruptedException` with the flag clear, as for any top-level call; (b) when the Job of the body is
+  cancelled, the child Job is cancelled with it and the callee gets the cancellation (structured concurrency); the call
+  ends as the callee ends it (a `CancellationException`, or the value of a callee that ignored the cancellation, with no
+  flag). `ckway.co/*body-thread*` is the binding that tells the two threads apart.
 * Without kotlinx.coroutines: no Job, no cancellation. An interrupt ends the wait with `InterruptedException` at once
   and the Kotlin call goes on.
 * `catch Exception` in a body catches the `InterruptedException` of a cancel (see 4).

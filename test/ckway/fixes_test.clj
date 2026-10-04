@@ -169,9 +169,12 @@
     (is (instance? NullPointerException (thrown #(f/.weigh nilv))) "nil receiver: unchanged")))
 
 (deftest known-types-emit-no-check
-  (testing "a hinted receiver of the right class, a literal, a constructor call: no instance? check in the expansion"
-    (let [ex (ct/expansions '(fn [^fx.Other o] (f/.weigh o) (f/lenOf "x")))]
+  (testing "a literal: no instance? check in the expansion"
+    (let [ex (ct/expansions '(fn [] (f/lenOf "x")))]
       (is (not-any? #(str/includes? (pr-str %) "wrong-class") (:static ex)) (pr-str (:static ex)))))
+  (testing "a hint that the user wrote can be wrong: one instance? check, and a wrong-class kt error instead of a ClassCastException"
+    (let [ex (ct/expansions '(fn [^fx.Other o] (f/.weigh o)))]
+      (is (some #(str/includes? (pr-str %) "wrong-class") (:static ex)) (pr-str (:static ex)))))
   (testing "an unknown one has the check"
     (let [ex (ct/expansions '(fn [o] (f/.weigh o)))]
       (is (some #(str/includes? (pr-str %) "wrong-class") (:static ex))))))

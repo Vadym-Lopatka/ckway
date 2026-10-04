@@ -349,7 +349,7 @@
 
 (deftest m10-stale-temporary-directories-are-removed
   (let [d (tmp-dir) cname "ckway.bridge.K_m10"
-        old (io/file d ".tmp-old") fresh (io/file d ".tmp-fresh")]
+        old (io/file d ".ckway-tmp-00000000-0000-0000-0000-000000000001") fresh (io/file d ".ckway-tmp-00000000-0000-0000-0000-000000000002")]
     (.mkdirs old) (.mkdirs fresh)
     (spit (io/file old "x.class") "x")
     (age! old (* 3 day))
@@ -370,9 +370,9 @@
     (let [home (tmp-dir) old (System/getProperty "user.name")]
       (System/setProperty "user.name" "?")
       (try
-        (is (= (io/file home ".cache" "ckway") ((cv dir-for) nil {} {"os.name" "Linux" "user.home" (.getPath home)})))
+        (is (= (io/file home ".cache" "ckway" "bridges-v1") ((cv dir-for) nil {} {"os.name" "Linux" "user.home" (.getPath home)})))
         (cache/make-dirs! (io/file home ".cache" "ckway"))
-        (is (= (io/file home ".cache" "ckway") ((cv dir-for) nil {} {"os.name" "Linux" "user.home" (.getPath home)}))
+        (is (= (io/file home ".cache" "ckway" "bridges-v1") ((cv dir-for) nil {} {"os.name" "Linux" "user.home" (.getPath home)}))
             "an existing private directory of this user is used")
         (finally (System/setProperty "user.name" old))))))
 
@@ -386,7 +386,7 @@
     (testing "a private directory of this user is used, silently"
       (let [d (tmp-dir)]
         (chmod! d "rwx------")
-        (is (= "" (warnings-of #(is (= d ((cv dir-for) (.getPath d) {} props))))))))
+        (is (= "" (warnings-of #(is (= (io/file d "bridges-v1") ((cv dir-for) (.getPath d) {} props))))))))
     (testing "writable by the group: the cache is off, one warning line says why and how to fix it"
       (let [d (tmp-dir)]
         (chmod! d "rwxrwx---")
@@ -409,7 +409,7 @@
           (Files/createSymbolicLink (.toPath l-bad) (.toPath bad) (make-array FileAttribute 0))
           (Files/createSymbolicLink (.toPath l-good) (.toPath good) (make-array FileAttribute 0))
           (is (str/includes? (warnings-of #(is (nil? ((cv dir-for) (.getPath l-bad) {} props)))) "ckway.cache.dir"))
-          (is (= l-good ((cv dir-for) (.getPath l-good) {} props))))))
+          (is (= (io/file l-good "bridges-v1") ((cv dir-for) (.getPath l-good) {} props))))))
     (testing "a file, not a directory"
       (let [d (tmp-dir) f (io/file d "x")]
         (spit f "x")
@@ -418,11 +418,11 @@
     (testing "empty value: off, no warning; a directory that does not exist yet: used (kt creates it private)"
       (is (= "" (warnings-of #(is (nil? ((cv dir-for) "" {} props))))))
       (let [d (io/file (tmp-dir) "new")]
-        (is (= d ((cv dir-for) (.getPath d) {} props)))))
+        (is (= (io/file d "bridges-v1") ((cv dir-for) (.getPath d) {} props)))))
     (testing "the owner is compared with the owner of a file this process creates, not with a name"
       (let [d (tmp-dir) old (System/getProperty "user.name")]
         (System/setProperty "user.name" "?")
-        (try (is (= d ((cv dir-for) (.getPath d) {} props)))
+        (try (is (= (io/file d "bridges-v1") ((cv dir-for) (.getPath d) {} props)))
              (finally (System/setProperty "user.name" old))))
       (is (true? ((cv mine?) (tmp-dir))))
       (is (false? ((cv mine?) (io/file "/")))))))

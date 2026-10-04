@@ -67,9 +67,12 @@
    (println \"OUT\" (eval '(f/typeName :<> String)))")
 
 (defn- entries
-  "The entry directories of a cache directory."
+  "The entry directories of a cache directory: of the directory that `store!` got, or of the `bridges-v1` subdirectory of
+  the directory that -Dckway.cache.dir named."
   [^File dir]
-  (vec (filter #(and (.isDirectory ^File %) (not (str/starts-with? (.getName ^File %) ".tmp-"))) (.listFiles dir))))
+  (let [sub (io/file dir "bridges-v1")
+        dir (if (.isDirectory sub) sub dir)]
+    (vec (filter #(and (.isDirectory ^File %) (not (str/starts-with? (.getName ^File %) ".ckway-tmp-"))) (.listFiles dir)))))
 
 (defn- main-class-file ^File [^File entry]
   (first (filter #(re-matches #"ckway\.bridge\.K_[A-Za-z0-9_]+__[0-9a-f]{10}\.class" (.getName ^File %)) (.listFiles entry))))
@@ -112,7 +115,7 @@
 
 (deftest b1-property-and-off-switch
   (let [d (tmp-dir)]
-    (with-cache-dir d (is (= d (cache/dir))))
+    (with-cache-dir d (is (= (io/file d "bridges-v1") (cache/dir))))
     (let [old (System/getProperty "ckway.cache.dir")]
       (System/setProperty "ckway.cache.dir" "")
       (try (is (nil? (cache/dir)) "an empty value turns the cache off")
@@ -121,6 +124,8 @@
 (deftest b1-working-directory-cache-is-ignored
   (let [work (tmp-dir) xdg (tmp-dir) wd-cache (io/file work ".ckway-cache")]
     (.mkdirs wd-cache)
+    ;; (mkdirs follows the umask: a group-writable directory is refused by the cache, so make it private)
+    (Files/setPosixFilePermissions (.toPath wd-cache) (PosixFilePermissions/fromString "rwx------"))
     (spit (io/file wd-cache "planted.txt") "x")
     (testing "no property: the per-user directory (XDG_CACHE_HOME) is used, `.ckway-cache` in the working directory is not"
       (let [r (jvm base-cp {} {"XDG_CACHE_HOME" (.getPath xdg)} work (str one-call stats-code))]
@@ -256,7 +261,7 @@
       (is (zero? (:exit r)) (:err r))
       (is (str/includes? (:out r) "OUT String")))
     (is (= 1 (count (entries dir))) "one entry")
-    (is (empty? (filter #(str/starts-with? (.getName ^File %) ".tmp-") (.listFiles dir))) "no temporary directory left")
+    (is (empty? (filter #(str/starts-with? (.getName ^File %) ".ckway-tmp-") (.listFiles dir))) "no temporary directory left")
     (let [r (jvm (join-cp (without-compiler (cp-entries))) props code)]
       (is (= {:compiled 0 :cache-hits 1} (stats (:out r))) "the entry is whole: it verifies and loads"))))
 

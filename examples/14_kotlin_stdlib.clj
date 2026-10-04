@@ -9,7 +9,9 @@
 
 (kt/require '[kotlin :as k]
             '[kotlin.collections :as c]
-            '[kotlin.text :as t])
+            '[kotlin.math :as m]
+            '[kotlin.text :as t]
+            '[shop :as s])
 
 ;; ## kotlin.collections
 ;;
@@ -184,3 +186,41 @@
 ;; A function that is `inline` has no public JVM method, so there is no way out of this kind. Write it in Clojure.
 (apply + (c/listOf 1 2 3))
 ;; => 6
+
+;; ## An integer where Kotlin wants a floating-point number
+;;
+;; `sqrt` is declared for `Double` and for `Float`. Kotlin refuses `sqrt(4)`, and so does `kt`: both candidates would
+;; need a number that the argument is not. The message says what to write.
+
+;; Kotlin: sqrt(4)    -- does not compile
+(err (m/sqrt 4))
+;; => "kt: (sqrt 4) is ambiguous. Candidates:"
+
+;; Kotlin: sqrt(4.0)
+(m/sqrt 4.0)
+;; => 2.0
+
+(m/sqrt (double 4))
+;; => 2.0
+
+;; ## Type hints
+;;
+;; A type hint that you write is the static type of an argument, as the declared type of a variable in Kotlin. There are
+;; three cases.
+;;
+;; 1. The hint fits some candidates for sure: it decides between them (`kind` has overloads for Int, Long and String).
+
+(let [^String x (identity "a")] (s/kind x))
+;; => "String"
+
+;; 2. The hint fits no candidate for sure, but the value could (the hint is an interface, or a class that a parameter
+;;    type extends): it is only an upper bound. The call is checked at run time. `IPersistentVector` is not a Kotlin
+;;    `List`, but a vector is one.
+
+(let [^clojure.lang.IPersistentVector v [1 2 3]] (c/.first v))
+;; => 1
+
+;; 3. The hint can never fit (`Long` is final and unrelated to every candidate): a compile error.
+
+(err (let [^Long n (identity 1)] (c/.first n)))
+;; => "kt: no Kotlin declaration of `.first` fits (.first n)"
