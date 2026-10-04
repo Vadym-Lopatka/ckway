@@ -42,10 +42,10 @@
        "or keep the disk cache, and other JVMs run without it."))
 
 (defn- jvm-target
-  "The Kotlin -jvm-target for the bridge. Kotlin refuses to inline bytecode of a newer target into an
-  older one, so use this JVM's version (override: -Dckway.jvm-target=21)."
-  []
-  (or (System/getProperty "ckway.jvm-target") (str (.feature (Runtime/version)))))
+  "The Kotlin -jvm-target for the bridge: `opts` :jvm-target (made by `ckway.bridge/jvm-target`: the class-file
+  version of the declaration), else -Dckway.jvm-target, else this JVM's version."
+  [opts]
+  (or (:jvm-target opts) (System/getProperty "ckway.jvm-target") (str (.feature (Runtime/version)))))
 
 (defn- classpath-string []
   (str/join File/pathSeparator (map #(.getAbsolutePath ^File %) (meta/classpath-files))))
@@ -62,9 +62,10 @@
 
 (defn compile-source
   "Compile the Kotlin text `source` (file name `file-name`). => {:classes {binary-name bytes} :ms n}.
-  Throws ex-info {:kt/compile-failed [message ...] :kt/output text} when the Kotlin compiler reports errors,
+  `opts`: {:jvm-target \"11\"}. Throws ex-info {:kt/compile-failed [message ...] :kt/output text} when the Kotlin compiler reports errors,
   and ex-info with the `missing-message` of `what` when the compiler is not on the class path."
-  [what file-name ^String source]
+  ([what file-name source] (compile-source what file-name source nil))
+  ([what file-name ^String source opts]
   (let [^Class cls (or (load-compiler-class) (throw (ex-info (missing-message what) {:kt/error true :kt/no-compiler true})))
         t0 (System/nanoTime)
         tmp (.toFile (Files/createTempDirectory "ckway-bridge" (make-array FileAttribute 0)))
@@ -76,8 +77,8 @@
             ^java.lang.reflect.Method exec (.getMethod cls "exec" (into-array Class [PrintStream (class (make-array String 0))]))
             buf (ByteArrayOutputStream.)
             ps (PrintStream. buf true "UTF-8")
-            args (into-array String ["-no-stdlib" "-no-reflect" "-nowarn"
-                                     "-jvm-target" (jvm-target)
+            args (into-array String ["-no-stdlib" "-no-reflect" "-nowarn" "-Xuse-fast-jar-file-system=false"
+                                     "-jvm-target" (jvm-target opts)
                                      "-cp" (classpath-string) "-d" (.getPath out) (.getPath src)])
             code (str (.invoke exec compiler (object-array [ps args])))
             text (.toString buf "UTF-8")]
@@ -86,5 +87,6 @@
                           {:kt/error true :kt/compile-failed
                            (vec (keep #(second (re-matches #".*?\.kt:\d+:\d+: error: (.*)" %)) (str/split-lines text)))
                            :kt/output text})))
-        {:classes (read-classes out) :ms (/ (- (System/nanoTime) t0) 1e6)})
-      (finally (delete-tree tmp)))))
+        {:classes (read-classes out) :ms (/ (- (System/nanoTime) t0) 1e6)
+         :compiler-version (str (.get (.getField (Class/forName "org.jetbrains.kotlin.config.KotlinCompilerVersion" true (.getClassLoader cls)) "VERSION") nil))})
+      (finally (delete-tree tmp))))))

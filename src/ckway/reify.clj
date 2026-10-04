@@ -45,7 +45,7 @@
             [ckway.meta :as meta]
             [ckway.resolve :as r])
   (:import [java.lang.invoke MethodType]
-           [java.lang.reflect Method Modifier]))
+           [java.lang.reflect GenericArrayType Method Modifier ParameterizedType Type TypeVariable WildcardType]))
 
 (set! *warn-on-reflection* true)
 
@@ -108,17 +108,72 @@
   "Methods of Object that an interface can declare abstractly (Comparator.equals) but that are never abstract."
   #{["toString" "()Ljava/lang/String;"] ["hashCode" "()I"] ["equals" "(Ljava/lang/Object;)Z"]})
 
-(defn- jvm-methods
-  "{[name desc] {:class declaring-interface :method Method :abstract? bool}} of the interface chain. Of the
-  same method in an interface and its sub-interface the sub-interface wins."
+(declare default-impls)
+
+(defn- erasure
+  "The erased class of the reflective type `t`, with the type variables in `env` {TypeVariable Type} replaced first."
+  ^Class [^Type t env]
+  (cond
+    (instance? Class t) t
+    (instance? ParameterizedType t) (erasure (.getRawType ^ParameterizedType t) env)
+    (instance? TypeVariable t) (if-let [r (get env t)]
+                                 (erasure r {})
+                                 (let [bs (.getBounds ^TypeVariable t)] (if (seq bs) (erasure (first bs) {}) Object)))
+    (instance? GenericArrayType t) (.getClass (java.lang.reflect.Array/newInstance (erasure (.getGenericComponentType ^GenericArrayType t) env) 0))
+    (instance? WildcardType t) (let [ub (.getUpperBounds ^WildcardType t)] (if (seq ub) (erasure (first ub) env) Object))
+    :else Object))
+
+(defn- super-envs
+  "{super-interface {TypeVariable Type}}: for every super-interface of `c` (transitive) the type arguments that
+  `c` gives its type parameters (`StrVis : Vis<String>` gives {Vis {T String}})."
+  [^Class c]
+  (letfn [(go [^Class k env acc]
+            (reduce (fn [acc ^Type gi]
+                      (if (instance? ParameterizedType gi)
+                        (let [^Class raw (.getRawType ^ParameterizedType gi)
+                              env2 (zipmap (.getTypeParameters raw)
+                                           (map (fn [^Type a] (if (instance? TypeVariable a) (get env a a) a))
+                                                (.getActualTypeArguments ^ParameterizedType gi)))]
+                          (go raw env2 (assoc acc raw env2)))
+                        (go gi {} (assoc acc gi {}))))
+                    acc (.getGenericInterfaces k)))]
+    (go c {} {})))
+
+(defn- bridged
+  "{[name desc] [name desc2]}: an abstract method of a super-interface that a method of a sub-interface overrides
+  with more specific types (`Vis<T>.visit(Object)Object` and `StrVis.visit(String)String` for `StrVis : Vis<String>`).
+  The JVM class needs a bridge method for the first, as kotlinc and javac make one."
   [chain]
-  (let [all (for [^Class c chain, ^Method m (instance-methods c)] [[(.getName m) (desc-of m)] c m])]
+  (into {}
+        (for [^Class c2 chain
+              [^Class c1 env] (super-envs c2)
+              :when (contains? (set chain) c1)
+              ^Method m1 (instance-methods c1)
+              :when (Modifier/isAbstract (.getModifiers m1))
+              ^Method m2 (instance-methods c2)
+              :when (and (= (.getName m1) (.getName m2))
+                         (not= (desc-of m1) (desc-of m2))
+                         (= (mapv #(r/box-class (erasure % env)) (.getGenericParameterTypes m1))
+                            (mapv #(r/box-class %) (.getParameterTypes m2))))]
+          [[(.getName m1) (desc-of m1)] [(.getName m2) (desc-of m2)]])))
+
+(defn- jvm-methods
+  "{[name desc] {:class declaring-interface :method Method :abstract? bool :bridge-to [name desc] :conflict [classes]}}
+  of the interface chain. Of the same method in an interface and its sub-interface the sub-interface wins.
+  `:bridge-to`: the method is overridden with more specific types (see `bridged`). `:conflict`: unrelated
+  interfaces that all have a body for it (default method or `$DefaultImpls`): the JVM cannot choose."
+  [chain]
+  (let [all (for [^Class c chain, ^Method m (instance-methods c)] [[(.getName m) (desc-of m)] c m])
+        br (bridged chain)]
     (into {}
           (for [[k es] (group-by first all)
                 :let [best (remove (fn [[_ ^Class c _]] (some (fn [[_ ^Class o _]] (and (not= o c) (.isAssignableFrom c o))) es)) es)
-                      [_ c ^Method m] (first best)]]
-            [k {:class c :method m
-                :abstract? (and (not (object-methods k)) (every? (fn [[_ _ ^Method x]] (Modifier/isAbstract (.getModifiers x))) best))}]))))
+                      [_ c ^Method m] (first best)
+                      bodies (filter (fn [[_ ^Class c ^Method x]] (or (not (Modifier/isAbstract (.getModifiers x))) (default-impls c x))) best)]]
+            [k (cond-> {:class c :method m
+                        :abstract? (and (not (object-methods k)) (every? (fn [[_ _ ^Method x]] (Modifier/isAbstract (.getModifiers x))) best))}
+                 (br k) (assoc :bridge-to (br k))
+                 (and (not (object-methods k)) (> (count bodies) 1)) (assoc :conflict (mapv second bodies)))]))))
 
 ;; ---------------------------------------------------------------- members that can be written
 
@@ -175,10 +230,12 @@
   (boolean (some #(= :class (:kind %)) (meta/class-members (.getName c)))))
 
 (defn- members-of [chain jvm]
-  (let [from-chain (for [^Class c chain
+  (let [twin? (fn [m] (:bridge-to (get jvm [(:name (:jvm m)) (:desc (:jvm m))])))
+        from-chain (for [^Class c chain
                          m (if (kotlin-interface? c)
                              (filter #(contains? jvm [(:name (:jvm %)) (:desc (:jvm %))]) (kotlin-members c))
-                             (map #(java-member c %) (instance-methods c)))]
+                             (map #(java-member c %) (instance-methods c)))
+                         :when (not (twin? m))]
                      m)
         from-object (for [^Method m (.getDeclaredMethods Object)
                           :when (object-methods [(.getName m) (desc-of m)])]
@@ -245,7 +302,7 @@
                        (if diff
                          (str "\n  Tell them apart with a type hint on a parameter, as in `reify`: parameter " (inc diff)
                               " (after `this`) is "
-                              (str/join " or " (map #(str "^" (hint-name (nth (:slots %) diff))) shown)))
+                              (str/join " or " (map #(str "^" (or (hint-name (nth (:slots %) diff)) "java.lang.Object")) shown)))
                          "\n  They differ by more than the types of their parameters, so no type hint can select one")
                        (when (and diff (empty? fit)) ". The hints that you wrote fit none of them")
                        "."))))))))
@@ -397,16 +454,26 @@
   (let [by-key (into {} (map (fn [w] [[(:name (:jvm (:member w))) (:desc (:jvm (:member w)))] w]) written))
         sig-of (fn [[n d] ^Class c] (or (some #(when (= [n d] [(:name (:jvm %)) (:desc (:jvm %))]) (:signature %)) members)
                                         (str (.getName c) "." n d)))]
+    (doseq [[[n d :as k] {:keys [conflict class]}] jvm
+            :when (and conflict (not (by-key k)))]
+      (let [m (first (filter #(= [n d] [(:name (:jvm %)) (:desc (:jvm %))]) members))]
+        (fail (str "kt/reify: the member `" (if m (:key m) n) "` has a default body in two unrelated interfaces ("
+                   (str/join " and " (map #(.getName ^Class %) conflict))
+                   "), so the JVM cannot choose one (IncompatibleClassChangeError: Conflicting default methods). Write it yourself"
+                   (when m (str ": " (written-form m) "  " (:signature m))) "."))))
     (concat
      (for [w written
            :let [j (:jvm (:member w))]]
        {:impl :fn :name (:name j) :desc (:desc j) :idx (:idx w) :annotations (:annotations w)})
-     (for [[[n d :as k] {:keys [abstract? class method]}] (sort-by key jvm)
+     (for [[[n d :as k] {:keys [abstract? class method bridge-to]}] (sort-by key jvm)
            :when (and abstract? (not (by-key k)))]
-       (if-let [s (default-impls class method)]
-         {:impl :delegate :name n :desc d :impls (.getName (.getDeclaringClass s)) :impls-desc (desc-of s)}
-         {:impl :abstract :name n :desc d
-          :message (str "kt/reify: the abstract member `" (sig-of k class) "` was called, but the kt/reify form does not write it")})))))
+       (cond
+         bridge-to {:impl :bridge :name n :desc d :target-desc (second bridge-to)}
+         :else
+         (if-let [s (default-impls class method)]
+           {:impl :delegate :name n :desc d :impls (.getName (.getDeclaringClass s)) :impls-desc (desc-of s)}
+           {:impl :abstract :name n :desc d
+            :message (str "kt/reify: the abstract member `" (sig-of k class) "` was called, but the kt/reify form does not write it")}))))))
 
 (defn expand
   "Expansion of `(kt/reify spec...)` (see the namespace docstring)."
@@ -428,7 +495,7 @@
         _ (doseq [[k ws] (group-by #(let [j (:jvm (:member %))] [(:name j) (:desc j)]) written)
                   :when (> (count ws) 1)]
             (fail (str "kt/reify: the member `" (:key (:member (first ws))) "` is written twice (" (str/join ", " (map #(r/short-pr (list (:name %) (vec (:params %)))) ws)) ")")))
-        spec {:ifaces (mapv #(.getName ^Class %) classes) :methods (vec (class-methods written jvm members))}
+        spec {:ifaces (mapv #(.getName ^Class %) classes) :iface-classes classes :methods (vec (class-methods written jvm members))}
         cname (bridge/reify-class (simple-name (.getName ^Class (first classes))) spec)
         frame (gensym "frame")
         fns (mapv #(member-fn % cname frame) written)]

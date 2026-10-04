@@ -19,7 +19,7 @@
 (deftest naming-is-deterministic
   (testing "the same target gives the same name, in every run (the literal is part of the contract)"
     (is (= (bridge/call-class-name box-uid) (bridge/call-class-name (assoc box-uid :extra 1))))
-    (is (= "ckway.bridge.C_fx_Uid_box_impl__773fb681d4" (bridge/call-class-name box-uid))))
+    (is (= "ckway.bridge.C_fx_Uid_box_impl__116a9f967b" (bridge/call-class-name box-uid))))
   (testing "different kind, class, name or descriptor give different names"
     (is (= 6 (count (distinct (map bridge/call-class-name [box-uid unbox-uid next-uid pause-default seconds box-duration])))))
     (is (not= (bridge/call-class-name box-uid) (bridge/call-class-name (assoc box-uid :desc "(I)Lfx/Uid;"))))
@@ -36,7 +36,8 @@
   (is (false? (bridge/needed? {:kind :static :class "fx.BasicsKt" :name "greet" :desc "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"})))
   (is (false? (bridge/needed? {:kind :static :class "fx.BasicsKt" :name "greet$default" :desc "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;"}))
       "$ is kept by the compiler")
-  (is (false? (bridge/needed? {:kind :static :class "no.such.Class" :name "x" :desc "()V"})) "a member that cannot be found is left to the compiler"))
+  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"kt: .*no\.such\.Class" (bridge/needed? {:kind :static :class "no.such.Class" :name "x" :desc "()V"}))
+      "a member that cannot be found is a kt error (review B13), not silently 'no bridge needed'"))
 
 (deftest bridge-class-works-and-is-idempotent
   (let [n1 (bridge/bridge-class box-uid)
@@ -133,5 +134,5 @@
         (is (zero? (:exit r)) (:err r))
         (is (= "6 1000 5000" (str/trim (:out r))))
         (testing "the bridges come from the class files, the generator was not loaded"
-          (is (re-find #"ckway\.bridge\.C_fx_Uid_box_impl__773fb681d4 source: file:\S*/classes/" loaded))
+          (is (re-find #"ckway\.bridge\.C_fx_Uid_box_impl__116a9f967b source: file:\S*/classes/" loaded))
           (is (not (str/includes? loaded "ckway.bridge.gen"))))))))

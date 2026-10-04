@@ -23,18 +23,35 @@
   (.fold ctx [] (reify Function2
                   (invoke [_ acc el] (if (instance? ThreadContextElement el) (conj acc el) acc)))))
 
+(defn- restore-all!
+  "Restore the `entered` states ([element state] pairs) in reverse order. Every restore runs, even if one throws.
+  => the first exception (the others are suppressed in it), or nil."
+  [ctx entered]
+  (reduce (fn [^Throwable err [^ThreadContextElement el state]]
+            (try (.restoreThreadContext el ctx state) err
+                 (catch Throwable t (if err (do (.addSuppressed err t) err) t))))
+          nil (reverse entered)))
+
 (defn- enter
-  "Apply every ThreadContextElement of `ctx` to this thread. => state for `exit`."
+  "Apply every ThreadContextElement of `ctx` to this thread. => state for `exit`. If an element throws,
+  the ones that were applied are restored and the exception is thrown."
   [ctx]
-  (let [els (elements ctx)]
-    (mapv (fn [^ThreadContextElement el] [el (.updateThreadContext el ctx)]) els)))
+  (loop [els (seq (elements ctx)) done []]
+    (if els
+      (let [^ThreadContextElement el (first els)
+            st (try (.updateThreadContext el ctx)
+                    (catch Throwable t
+                      (when-let [r (restore-all! ctx done)] (.addSuppressed t r))
+                      (throw t)))]
+        (recur (next els) (conj done [el st])))
+      done)))
 
 (defn- exit
-  "Restore what `enter` changed and dispose the cancellation handle."
+  "Restore what `enter` changed and dispose the cancellation handle (always). Throws the first exception of a restore."
   [ctx entered ^DisposableHandle cancel]
-  (doseq [[^ThreadContextElement el state] (rseq entered)]
-    (.restoreThreadContext el ctx state))
-  (when cancel (.dispose cancel)))
+  (try
+    (when-let [err (restore-all! ctx entered)] (throw err))
+    (finally (when cancel (.dispose cancel)))))
 
 (defn- map-exception
   "An interrupt that the Job's cancellation caused is a CancellationException, as in Kotlin."
@@ -44,5 +61,21 @@
       (doto (java.util.concurrent.CancellationException. "kt: coroutine body cancelled") (.initCause e))
       e)))
 
+(defn- has-job? [^CoroutineContext ctx] (some? (job-of ctx)))
+
+(defn- new-job
+  "A Job without a parent, for a suspend call made outside any coroutine body."
+  ^Job [] (let [^Job parent nil] (kotlinx.coroutines.JobKt/Job parent)))
+
+(defn- cancelling?
+  "Has the Job of `ctx` been cancelled (the body is being cancelled)?"
+  [ctx]
+  (let [job (job-of ctx)] (and job (not (.isActive job)))))
+
+(defn- cancel-job! [^Job job] (.cancel job nil))
+
+(defn- complete-job! [^kotlinx.coroutines.CompletableJob job] (.complete job))
+
 (def hooks
-  {:on-cancel on-cancel :enter enter :exit exit :map-exception map-exception})
+  {:on-cancel on-cancel :enter enter :exit exit :map-exception map-exception
+   :has-job? has-job? :new-job new-job :cancelling? cancelling? :cancel! cancel-job! :complete! complete-job!})

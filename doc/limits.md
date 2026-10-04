@@ -71,7 +71,8 @@ A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtua
   that sleeps in a swallowed interrupt and then 500 ms more completed 717 ms after the cancel, against 117 ms when the
   interrupt is passed on. Catch narrower types, or rethrow `InterruptedException`.
 * Without kotlinx.coroutines on the class path a body has no cancellation and no `ThreadContextElement` (from the code,
-  `ckway.co`). With JDK 21 to 23, `synchronized` in a body pins the carrier thread (JEP 491 fixed this in 24; from the
+  `ckway.co`), and a top-level suspend call has no `Job`; an interrupt of a thread that waits for such a call ends the
+  wait with `InterruptedException` while the Kotlin call goes on (see 16). With JDK 21 to 23, `synchronized` in a body pins the carrier thread (JEP 491 fixed this in 24; from the
   `ckway.co` docstring, not measured here).
 
 ## 5. More than 20 parameters
@@ -104,6 +105,15 @@ A constructor parameter counts as a property when the class has a public propert
 ## 8. `kt/reify`
 
 * Interfaces only (an abstract class is refused). There is no type-argument syntax: `T` stays `Object` (see 1).
+  An interface that specialises a generic one (`interface StrVis : Vis<String> { override fun visit(x: String): String }`)
+  is fine: write `(.visit [this x] ...)` once. The class also has the JVM bridge method `visit(Object)Object` (as
+  kotlinc makes), so Kotlin code that holds the object as `Vis<String>` works. The erased twin is not offered
+  as a second candidate, so no type hint is needed.
+* Two unrelated interfaces with a default body for the same member are a compile error that names the member
+  (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
+* The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
+  (REPL `definterface`, a reloaded class) the next evaluation of the form defines a new class (`..._g1`, `_g2`...);
+  objects made earlier keep implementing the old interface.
 * A Kotlin property and a Java method of the same name (`interface Runs { val run: Boolean }` and `Runnable.run`):
   write the member under the interface that declares it. Written under a sub-interface of both, `(run [this] ...)` is
   refused as ambiguous, and no type hint can choose.
@@ -123,9 +133,14 @@ A constructor parameter counts as a property when the class has a public propert
 
 * `inline reified` calls are compiled by the Kotlin compiler into a small bridge. The JVM that compiles needs the
   `:kotlinc` alias (`kotlin-compiler-embeddable`). Without it: an error that names the alias, unless the bridge is stored.
-* A stored bridge needs no compiler: AOT-compiled code carries it (it is written to `*compile-path*`), and the disk
-  cache `.ckway-cache/` (or the directory in `-Dckway.cache.dir`; an empty value turns it off) keeps the others. A cache entry
-  is keyed on the source, the Kotlin version and the class files it depends on.
+* A stored bridge needs no compiler: AOT-compiled code carries it (it is written to `*compile-path*`), and the
+  per-user disk cache keeps the others (see 15). A cache entry is keyed on the source, the Kotlin versions and the
+  class files it depends on.
+* The bridge is compiled for the class-file version of the Kotlin declaration (its owner class and, for a multi-file
+  facade, the part classes), at least `1.8`, never above the running JVM. So a bridge to a library built for
+  Java 11 is a Java 11 class and runs on a JVM 11 (and on 21...), where a JDK 25 build would have written major
+  version 69. `-Dckway.jvm-target=<n>` overrides it (`1.8`, `11`, `17`...). The bytecode bridges (`clojure.asm`) and
+  the `kt/reify` classes are always version 52 (Java 8), like Clojure's own classes.
 * AOT-compiled code still runs `kt/require` at load time: it reads Kotlin metadata, so `kotlin-metadata-jvm` and the Kotlin
   classes must be on the run class path.
 * `:<>` needs the static path. A receiver of unknown type with several candidates is a compile error ("add a type
@@ -200,3 +215,62 @@ unboxed. A `kt/reify` object or a Kotlin object that already implements the inte
 The result of a Clojure function is checked against the Kotlin return type when the type is known and not generic
 (a value class, `String`, a collection...): `nil` or a wrong class is a `kt:` error. The result of a `suspend` function
 type or member is checked for a value class only; any other class there is passed on unchecked (it is `Object` on the JVM).
+
+## 15. The disk cache of the Kotlin bridges: location and security model
+
+Where. `-Dckway.cache.dir=<dir>` selects the directory; an empty value turns the cache off. Without the property:
+`$XDG_CACHE_HOME/ckway` (if set and absolute), `%LOCALAPPDATA%\ckway` on Windows, else `~/.cache/ckway`. It is never the
+working directory. kt creates the directory with owner-only permissions (`rwx------`) where the file system has POSIX
+permissions. The default directory is used only if it belongs to the current user and neither group nor others can
+write it; otherwise the cache is off (the directory you name with the property is not checked).
+
+What an entry is. A directory `<bridge class>-<key>` with the class files and `entry.txt` (written last, the directory
+is renamed into place, so a reader sees all of an entry or none, and two JVMs that write the same entry cannot mix it).
+`entry.txt` has a SHA-256 of every class file. The key is a hash of the bridge source, the Kotlin stdlib version, the JVM
+target, the SHA-256 of every class the call depends on (including the part classes of a multi-file facade, where the
+inline bodies are) and the version of the Kotlin compiler that made the entry. A class file is defined only after
+its SHA-256 matches. An entry that fails (hash, a class that cannot be defined or linked, a missing inner class, a
+damaged `entry.txt`) is deleted and the bridge is compiled again. A cache directory that cannot be created or written
+means "no cache": no error, the bridge is compiled every run. `-Dckway.debug=true` prints one line for each such case.
+A JVM without the compiler on its class path cannot name the compiler version; it finds the entry by the rest of the key.
+
+What this protects against: a class file in the cache that is damaged, truncated, replaced by a stale or foreign
+class, or edited without the matching hash; a cache that a different project or user left in the working directory
+(it is not read); two JVMs that write at the same time.
+
+What it does NOT protect against: someone who can write both the class file and `entry.txt` in the cache directory can
+plant code that runs with your privileges, because the hash lives next to the class. That is why the default directory
+is per user, owner-only, and refused if others can write it. Do not point `ckway.cache.dir` at a directory that other users
+can write (`/tmp`, a shared build directory), and do not share the cache between trust domains. If in doubt, turn the
+cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files are then part of your build).
+
+## 16. Waiting for a Kotlin suspend call: cancellation and interrupts
+
+(`ckway.co`; the callee needs kotlinx.coroutines to be cancelled.)
+
+* Inside a body (a Clojure function that Kotlin runs as a coroutine), a suspend call waits until the callee resumes it.
+  When the Job of the body is cancelled, the callee gets the cancellation through the Job in its context and the body
+  goes on only when the callee has finished (a `finally { withContext(NonCancellable) { ... } }` of the callee completes
+  first), as in Kotlin. A callee that ignores cancellation keeps the body waiting. Code that is blocked in non-coroutine
+  code (`Thread/sleep`, a lock) is still stopped by the interrupt that the cancellation sends.
+  Any other interrupt of a body (not caused by its Job) ends the wait with `InterruptedException` and the callee keeps
+  running: kt cannot cancel a call whose Job is the body's own.
+* A suspend call from outside any body gets a Job of its own (`coroutineContext.job` works). If the waiting thread is
+  interrupted, that Job is cancelled and the thread keeps waiting until the callee has resumed (bounded by how long the
+  callee takes to cancel); then it gets `InterruptedException`. The interrupt flag is clear when the exception arrives
+  (as for any `InterruptedException`), and the callee's late result is dropped.
+* Without kotlinx.coroutines: no Job, no cancellation. An interrupt ends the wait with `InterruptedException` at once
+  and the Kotlin call goes on.
+* `catch Exception` in a body catches the `InterruptedException` of a cancel (see 4).
+* A coroutine body resumes its continuation exactly once: on a value, an exception, an `Error`, a `ThreadContextElement` that
+  throws in `updateThreadContext` or `restoreThreadContext` (the coroutine fails with that exception), or an interceptor
+  that throws. `releaseInterceptedContinuation` is called after the resume.
+
+## 17. Compiler noise
+
+The embedded Kotlin compiler would print JVM warnings to the stderr of your process on JDK 24 and later
+(`sun.misc.Unsafe::invokeCleaner has been called by ...FastJarFileSystemKt`). kt compiles with
+`-Xuse-fast-jar-file-system=false` and captures the compiler's own messages (they only appear in a `kt:` error). With that,
+a compiling run printed nothing to stderr on JDK 25 / Kotlin 2.4.20 (`review_b_test`, B14). What remains is outside kt's
+control: the JVM's own start-up messages for your flags, and a warning that a future compiler or JDK may print; the JVM option
+`--sun-misc-unsafe-memory-access=allow` silences the Unsafe one for good, if a compiler version brings it back.

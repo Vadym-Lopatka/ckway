@@ -6,7 +6,8 @@
   class has a static final MethodHandle, made in the static initializer with
   MethodHandles.privateLookupIn, and `call` is MethodHandle.invokeExact on it."
   (:require [clojure.string :as str])
-  (:import [clojure.asm AnnotationVisitor ClassWriter Opcodes Type MethodVisitor]))
+  (:import [clojure.asm AnnotationVisitor ClassWriter Opcodes Type MethodVisitor]
+           [java.lang.reflect Modifier]))
 
 (set! *warn-on-reflection* true)
 
@@ -29,23 +30,34 @@
             (+ slot (.getSize t)))
           0 (Type/getArgumentTypes call-desc)))
 
+(defn- push-class!
+  "Push the Class `owner` (internal name). A class that is not public cannot be an LDC constant of another
+  package (IllegalAccessError), so it is looked up by name with the loader of the bridge."
+  [^MethodVisitor mv ^String owner public?]
+  (if public?
+    (.visitLdcInsn mv (Type/getObjectType owner))
+    (do (.visitLdcInsn mv (str/replace owner "/" "."))
+        (.visitMethodInsn mv Opcodes/INVOKESTATIC "java/lang/Class" "forName" "(Ljava/lang/String;)Ljava/lang/Class;" false))))
+
 (defn call-bridge-bytes
   "Class bytes of the bridge `cname` for `target` = {:kind :class :name :desc :access}."
   ^bytes [^String cname {:keys [kind class name desc access]}]
   (let [cw (ClassWriter. ClassWriter/COMPUTE_MAXS)
         owner (internal class)
         call-desc (bridge-desc kind class desc)
-        iface? (.isInterface (load-class class))]
+        target-class (load-class class)
+        iface? (.isInterface target-class)
+        public? (Modifier/isPublic (.getModifiers target-class))]
     (.visit cw Opcodes/V1_8 (+ Opcodes/ACC_PUBLIC Opcodes/ACC_FINAL Opcodes/ACC_SUPER) (internal cname) nil "java/lang/Object" nil)
     (when (= :private access)
       (.visitEnd (.visitField cw (+ Opcodes/ACC_PRIVATE Opcodes/ACC_STATIC Opcodes/ACC_FINAL) "MH" "Ljava/lang/invoke/MethodHandle;" nil nil))
       (let [mv (.visitMethod cw Opcodes/ACC_STATIC "<clinit>" "()V" nil nil)]
         (.visitCode mv)
-        (.visitLdcInsn mv (Type/getObjectType owner))
+        (push-class! mv owner public?)
         (.visitMethodInsn mv Opcodes/INVOKESTATIC "java/lang/invoke/MethodHandles" "lookup" "()Ljava/lang/invoke/MethodHandles$Lookup;" false)
         (.visitMethodInsn mv Opcodes/INVOKESTATIC "java/lang/invoke/MethodHandles" "privateLookupIn"
                           "(Ljava/lang/Class;Ljava/lang/invoke/MethodHandles$Lookup;)Ljava/lang/invoke/MethodHandles$Lookup;" false)
-        (.visitLdcInsn mv (Type/getObjectType owner))
+        (push-class! mv owner public?)
         (.visitLdcInsn mv ^String name)
         (.visitLdcInsn mv (Type/getMethodType ^String desc))
         (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL "java/lang/invoke/MethodHandles$Lookup"
@@ -163,6 +175,42 @@
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
 
+;; a JVM bridge method, as kotlinc/javac make for an override with a more specific type
+(defn- convert!
+  "The value on the stack, of JVM type `from`, becomes JVM type `to` (cast, unbox or box)."
+  [^MethodVisitor mv ^Type from ^Type to]
+  (let [fd (.getDescriptor from) td (.getDescriptor to)]
+    (cond
+      (= fd td) nil
+      (and (unboxing td) (not (unboxing fd)))
+      (let [[owner m prim] (unboxing td)]
+        (.visitTypeInsn mv Opcodes/CHECKCAST owner)
+        (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL owner m (str "()" prim) false))
+      (and (unboxing fd) (not (unboxing td))) (box! mv from)
+      (unboxing td) (throw (ex-info "kt: cannot bridge two different primitive types" {:from fd :to td}))
+      (= object-desc td) nil
+      :else (.visitTypeInsn mv Opcodes/CHECKCAST (.getInternalName to)))))
+
+(defn- bridge-method!
+  "`name desc` casts its arguments and calls `name target-desc` of this class (the more specific override)."
+  [^ClassWriter cw ^String self {:keys [name desc target-desc]}]
+  (let [mv (.visitMethod cw (+ Opcodes/ACC_PUBLIC Opcodes/ACC_BRIDGE Opcodes/ACC_SYNTHETIC) ^String name ^String desc nil nil)
+        from (Type/getArgumentTypes ^String desc)
+        to (Type/getArgumentTypes ^String target-desc)]
+    (.visitCode mv)
+    (.visitVarInsn mv Opcodes/ALOAD 0)
+    (reduce (fn [slot [^Type f ^Type t]]
+              (.visitVarInsn mv (.getOpcode f Opcodes/ILOAD) (int slot))
+              (convert! mv f t)
+              (+ slot (.getSize f)))
+            1 (map vector from to))
+    (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL self ^String name ^String target-desc false)
+    (let [rf (Type/getReturnType ^String target-desc) rt (Type/getReturnType ^String desc)]
+      (when-not (= "V" (.getDescriptor rt)) (convert! mv rf rt))
+      (.visitInsn mv (.getOpcode rt Opcodes/IRETURN)))
+    (.visitMaxs mv 0 0)
+    (.visitEnd mv)))
+
 (defn- abstract-method!
   "A method that throws AbstractMethodError with `message` (the member was not written)."
   [^ClassWriter cw {:keys [name desc message]}]
@@ -182,6 +230,8 @@
     :impl :fn        also :idx (index into the array of Clojure functions) and :annotations
     :impl :delegate  also :impls (binary name of `I$DefaultImpls`) and :impls-desc
     :impl :abstract  also :message
+    :impl :bridge    also :target-desc: the method `name` with `target-desc` of this class (an override with
+                     more specific types, as kotlinc and javac make a bridge method)
   The class implements the interfaces and clojure.lang.IObj (like a Clojure `reify`). Its constructor
   takes the Object[] of functions (called with `this` and the boxed JVM arguments, each returns the
   boxed JVM result) and the metadata map. Names with `-` (mangled Kotlin names) are no problem here."
@@ -228,6 +278,7 @@
       (case (:impl m)
         :fn (fn-method! cw self m)
         :delegate (delegate-method! cw m)
+        :bridge (bridge-method! cw self m)
         :abstract (abstract-method! cw m)))
     (.visitEnd cw)
     (.toByteArray cw)))

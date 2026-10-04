@@ -33,11 +33,44 @@
 
 (def version
   "Part of every Kotlin bridge identity. Raise it when the generated text changes."
-  2)
+  3)
+
+(def ^:private hard-keywords
+  #{"as" "break" "class" "continue" "do" "else" "false" "for" "fun" "if" "in" "interface" "is" "null" "object"
+    "package" "return" "super" "this" "throw" "true" "try" "typealias" "typeof" "val" "var" "when" "while" "_" "__"})
 
 (defn- bt [s] (str "`" s "`"))
 
+(defn- seg
+  "One name segment as Kotlin source: back-quoted when it is a hard keyword or not a plain identifier
+  (a `$` or any other character)."
+  [s]
+  (if (or (contains? hard-keywords s) (not (re-matches #"[A-Za-z_][A-Za-z0-9_]*" s))) (bt s) s))
+
+(defn- qn
+  "A qualified name (`a.b.C`) with every segment back-quoted that needs it."
+  [s]
+  (str/join "." (map seg (str/split (str s) #"\."))))
+
 (defn- kotlin-name [binary] (str/replace binary "$" "."))
+
+(declare tsrc)
+
+(defn- fn-type-src [{:keys [args return suspend? receiver?]}]
+  (let [[recv ps] (if receiver? [(first args) (rest args)] [nil args])]
+    (str (when suspend? "suspend ") (when recv (str (tsrc recv) ".")) "(" (str/join ", " (map tsrc ps)) ") -> " (tsrc return))))
+
+(defn- tsrc
+  "Kotlin source text of a type, like `ckway.types/source` but with every name segment back-quoted that needs it
+  (`kw.`in`.Holder`): a hard keyword in a package or class name, a name with `$`..."
+  [{:keys [class type-param nullable? args fn-type star?]}]
+  (cond
+    star? "*"
+    fn-type (if nullable? (str "(" (fn-type-src fn-type) ")?") (fn-type-src fn-type))
+    type-param (if types/*type-param-names* (str (seg type-param) (when nullable? "?")) "kotlin.Any?")
+    :else (str (qn (str/replace class "/" "."))
+               (when (seq args) (str "<" (str/join ", " (map tsrc args)) ">"))
+               (when nullable? "?"))))
 
 (defn- pkg-of [^String binary]
   (let [i (.lastIndexOf binary ".")] (if (neg? i) "" (subs binary 0 i))))
@@ -50,24 +83,24 @@
   (merge {:name name :slot slot :type t} extra))
 
 (defn- type-src [p]
-  (cond (:vararg? p) (types/source (:elem p))
+  (cond (:vararg? p) (tsrc (:elem p))
         (vc? (:type p)) "kotlin.Any?"
-        :else (types/source (:type p))))
+        :else (tsrc (:type p))))
 
 (defn- generics
   "[header where-clause] for the class-level type parameters `tps` ({:name :bounds}) of a member: \"<T, U>\" and
   \" where T : kotlin.Number\" (nil when there are none / no bounds)."
   [tps]
   (when (seq tps)
-    [(str "<" (str/join ", " (map :name tps)) "> ")
-     (let [bs (for [{:keys [name bounds]} tps b bounds] (str name " : " (types/source b)))]
+    [(str "<" (str/join ", " (map (comp seg :name) tps)) "> ")
+     (let [bs (for [{:keys [name bounds]} tps b bounds] (str (seg name) " : " (tsrc b)))]
        (when (seq bs) (str " where " (str/join ", " bs))))]))
 
 (defn- use-expr
   "The expression that gives parameter `p` its Kotlin type inside the bridge."
   [p]
   (if (and (vc? (:type p)) (not (:vararg? p)))
-    (str "(" (:name p) " as " (types/source (:type p)) ")")
+    (str "(" (bt (:name p)) " as " (tsrc (:type p)) ")")
     (bt (:name p))))
 
 (defn- tmap-of [decl targs]
@@ -111,7 +144,7 @@
                       (:vararg? p) (assoc :vararg? true :elem (sub (:vararg-elem p))))))
         params (vec (concat rparams pparams))
         by-slot (into {} (map (fn [p] [(:slot p) p]) params))
-        tyargs (str "<" (str/join ", " (map types/source targs)) ">")
+        tyargs (str "<" (str/join ", " (map tsrc targs)) ">")
         args (str/join ", " (for [p pparams] (str (bt (:decl-name p)) " = " (when (:vararg? p) "*") (use-expr p))))
         name (bt (:name decl))
         owner (:owner decl)
@@ -120,15 +153,15 @@
         core (cond
                (and top? ext) (member-call (use-expr (by-slot ei)))
                top? (str "ktFn" tyargs "(" args ")")
-               (and companion ext) (str "with(KtOwner." (:companion-field disp) ") { " (member-call (use-expr (by-slot ei))) " }")
-               companion (member-call (str "KtOwner." (:companion-field disp)))
+               (and companion ext) (str "with(KtOwner." (bt (:companion-field disp)) ") { " (member-call (use-expr (by-slot ei))) " }")
+               companion (member-call (str "KtOwner." (bt (:companion-field disp))))
                ext (str "with(" (use-expr (by-slot di)) ") { " (member-call (use-expr (by-slot ei))) " }")
                :else (member-call (use-expr (by-slot di))))
         body (reduce (fn [e [i _]] (str "with(" (use-expr (by-slot i)) ") { " e " }")) core (reverse ctxs))
         ret (sub (:return decl))
         imports (cond-> []
-                  top? (conj [(str (when-not (str/blank? (pkg-of owner)) (str (pkg-of owner) ".")) (bt (:name decl))) "ktFn"])
-                  companion (conj [(kotlin-name companion) "KtOwner"]))
+                  top? (conj [(str (when-not (str/blank? (pkg-of owner)) (str (qn (pkg-of owner)) ".")) (bt (:name decl))) "ktFn"])
+                  companion (conj [(qn (kotlin-name companion)) "KtOwner"]))
         suspend? (boolean (:suspend (:flags decl)))
         supplied-names (mapv :decl-name pparams)
         stamp (cond-> [owner] companion (conj companion))]
@@ -144,7 +177,7 @@
                                              (types/binary-name (:class c))))))
      :readable (str owner "_" (:name decl))
      :identity (str version "|K|" owner "|" (:name decl) "|" (get-in decl [:jvm :desc]) "|" (:signature decl)
-                    "|" (str/join "," (map types/source targs)) "|" (str/join "," supplied-names))}))
+                    "|" (str/join "," (map tsrc targs)) "|" (str/join "," supplied-names))}))
 
 (defn source
   "The Kotlin file for `spec`, in the file class `cname` (a binary name in package ckway.bridge)."

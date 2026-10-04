@@ -1,7 +1,11 @@
 #!/bin/sh
 # Build the Kotlin fixtures, then run all tests. Exit non-zero on failure.
 cd "$(dirname "$0")/.." || exit 1
+# the tests never touch the real per-user bridge cache: it is an empty directory under target/ (the default
+# directory of the library follows XDG_CACHE_HOME, and JVMs that the tests start inherit it)
+rm -rf target/cache && mkdir -p target/cache
+XDG_CACHE_HOME="$(pwd)/target/cache"; export XDG_CACHE_HOME
 bin/build-fixtures || exit 1
-clojure -M:test:coro:kotlinc -r 'ckway\.(meta|call|fn|aot|value|bridge|co|suspend|types|reified|reified-jvm|hardening|static|set|ref|data|cache|reify|fixes|web)-test' || exit 1
+clojure -M:test:coro:kotlinc -r 'ckway\.(meta|call|fn|aot|value|bridge|co|suspend|types|reified|reified-jvm|hardening|static|set|ref|data|cache|reify|fixes|web|review-b)-test' || exit 1
 # stdlib only: no kotlinx.coroutines on the class path
 clojure -M:test -n ckway.nocoro-test

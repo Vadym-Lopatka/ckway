@@ -13,4 +13,9 @@ kotlinc -module-name stdlib -nowarn test-fixtures/stdlib/*.kt -d target/fixtures
 # the web library of the examples (examples/kotlin/web), the Kotlin side of ckway.web-test
 kotlinc -module-name web -nowarn -cp "$CORO" examples/kotlin/web/*.kt examples/kotlin/web/*/*.kt -d target/fixtures || exit 1
 # Kotlin code against the web library (for ckway.web-test)
-kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures
+kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures || exit 1
+
+# a package whose name has Kotlin hard keywords (needs back-quotes in generated source)
+kotlinc -module-name kw -nowarn test-fixtures/kw/*.kt -d target/fixtures || exit 1
+# an older class-file version (55 = JVM target 11): bridges to it must not be newer
+kotlinc -module-name old11 -jvm-target 11 -nowarn test-fixtures/old11/*.kt -d target/fixtures || exit 1

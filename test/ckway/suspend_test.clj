@@ -109,9 +109,9 @@
       (is (< ms 2000)))))
 
 (deftest s-a-context
-  (testing "outside any body the callee gets EmptyCoroutineContext"
+  (testing "outside any body the callee gets a context with no dispatcher and a Job of its own (review B6)"
     (is (false? (f/hasDispatcher)))
-    (is (nil? (f/currentJob)))
+    (is (some? (f/currentJob)) "a top-level call has its own Job (it used to have none: EmptyCoroutineContext)")
     (is (true? (f/isActiveNow)))
     (is (nil? (f/ctxTag))))
   (testing "inside a body it gets the body's coroutine context: dispatcher, Job, elements"

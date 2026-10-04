@@ -73,8 +73,11 @@
     (testing "the first JVM compiles both bridges and fills the cache"
       (is (= 2 (:compiled sa)))
       (is (= 0 (:cache-hits sa)))
-      (is (= 2 (count (filter #(str/ends-with? (.getName ^File %) ".class") (.listFiles cache)))))
-      (is (= 2 (count (filter #(str/ends-with? (.getName ^File %) ".key") (.listFiles cache))))))
+      ;; an entry is a directory <bridge>-<key> with the class files and entry.txt (hashes), see ckway.bridge.cache
+      (let [entries (filter #(.isDirectory ^File %) (.listFiles cache))]
+        (is (= 2 (count entries)))
+        (is (= 2 (count (filter #(.isFile (io/file ^File % "entry.txt")) entries))))
+        (is (= 2 (count (mapcat (fn [^File e] (filter #(str/ends-with? (.getName ^File %) ".class") (.listFiles e))) entries))))))
     (report "JVM 1 (empty cache; the first is the cold compiler, the second warm)" sa)
     (testing "the second JVM compiles nothing: it needs no compiler"
       (let [b (jvm (join-cp (without-compiler (cp-entries))) props (str two-calls stats-code))
