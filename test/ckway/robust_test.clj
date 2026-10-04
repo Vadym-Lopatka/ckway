@@ -1,5 +1,5 @@
 (ns ckway.robust-test
-  "Round 2 of the call-path review (R1-R16): robust discovery, checked conversions, literal Int, Java SAM, error
+  "Robust discovery, checked conversions, literal Int, Java SAM, error
   messages. Fixtures: `test-fixtures/fx/Robust.kt` (package fx.rb) and the special class paths that
   `bin/build-fixtures` makes."
   (:require [clojure.java.io :as io]
@@ -37,7 +37,7 @@
     (binding [*warn-on-reflection* true *err* w] (eval-here form))
     (str w)))
 
-;; ---------------------------------------------------------------- R4, R9: checked conversions
+;; ---------------------------------------------------------------- checked conversions
 
 (deftest conversions-are-checked-whatever-the-consumers-compiler-flags
   (doseq [[call bad ptext] [['(p/intp x) 5000000000 "Int"]
@@ -78,7 +78,7 @@
     (let [e (try (rt/call-dyn v [nil] {}) nil (catch Throwable t t))]
       (is (instance? clojure.lang.ExceptionInfo e) (str v " " e)))))
 
-;; ---------------------------------------------------------------- R5: named arguments in written order
+;; ---------------------------------------------------------------- named arguments in written order
 
 (deftest dynamic-path-evaluates-named-arguments-in-written-order
   (let [log (atom [])
@@ -95,7 +95,7 @@
       (is (= "abcd" (f t)))
       (is (= [:a :b :c :d] @log)))))
 
-;; ---------------------------------------------------------------- R6: type hints
+;; ---------------------------------------------------------------- type hints
 
 (deftest a-type-hint-on-a-kt-call-is-kept
   (is (not (str/includes? (reflection-output '(fn [] (.length ^String (p/echo "abc")))) "Reflection warning")))
@@ -108,7 +108,7 @@
     (is (= 3 ((eval-here '(fn [] (long (p/plus1 2)))))))
     (is (= 3 ((eval-here '(fn [] (inc (p/plus1 1)))))))))
 
-;; ---------------------------------------------------------------- R7: line numbers
+;; ---------------------------------------------------------------- line numbers
 
 (deftest dynamic-path-warning-has-the-line
   (let [out (binding [*file* "robust.clj"]
@@ -116,7 +116,7 @@
                             {:line 41 :column 3})))]
     (is (re-find #"robust\.clj:\d+:\d+ - call to nineo can't be resolved statically" out) out)))
 
-;; ---------------------------------------------------------------- R8: Char
+;; ---------------------------------------------------------------- Char
 
 (deftest an-integer-is-not-a-char
   (is (re-find #"^kt: no Kotlin declaration of `ch` fits" (str (error-of '(p/ch 65)))))
@@ -129,7 +129,7 @@
     (is (= "Double" (p/kChdD)))
     (is (= "Double" (rt/call-dyn #'p/chd [65] {})))))
 
-;; ---------------------------------------------------------------- R10, R11, R12
+;; ---------------------------------------------------------------- messages: ambiguity, a var as a value, a missing class
 
 (defn ^String label [s] (str "L" s))
 
@@ -150,7 +150,7 @@
     (is (re-find #"\(fx\.rb\.RobustKt/name x\)" msg) msg)
     (is (re-find #"\(fx\.rb\.RobustKt/getName x\)" msg) msg)))
 
-;; ---------------------------------------------------------------- R13: an integer literal that fits Int is an Int
+;; ---------------------------------------------------------------- an integer literal that fits Int is an Int
 
 (defmacro same-both
   [oracle f & args]
@@ -162,25 +162,24 @@
        (is (= expected# (~f ~@args)) (str "static " '(~f ~@args)))
        (is (= expected# (rt/call-dyn (var ~f) [~@pos] ~nm ~lits)) (str "dynamic " '(~f ~@args))))))
 
-(deftest an-integer-literal-is-an-int-at-any-and-type-parameters
-  (same-both (p/kAnyKind) p/anyKind 1)
-  (same-both (p/kAnyKindBig) p/anyKind 5000000000)
-  (same-both (p/kTKind) p/tKind 1)
-  (same-both (p/kVarKind) p/varKind 1 2)
-  (same-both (p/kNumKind) p/numKind 1)
+(deftest an-integer-at-any-and-type-parameters-stays-a-long
+  (same-both "Long" p/anyKind 1)
+  (same-both "Long" p/anyKind 5000000000)
+  (same-both "Long" p/tKind 1)
+  (same-both "Long,Long" p/varKind 1 2)
+  (same-both "Long" p/numKind 1)
   (same-both (p/kLongKind) p/longKind 1)
-  (is (= "Integer" (p/anyKind 1)))
-  (is (= "Long" (p/anyKind 5000000000)))
-  (testing "a value that is not a literal is unchanged"
+  (testing "a value that is not a literal is the same"
     (is (= "Long" (p/anyKind (long 1))))
-    (is (= "Long" (let [x 1] (p/anyKind (identity x))))))
-  (testing "stdlib: listOf(1, 2) holds Ints"
-    (is (every? #(instance? Integer %) (c/listOf 1 2)))
-    (is (every? #(instance? Integer %) (rt/call-dyn #'c/listOf [1 2] {} {0 :int 1 :int})))
-    (is (instance? Integer (first (c/listOf 1))))
+    (is (= "Long" (let [x 1] (p/anyKind (identity x)))))
+    (is (= "Integer" (p/anyKind (int 1)))))
+  (testing "stdlib: listOf(1, 2) holds the Clojure Longs"
+    (is (every? #(instance? Long %) (c/listOf 1 2)))
+    (is (every? #(instance? Long %) (rt/call-dyn #'c/listOf [1 2] {} {0 :int 1 :int})))
+    (is (instance? Long (first (c/listOf 1))))
     (is (every? #(instance? Long %) (c/listOf (long 1) (long 2))))))
 
-;; ---------------------------------------------------------------- R14: a Clojure function for a Java functional interface
+;; ---------------------------------------------------------------- a Clojure function for a Java functional interface
 
 (deftest a-clojure-function-for-a-java-functional-interface
   (same-both 3 p/jfun (fn [s] (count s)))
@@ -202,7 +201,7 @@
       (is (re-find #"^kt: nil where Kotlin expects a non-null Int" (str (msg #(p/jfun (fn [s] nil))))))
       (is (re-find #"^kt: expected an integer" (str (msg #(p/jfun (fn [s] "x")))))))))
 
-;; ---------------------------------------------------------------- R15: kt/ref and kt/set! with the part class of a multi-file facade
+;; ---------------------------------------------------------------- kt/ref and kt/set! with the part class of a multi-file facade
 
 (deftest multi-file-facade-references-and-assignment
   (testing "references to public stdlib functions and properties of multi-file facades"
@@ -227,7 +226,7 @@
       (is (= 7 (kt/set! (p/counter) v)))
       (is (= 7 (p/counter))))))
 
-;; ---------------------------------------------------------------- R1: a class that mentions a missing class
+;; ---------------------------------------------------------------- a class that mentions a missing class
 
 (deftest one-class-with-a-missing-class-does-not-break-the-package
   (testing "the classpath really lacks pbopt.Missing"
@@ -252,7 +251,7 @@
         (is (re-find #"^kt: " msg) msg)
         (is (re-find #"pbopt\.Missing(Base|Iface)" msg) msg)))))
 
-;; ---------------------------------------------------------------- R2, R3: discovery and caches
+;; ---------------------------------------------------------------- discovery and caches
 
 (defn- temp-dir-with-space ^File []
   (let [d (.toFile (java.nio.file.Files/createTempDirectory "ckway robust " (make-array java.nio.file.attribute.FileAttribute 0)))]

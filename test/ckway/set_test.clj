@@ -1,5 +1,5 @@
 (ns ckway.set-test
-  "Step 6, R8: `(kt/set! read-form value)`. Each case runs on the static path (a typed receiver) and on the
+  "`(kt/set! read-form value)`. Each case runs on the static path (a typed receiver) and on the
   dynamic path (`ckway.set/set-dyn`, what an untyped receiver gets)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]

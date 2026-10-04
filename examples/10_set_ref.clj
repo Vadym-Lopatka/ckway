@@ -85,7 +85,7 @@
 ;; => "kt: (kt/set! (s/priority cart) nil): `nil` passed to non-nullable `value`"
 
 (err (kt/set! (s/priority cart) 5000000000))
-;; => "kt: (kt/set! (s/priority cart) 5000000000): `value` is int but got Long (an integer literal that does not fit Int)"
+;; => "kt: the argument `value` (Int) is 5000000000, which is out of range for Int"
 
 (err (kt/set! (s/budget cart) 5000))
 ;; => "kt: (kt/set! (s/budget cart) 5000): `value` is Money but got Long"

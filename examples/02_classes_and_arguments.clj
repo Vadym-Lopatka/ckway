@@ -117,8 +117,9 @@
 
 ;; ## Numbers
 ;;
-;; A Clojure integer is a `Long`. Kotlin has `Int` and `Long`. `kt` follows the Kotlin rule for a literal:
-;; a literal that fits `Int` is an `Int`, and it widens to `Long` or `Double` where the parameter needs that.
+;; A Clojure integer is a `Long`. Kotlin has `Int` and `Long`. Where the parameter has a number type, `kt` follows the
+;; Kotlin rule for a literal: a literal that fits `Int` is an `Int`, and it widens to `Long` or `Double` where the
+;; parameter needs that. Where the parameter is `Any` or a type parameter, the number is not changed (example 14).
 
 ;; Kotlin: addUp(1, 2, 3)    -- addUp(a: Int, b: Long, c: Double)
 (s/addUp 1 2 3)
@@ -148,7 +149,7 @@
 
 ;; A number that does not fit the parameter is an error. It does not wrap around.
 (err (s/.add cart tea :quantity 5000000000))
-;; => "kt: no Kotlin declaration of `.add` fits (.add cart tea :quantity 5000000000)"
+;; => "kt: (s/.add cart tea :quantity 5000000000): the argument `quantity` (Int) is 5000000000, which is out of range for Int"
 
 ;; A fraction is not an integer.
 (err (s/.add cart tea :quantity 1.5))

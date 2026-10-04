@@ -1,7 +1,6 @@
 (ns ckway.fixes-test
-  "Library fixes after the examples suite: F1 fun interfaces with a value-class method (mangled JVM name),
-  F2 wrong receiver class on the static path, F3 wrong result of a Clojure function, F4/F5 Kotlin function
-  values and references called wrongly."
+  "Fun interfaces with a value-class method (mangled JVM name), a wrong receiver class on the static path, a wrong
+  result of a Clojure function, Kotlin function values and references called wrongly."
   (:require [clojure.java.shell]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -15,9 +14,9 @@
 (defn- m ^fx.Meters [n] (f/Meters n))
 (defn- lab ^fx.Label [s] (f/Label s))
 
-;; ---------------------------------------------------------------- F1
+;; ---------------------------------------------------------------- fun interface with a value-class method
 
-(deftest f1-both-value-class-over-primitive
+(deftest both-value-class-over-primitive
   (testing "the Clojure function gets the boxed object, its result is unboxed for the long slot"
     (let [seen (atom nil)
           g (fn [u] (reset! seen (class u)) (m (inc (f/m u))))]
@@ -28,7 +27,7 @@
     (is (= (m 1100) (f/.total (f/Cart2) (fn [d] (f/Meters (+ 100 (f/m d)))))))
     (is (= (m 7) (f/useBoth (fn [u] (f/Meters (+ 2 (f/m u)))) (m 5))))))
 
-(deftest f1-param-only-and-return-only
+(deftest param-only-and-return-only
   (both true f/useParam (fn [u k] (= (f/m u) (+ k 1))) (m 5) 4)
   (both false f/useParam (fn [u k] (= (f/m u) (+ k 1))) (m 5) 9)
   (both (m 42) f/useRet (fn [k] (m (* k 2))) 21)
@@ -37,10 +36,10 @@
       (f/useRet (fn [k] (reset! seen (class k)) (m 1)) 3)
       (is (= Integer @seen)))))
 
-(deftest f1-value-class-over-reference-type
+(deftest value-class-over-reference-type
   (both (lab "AB") f/useRefBoth (fn [n] (lab (str/upper-case (f/s n)))) (lab "ab")))
 
-(deftest f1-nullable-value-class
+(deftest nullable-value-class
   (testing "Meters? : the JVM slot holds the object, the name is still mangled"
     (both nil f/useNullBoth (fn [u] u) nil)
     (both (m 5) f/useNullBoth (fn [u] u) (m 5))
@@ -51,22 +50,22 @@
     (both (lab "x") f/useNullRef (fn [n] n) (lab "x"))
     (both nil f/useNullRef (fn [n] nil) (lab "x"))))
 
-(deftest f1-default-methods-and-function-args
+(deftest default-methods-and-function-args
   (testing "a Kotlin default method of the interface stays"
     (both 12 f/useDefault (fn [u] (m (+ 3 (f/m u)))) (m 6))
     (both "vcd" f/useDefaultName (fn [u] u)))
   (testing "a Kotlin function value as parameter of the method is a Clojure function"
     (both (m 11) f/useFnArg (fn [u g] (g (g u))) (m 9))))
 
-(deftest f1-suspend-method
+(deftest suspend-method
   (both (m 8) f/useSusp (fn [u] (m (+ 3 (f/m u)))) (m 5))
   (testing "the body can suspend"
     (is (= (m 6) (f/useSusp (fn [u] (co/delay 5) (m (inc (f/m u)))) (m 5))))))
 
-(deftest f1-generic-fun-interface-is-unchanged
+(deftest generic-fun-interface-is-unchanged
   (both 2 f/useConvT (fn [x] (inc x)) 1))
 
-(deftest f1-implementing-objects-pass-through
+(deftest implementing-objects-pass-through
   (testing "a kt/reify object and a Kotlin object are passed on, never adapted again"
     (let [o (kt/reify f/VcBoth (.adjust [this u] (m (* 2 (f/m u)))))]
       (is (= (m 10) (f/useBoth o (m 5))))
@@ -81,14 +80,14 @@
     (let [o (kt/reify f/VcDefault (.adjust [this u] (m (inc (f/m u)))))]
       (is (= 7 (f/useDefault o (m 5)))))))
 
-(deftest f1-adapter-is-a-real-class
+(deftest adapter-is-a-real-class
   (testing "the adapter implements the interface, so Kotlin can call it from any thread"
     (let [g (fn [u] u)
           a (f/sameVc g)]
       (is (instance? fx.VcBoth a))
       (is (identical? a (f/sameVc a))))))
 
-(deftest f1-other-function-types-and-references
+(deftest other-function-types-and-references
   (testing "function types with a value class: the boxed object (generic FunctionN), also receiver and suspend"
     (is (= (m 6) (f/recvVc (fn [u] (m (inc (f/m u)))) (m 5))))
     (is (= (m 6) (f/suspVc (fn [u] (m (inc (f/m u)))) (m 5))))
@@ -101,7 +100,7 @@
     (is (= (m 9) ((kt/ref f/useRet) (fn [k] (m 9)) 3)))
     (is (= [true] (map (kt/ref f/useParam) [(fn [u k] true)] [(m 1)] [2])))))
 
-(deftest f1-aot-fresh-jvm
+(deftest aot-fresh-jvm
   (let [root (.toFile (java.nio.file.Files/createTempDirectory "kt-fixes-aot" (make-array java.nio.file.attribute.FileAttribute 0)))
         src (java.io.File. root "src") classes (java.io.File. root "classes")
         _ (.mkdirs (java.io.File. src "aot")) _ (.mkdirs classes)
@@ -132,13 +131,13 @@
       (is (= "6 1002 8 true z 3 2 false" (first lines)) "the generator was not loaded at run time")
       (is (str/includes? (second lines) "kt: nil where Kotlin expects a non-null fx.Meters")))))
 
-;; ---------------------------------------------------------------- F2
+;; ---------------------------------------------------------------- wrong receiver class
 
 (def ^:private cart (f/Cart2))
 (def ^:private num5 5)
 (def ^:private nilv nil)
 
-(deftest f2-unknown-receiver-wrong-class
+(deftest unknown-receiver-wrong-class
   (testing "a var has no static type: one candidate, so the static path casts the receiver"
     (let [e (thrown #(f/.weigh cart))]
       (is (some? e))
@@ -169,7 +168,7 @@
     (is (true? (f/flip false)))
     (is (instance? NullPointerException (thrown #(f/.weigh nilv))) "nil receiver: unchanged")))
 
-(deftest f2-known-types-emit-no-check
+(deftest known-types-emit-no-check
   (testing "a hinted receiver of the right class, a literal, a constructor call: no instance? check in the expansion"
     (let [ex (ct/expansions '(fn [^fx.Other o] (f/.weigh o) (f/lenOf "x")))]
       (is (not-any? #(str/includes? (pr-str %) "wrong-class") (:static ex)) (pr-str (:static ex)))))
@@ -177,9 +176,9 @@
     (let [ex (ct/expansions '(fn [o] (f/.weigh o)))]
       (is (some #(str/includes? (pr-str %) "wrong-class") (:static ex))))))
 
-;; ---------------------------------------------------------------- F3
+;; ---------------------------------------------------------------- wrong result of a Clojure function
 
-(deftest f3-wrong-result-of-a-clojure-function
+(deftest wrong-result-of-a-clojure-function
   (testing "a value class: nil and a wrong class"
     (doseq [call [#(f/useBoth (fn [u] nil) (m 5))
                   #(rt/call-dyn #'f/useBoth [(fn [u] nil) (m 5)] {})]]
@@ -217,9 +216,9 @@
   (testing "a generic position (T) is left alone"
     (is (= 2 (f/useConvT (fn [x] (inc x)) 1)))))
 
-;; ---------------------------------------------------------------- F4 / F5
+;; ---------------------------------------------------------------- Kotlin function values and references called wrongly
 
-(deftest f4-kotlin-function-value-with-a-wrong-argument
+(deftest kotlin-function-value-with-a-wrong-argument
   (let [add (f/mkAdd) mm (f/mkMeters)]
     (is (= "abab" (add 2 "ab")))
     (is (= "kt: argument 2 of the Kotlin function (Int, String) -> String: expected String (java.lang.String) where Kotlin expects it, got java.lang.Long 5"
@@ -230,7 +229,7 @@
     (is (str/includes? (ex-message (thrown #(mm nil))) "nil where Kotlin expects a non-null fx.Meters"))
     (is (not (str/includes? (str (ex-message (thrown #(add 2 5)))) "argument type mismatch")))))
 
-(deftest f4-reference-with-a-wrong-argument
+(deftest reference-with-a-wrong-argument
   (let [r (kt/ref f/describeIt)]
     (is (= "2s3" (r 2 "s" (m 3))))
     (let [msg (ex-message (thrown #(r 1 5 (m 3))))]
@@ -241,7 +240,7 @@
     (let [t (kt/ref f/Cart2 .total)]
       (is (str/starts-with? (ex-message (thrown #(t 5 (fn [d] d)))) "kt: the receiver (`this`) expects fx.Cart2, got java.lang.Long 5")))))
 
-(deftest f5-reference-with-the-wrong-number-of-arguments
+(deftest reference-with-the-wrong-number-of-arguments
   (let [r (kt/ref f/describeIt)
         e (thrown #(r 1 "s"))]
     (is (:kt/error (ex-data e)))

@@ -201,9 +201,10 @@ Examples 02 and 01. `err` is a helper of the examples (`examples/util.clj`): `(e
 More about the choice and the numbers (example 14 shows them with the Kotlin standard library):
 
 * An applicable member always wins over an extension, as in Kotlin.
-* Among several applicable declarations `kt` picks the most specific one by Kotlin's rule (each parameter type a subtype of the other's; `T` before `T?`; no vararg, not generic, no default needed on a tie). If none is clearly most specific, the call is an error.
-* An integer literal that fits `Int` is a Kotlin `Int` wherever the declared type does not say otherwise (`Any`, `Any?`, `Number`, a type parameter that no other argument shares, a vararg of those): `(c/listOf 1 2)` (`c` is `kotlin.collections`) holds `Int`s, as Kotlin's `listOf(1, 2)` does. A literal that does not fit `Int`, and a value that is not a literal, keeps its Clojure type.
-  A literal at a type parameter that another argument or the receiver also has stays a `Long` (limits, 1).
+* Among several applicable declarations `kt` picks the most specific one by Kotlin's rule (each parameter type a subtype of the other's, type arguments included: `List<T>` is not a subtype of `Collection<Int>`; `T` before `T?`; no vararg, not generic, no default needed on a tie). If none is clearly most specific, the call is an error.
+* `kt` changes a number only when the declared Kotlin type of the parameter says so (`Int`, `Short`, `Byte`, `Long`, `Float`, `Double`). At `Any`, `Any?`, `Number`, a type parameter or a vararg of those, every Clojure value is passed unchanged: a Clojure integer stays a `Long`, so `(c/listOf 1 2)` (`c` is `kotlin.collections`) holds `Long`s and `(c/.contains (c/listOf 1 2) 1)` is `true`. Only the choice between overloads that differ in a number type looks at a literal (`1` is an `Int` before it is a `Long`, as in Kotlin), and a conversion that `kt` makes itself (an integer for a `Double`) is used only when no overload takes the value as it is.
+  Data that Kotlin code made with `Int` holds `Integer`s: say `(int 1)`, or give the type with `:<>` (`doc/limits.md`, 1).
+* A type that you write is the static type of an argument, as the declared type of a variable is in Kotlin (`^CharSequence s` selects the declaration for a `CharSequence`); a type that only the Clojure compiler inferred is an upper bound, and `^Object` or no hint means unknown.
 * Only a Clojure character is a Kotlin `Char`.
 * A number outside the range of an `Int`, `Short` or `Byte` parameter is a `kt:` error that names the parameter.
 
@@ -431,7 +432,7 @@ Or send the forms of a file one by one from your editor. To send a whole file as
 2. Each var carries its declarations as metadata and is a function with an `:inline` expansion.
 3. When your code compiles, the expansion sees the argument forms. It selects the declaration with the Kotlin overload rules and writes a direct JVM call (the static path). There is no reflection.
 4. If the receiver type is not known (for example a value from a `def`), the call takes the dynamic path. The same rules select the declaration at run time, and a cache keeps the result.
-5. A Kotlin member that the JVM hides (a value class parameter, a default value, an inline function, a method of a multi-file facade part) is called through a small generated bridge class or a MethodHandle.
+5. A Kotlin member that the JVM hides (a value class parameter, a default value, an inline function, a method of a multi-file facade part) is called through a small generated bridge class. The bridge holds the MethodHandle of the member in a `static final` field and calls it with `invokeExact`, so the call is not slower than a direct one by more than the work of the member (about 9 ns for `(tx/.uppercase "abc")`, which is a hidden `inline` function). Only a constructor of a class that is not public, and a class that cannot be linked completely, use a MethodHandle that is looked up at run time.
 6. For an `inline reified` function, `kt` writes a short Kotlin source, compiles it with the Kotlin compiler in the JVM, and caches the class. The bridge cache is a per-user directory (`$XDG_CACHE_HOME/ckway`, else `~/.cache/ckway`; `-Dckway.cache.dir` overrides it, and an empty value turns it off). Each cached class is checked against a SHA-256 hash before it is loaded (details: [`doc/limits.md`](doc/limits.md), 15).
 7. A Clojure function that goes where Kotlin wants a function type or a `fun interface` is wrapped in an adapter class. A `suspend` call waits for its result, and a suspend lambda runs on a virtual thread with the coroutine context.
 8. Errors come from the same place: they show the Kotlin declaration and say which argument does not fit.
@@ -440,7 +441,7 @@ Or send the forms of a file one by one from your editor. To send a whole file as
 
 The full list is in [`doc/limits.md`](doc/limits.md). The five most important:
 
-1. At a generic position (`T`) only an integer literal that fits `Int` becomes an `Int`. A `Long` value that is not a literal, and a literal at a `T` that another argument or the receiver also has, stay `Long`: `(c/.minus (c/listOf 1 2 3) 2)` removes nothing. Write `(int 2)`, or give the type with `:<>`.
+1. At a generic position (`T`, `Any`, `Number`) a Clojure integer is a `Long`. Data that Kotlin code made with `Int` holds `Integer`s, so a lookup in it needs `(int 2)`, or the type with `:<>`.
 2. `kt/require` runs the `init` block of every `object` and every enum class of the package, so a failing initializer shows up when you call something that uses the object.
 3. A Clojure function that runs as a suspend lambda has its own virtual thread. A `ThreadLocal` is not visible in it, and `(catch Exception ...)` also catches the interrupt of a cancel.
 4. `:<>` needs the static path and, for `reified` functions, the Kotlin compiler in the JVM (alias `:kotlinc`). Reified properties are not supported.

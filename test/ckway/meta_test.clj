@@ -60,7 +60,7 @@
     (is (:mangled (:flags (first (get idx "nextUid")))))
     (is (-> (get idx "nextUid") first :params first :type :value-class?))
     (is (-> (get idx "applyTwice") first :params first :type :fn-type :arity (= 1)))
-    ;; step 7 added a second `useCb` (the Cb2 one, one parameter): select the declaration with two
+    ;; there is a second `useCb` (the Cb2 one, one parameter): select the declaration with two
     (is (->> (get idx "useCb") (filter #(= 2 (count (:params %)))) first :params first :type :fun-interface?))
     (is (= [{:name "T" :reified? true}] (:type-params (first (get idx "typeName")))))
     (is (:inline (:flags (first (get idx "typeName"))))))

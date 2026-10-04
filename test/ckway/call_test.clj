@@ -265,10 +265,10 @@
 
 ;; ---------------------------------------------------------------- S-F: compile-time class Object (or only an upper bound)
 
-(deftest s-f-uninformative-compile-time-classes
+(deftest uninformative-compile-time-classes
   (testing "a local of class Object (doseq, fn parameter, first, get) is 'type unknown', not a mismatch"
     (is (= [2 0] (let [r (atom [])] (doseq [g [inc dec]] (swap! r conj (f/apply1 g 1))) @r))
-        "the case from step 3: doseq over functions")
+        "doseq over functions")
     (is (= [2 3] (mapv (fn [n] (f/apply1 inc n)) [1 2])) "Int parameter")
     (is (= ["Hello, a!"] (mapv (fn [s] (f/greet s)) ["a"])) "String parameter")
     (is (= (f/Uid 2) (f/nextUid (first [(f/Uid 1)]))) "value class parameter")
@@ -291,7 +291,7 @@
     (is (= "long" ((eval-here '(fn [n] (f/amb n))) 1)))
     (is (= "int" ((eval-here '(fn [n] (f/amb n))) (int 1)))))
   (testing "wrong values are still errors, at run time"
-    ;; F2 (fixes_test): the cast of an argument of unknown type is a kt error, not a ClassCastException
+    ;; (see fixes_test) the cast of an argument of unknown type is a kt error, not a ClassCastException
     (let [e (try ((eval-here '(fn [s] (f/greet s))) 5) (catch Throwable t t))]
       (is (not (instance? ClassCastException e)))
       (is (:kt/error (ex-data e)))
@@ -310,12 +310,12 @@
   (and (string? m) (str/starts-with? m "kt: ") (str/includes? m (str feature " is not supported yet ("))))
 
 (deftest not-supported-yet
-  (testing "suspend functions are supported since step 4 (see ckway.suspend-test)"
+  (testing "suspend functions are supported (see ckway.suspend-test)"
     (both "slow1" f/slow 1))
   (testing "an object that already implements the function type or interface is fine"
     (is (= 2 (f/useCb (reify fx.Cb (call [_ x] (inc x))) 1)))
     (is (= 3 (f/applyTwice (reify kotlin.jvm.functions.Function1 (invoke [_ x] (int (inc x)))) 1))))
-  (testing "inline reified and :<> (changed in step 5: `:<>` is supported, see ckway.reified-test)"
+  (testing "inline reified and :<> (`:<>` is supported, see ckway.reified-test)"
     (is (str/includes? (compile-error '(f/typeName)) "is `inline reified`: it needs its type arguments"))
     (is (= "String" (f/typeName :<> String))))
   (testing "calling an interface / enum class"
@@ -339,9 +339,9 @@
   (testing "a keyword literal names a parameter, there is no heuristic"
     (is (str/includes? (compile-error '(f/join :a "b")) "unknown parameter name `a`"))))
 
-;; ---------------------------------------------------------------- step 2: fixes A1-A4
+;; ---------------------------------------------------------------- integer literals, inherited members, companion receivers, nested typing
 
-(deftest a1-integer-literal-follows-kotlin
+(deftest integer-literal-follows-kotlin
   (testing "a literal that fits Int is an Int (static path)"
     (is (= "int" (f/amb 1)))
     (is (= "int" (f/amb -5)))
@@ -372,14 +372,14 @@
     (both 12 f/twoLongs 1 2))
   (testing "a literal that does not fit an Int parameter is an error"
     (let [m (compile-error '(f/nickLen 5000000000))]
-      (is (str/includes? m "`n` is Integer but got Long (an integer literal that does not fit Int)") m)))
+      (is (str/includes? m "the argument `n` (Int?) is 5000000000, which is out of range for Int") m)))
   (testing "a floating literal is a Double"
     (is (= "double" (f/fl 1.5)))
     (is (= "float" (f/fl (float 1.5))))
     (is (= "double" (rt/call-dyn #'f/fl [1.5] {})))
     (is (= "float" (rt/call-dyn #'f/fl [(float 1.5)] {})))))
 
-(deftest a2-inherited-members
+(deftest inherited-members
   (let [sub (o/Sub) deleg (f/Deleg (f/NamedImpl)) impl (f/BaseImpl)]
     (testing "interface member, member with a body in the interface, property with a body"
       (both "sub-hello" f/.hello sub)
@@ -409,7 +409,7 @@
       (let [norm (fn [x] (-> (pr-str x) (str/replace #"\(quote \{:ns [^}]*\}\)" "SITE") (str/replace #"\d+" "N")))]
         (is (= (norm (inline-expansion '(f/.hello x))) (norm (inline-expansion '(o/.hello x)))))))))
 
-(deftest a3-companion-receiver-is-checked
+(deftest companion-receiver-is-checked
   (testing "known type: compile error"
     (doseq [form ['(f/.make "s") '(f/.make f/User) '(f/.make (f/User 1)) '(f/.make 1)]]
       (is (str/includes? (compile-error form) "expects the class var of fx.WithCompanion") (pr-str form))))
@@ -428,7 +428,7 @@
       (is (empty? (:dynamic x)))
       (is (= "" (:warnings x))))))
 
-(deftest a4-nested-call-typing
+(deftest nested-call-typing
   (testing "the Kotlin return type of an inner kt call types the outer argument or receiver"
     (doseq [[form v] [['(f/.initial (f/User 1)) "a"]
                       ['(-> (f/Pt 1) (f/.copy :y 5) (f/x)) 1]

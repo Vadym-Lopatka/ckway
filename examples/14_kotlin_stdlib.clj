@@ -114,30 +114,50 @@
 (k/first (k/Pair 1 "one"))
 ;; => 1
 
-;; ## An integer literal is an `Int`
+;; ## A Clojure integer is a `Long`
 ;;
-;; Kotlin's `listOf(1, 2)` holds `Int`s. So does `kt`: a literal that fits `Int` is an `Int` where the declared
-;; type does not say otherwise (`Any`, `Number`, a type parameter). A Clojure `Long` that is not a literal
-;; keeps its type, and so does a literal that does not fit `Int`.
+;; `kt` changes a number only when the declared Kotlin type of the parameter says so (`Int`, `Long`, `Double`, ...).
+;; At `Any`, `Number` or a type parameter, a Clojure value goes on unchanged, and a Clojure integer is a `Long`.
+;; So the list below holds `Long`s, and a lookup with a Clojure integer finds them.
 
 (map class (c/listOf 1 2))
-;; => (java.lang.Integer java.lang.Integer)
+;; => (java.lang.Long java.lang.Long)
 
 (map class (c/listOf 5000000000))
 ;; => (java.lang.Long)
 
-(let [n 1]
-  (map class (c/listOf n)))
-;; => (java.lang.Long)
-
-;; A literal at a type parameter that the receiver also has stays a `Long`. Kotlin infers `T` from the
-;; receiver; `kt` does not. So the `Long` 2 is not in a list of `Int`s. Write `(int 2)` to say the width.
-
-;; Kotlin: listOf(1, 2, 3).contains(2)
+;; Kotlin: listOf(1L, 2L, 3L).contains(2L)
 (c/.contains (c/listOf 1 2 3) 2)
+;; => true
+
+;; Kotlin: listOf(1L, 2L, 3L) - 2L
+(c/.minus (c/listOf 1 2 3) 2)
+;; => [1 3]
+
+;; A var used as a value passes the same `Long`s.
+(let [f c/listOf]
+  (map class (f 1 2)))
+;; => (java.lang.Long java.lang.Long)
+
+;; Data that Kotlin code made with `Int` holds `Integer`s. `toInt` is such code. A `Long` is not equal to
+;; an `Integer`, so a lookup with a Clojure integer finds nothing. Say the width with `(int 2)`, or give the
+;; type arguments with `:<>`.
+
+(def kotlin-ints (c/.map (t/.split "1,2,3" ",") (fn [s] (t/.toInt s))))
+
+(map class kotlin-ints)
+;; => (java.lang.Integer java.lang.Integer java.lang.Integer)
+
+;; Kotlin: kotlinInts.contains(2)
+(c/.contains kotlin-ints 2)
 ;; => false
 
-(c/.contains (c/listOf 1 2 3) (int 2))
+(c/.contains kotlin-ints (int 2))
+;; => true
+
+;; The type arguments need a receiver of a known type, so the call is selected at compile time.
+(let [xs (c/.map (t/.split "1,2,3" ",") (fn [s] (t/.toInt s)))]
+  (c/.contains xs 2 :<> Int))
 ;; => true
 
 ;; ## A Java functional interface

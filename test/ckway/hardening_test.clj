@@ -1,5 +1,5 @@
 (ns ckway.hardening-test
-  "Step 8: hardening. One section per item H1..H9 of the brief."
+  "Hardening of the call path: one section for each topic."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.call-test :as ct :refer [compile-error root-message]]
@@ -11,9 +11,9 @@
 
 (defn- thrown [f] (try (f) nil (catch Throwable t t)))
 
-;; ---------------------------------------------------------------- H1 checked exception out of a Kotlin function value
+;; ---------------------------------------------------------------- checked exception out of a Kotlin function value
 
-(deftest h1-checked-exception-from-kotlin-function-value
+(deftest checked-exception-from-kotlin-function-value
   (testing "plain function value, static path and dynamic path"
     (let [g (f/throwingFn)
           gd (rt/call-dyn #'f/throwingFn [] {})]
@@ -43,19 +43,19 @@
       (is (instance? clojure.lang.ArityException (thrown #(g))))
       (is (identical? (rt/own g) (rt/own (f/echo g))) "hands the original object back"))))
 
-;; ---------------------------------------------------------------- H2 type aliases
+;; ---------------------------------------------------------------- type aliases
 
 (def ^:private this-ns *ns*)
 (defn- src [form] (ty/source (ty/resolve-form this-ns form)))
 (defn- err [form] (try (ty/resolve-form this-ns form) nil (catch Exception e (ex-message e))))
 
-(deftest h2a-alias-has-a-var
+(deftest alias-has-a-var
   (testing "every public typealias of the package is a var"
     (doseq [n '[f/JList f/UserAlias f/WcAlias f/RegAlias f/ColorAlias f/InnerAlias f/FnAlias f/SuspHandler
                 f/Params f/Twin f/PredAlias f/GBoxAlias]]
       (is (var? (ns-resolve this-ns n)) (str n)))))
 
-(deftest h2a-class-alias-constructs
+(deftest class-alias-constructs
   (testing "alias of a Java class: the constructors of the Java class"
     (let [l (f/JList)]
       (is (instance? java.util.ArrayList l))
@@ -88,7 +88,7 @@
     (is (= "fx.GBox<kotlin.Int>" (src '(f/GBoxAlias Int))))
     (is (= "kotlin.Pair<kotlin.Int, kotlin.Int>" (src '(f/Twin Int))))))
 
-(deftest h2a-non-class-alias
+(deftest non-class-alias
   (testing "usable in a type form"
     (is (= "kotlin.collections.Map<kotlin.String, kotlin.String?>" (src 'f/Params)))
     (is (= "kotlin.collections.Map<kotlin.String, kotlin.String?>?" (src 'f/Params?)))
@@ -116,7 +116,7 @@
         (is (str/includes? m "type alias") (str form " " m))
         (is (str/includes? m "not a class") (str form " " m))))))
 
-(deftest h2b-stdlib-aliases-are-default-names
+(deftest stdlib-aliases-are-default-names
   (doseq [[form expect] {'(ArrayList Int) "java.util.ArrayList" '(HashMap Int Int) "java.util.HashMap"
                          '(LinkedHashMap Int Int) "java.util.LinkedHashMap"
                          '(HashSet Int) "java.util.HashSet" '(LinkedHashSet Int) "java.util.LinkedHashSet"
@@ -134,9 +134,9 @@
   (testing "a class beats an alias of the same name; the existing names stay"
     (is (= "kotlin.collections.List<kotlin.Int>" (src '(List Int))))))
 
-;; ---------------------------------------------------------------- H3 kt/ref with an object
+;; ---------------------------------------------------------------- kt/ref with an object
 
-(deftest h3-object-bound-reference
+(deftest object-bound-reference
   (testing "a property of an object: a bound KProperty0"
     (let [p (kt/ref f/Registry size)]
       (is (instance? kotlin.reflect.KProperty0 p))
@@ -161,7 +161,7 @@
       (is (= "v:k" (m "k")))
       (is (= ["v:a" "v:b"] (mapv m ["a" "b"])))
       (is (= "lookup" (.getName ^kotlin.reflect.KFunction m)))
-      ;; F5 (fixes_test): a kt error with the real count; the ArityException is its cause
+      ;; (see fixes_test) a kt error with the real count; the ArityException is its cause
       (is (instance? clojure.lang.ArityException (ex-cause (thrown #(m)))))
       (is (instance? clojure.lang.ArityException (ex-cause (thrown #(m 1 2)))))
       (is (str/includes? (ex-message (thrown #(m 1 2))) "takes 1 argument (k), got 2"))))
@@ -174,9 +174,9 @@
     (doseq [form ['(let [u (f/User 1 "a")] (kt/ref u name)) '(kt/ref (f/User 1 "a") name) '(kt/ref f/Color.RED hex)]]
       (is (str/includes? (str (ct/compile-error form)) "bound references are not supported") (pr-str form)))))
 
-;; ---------------------------------------------------------------- H6 classes that cannot be called
+;; ---------------------------------------------------------------- classes that cannot be called
 
-(deftest h6-no-public-constructor-messages
+(deftest no-public-constructor-messages
   (let [m (fn [form] (str (ct/compile-error form)))]
     (testing "a class with only non-public constructors"
       (doseq [form ['(t/Duration 5) '(t/Duration) '(t/Duration 5 6)]]
@@ -211,9 +211,9 @@
         (let [e (thrown #(rt/call-dyn v args {}))]
           (is (str/includes? (ex-message e) "has no public constructor") (ex-message e)))))))
 
-;; ---------------------------------------------------------------- H4 reified bridge with class-level generics
+;; ---------------------------------------------------------------- reified bridge with class-level generics
 
-(deftest h4-reified-bridge-class-level-generics
+(deftest reified-bridge-class-level-generics
   (testing "a member that takes the class's T"
     (is (= 7 (f/.conv (f/GBox (long 5)) 7 :<> Long)))
     (is (nil? (f/.conv (f/GBox (long 5)) "s" :<> Long)))
@@ -243,9 +243,9 @@
       (is (some #(re-find #"ckway\.bridge\.K_" (pr-str %)) (:static e)))
       (is (empty? (:dynamic e))))))
 
-;; ---------------------------------------------------------------- H5 two context parameters of the same type
+;; ---------------------------------------------------------------- two context parameters of the same type
 
-(deftest h5-same-type-context-parameters
+(deftest same-type-context-parameters
   (testing "a non-reified function is a direct JVM call: each parameter gets its own argument, in both orders"
     (is (= "x|y" (f/.bothPlain (f/Lbl "x") (f/Lbl "y"))))
     (is (= "y|x" (f/.bothPlain (f/Lbl "y") (f/Lbl "x"))))
@@ -260,9 +260,9 @@
       (is (str/includes? m "Kotlin has no syntax to pass them apart") m))
     (is (str/includes? (str (ct/compile-error '(f/.both (f/Lbl "y") (f/Lbl "x") :<> Int))) "same type"))))
 
-;; ---------------------------------------------------------------- H7 erased generic positions and number width
+;; ---------------------------------------------------------------- erased generic positions and number width
 
-(deftest h7-known-type-argument-converts
+(deftest known-type-argument-converts
   (testing "T exactly: parameter and result"
     (is (instance? Integer (f/sameT 1 :<> Int)))
     (is (instance? Long (f/sameT 1 :<> Long)))
@@ -288,18 +288,18 @@
   (testing "a nil for a nullable T?"
     (is (nil? (f/nullT nil (fn [x] x) :<> Int)))))
 
-(deftest h7-unknown-type-argument-leaves-the-value-alone
-  (testing "without :<> a Clojure integer VALUE in a T position stays a Long (an integer literal that fits Int is an Int, R13)"
+(deftest unknown-type-argument-leaves-the-value-alone
+  (testing "without :<> a Clojure integer in a T position stays a Long, a literal or not"
     (is (instance? Long (f/sameT (long 1))))
     (is (false? (f/isIntT (long 1))))
-    (is (instance? Integer (f/sameT 1)))
-    (is (true? (f/isIntT 1)))
+    (is (instance? Long (f/sameT 1)))
+    (is (false? (f/isIntT 1)))
     (is (true? (f/isIntT 1 :<> Int)))
     (let [seen (atom nil)]
       (f/applyT 1 (fn [x] (reset! seen (class x)) (inc x)))
       (is (= Long @seen)))))
 
-(deftest h7-class-cast-exception-surfaces-with-the-kotlin-frame
+(deftest class-cast-exception-surfaces-with-the-kotlin-frame
   (testing "static path, dynamic path: not wrapped, the Kotlin frame is the first one"
     (doseq [e [(thrown #(f/boxedT (long 1))) (thrown #(rt/call-dyn #'f/boxedT [(long 1)] {}))]]
       (is (instance? ClassCastException e) (str (class e)))
@@ -316,13 +316,13 @@
         (is (= "fx.HardeningKt" (.getClassName (first (.getStackTrace ^Throwable e))))
             (pr-str (take 3 (.getStackTrace ^Throwable e))))))))
 
-;; ---------------------------------------------------------------- H8 objects are initialised by kt/require
+;; ---------------------------------------------------------------- objects are initialised by kt/require
 
 (def ^:private h8-ns (create-ns 'ckway.hardening-h8))
 (defn- ev8 [form] (binding [*ns* h8-ns] (eval form)))
 (defn- root [^Throwable e] (loop [t e] (if-let [c (ex-cause t)] (recur c) t)))
 
-(deftest h8-failing-object-initialiser-does-not-fail-require
+(deftest failing-object-initialiser-does-not-fail-require
   (System/clearProperty "ckway.init.probe")
   (binding [*ns* h8-ns] (refer-clojure))
   (testing "an object is initialised when its package is required (the var holds the instance)"
@@ -360,11 +360,11 @@
   (testing "a type form with the failing object still resolves"
     (is (= "fx.init.Bad" (ty/source (ty/resolve-form h8-ns 'i/Bad))))))
 
-;; ---------------------------------------------------------------- H9 the limits in doc/limits.md are real
+;; ---------------------------------------------------------------- the limits in doc/limits.md are real
 
 (def ^:dynamic *dyn* :root)
 
-(deftest h9-limits
+(deftest limits
   (testing "a plain ThreadLocal is not visible in a suspend body (it runs on a virtual thread)"
     (let [tl (ThreadLocal.)]
       (.set tl "caller")
@@ -391,7 +391,7 @@
       (is (= 21 (apply g (repeat 21 1))))
       (is (java.lang.reflect.Proxy/isProxyClass (class g)) "above 20 parameters it is a Proxy...")
       (is (instance? java.lang.reflect.UndeclaredThrowableException (thrown #(apply (f/wideThrowing) (repeat 21 1))))
-          "...so a checked exception arrives wrapped (the H1 fix covers up to 20)")))
+          "...so a checked exception arrives wrapped (the fix for a checked exception covers up to 20 parameters)")))
   (testing "kt/reify: more than 20 parameters with `this`"
     (is (str/includes? (str (ct/compile-error '(kt/reify f/Wide20 (.w [this a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 a16 a17 a18 a19 a20] 1))))
                        "more than 20 parameters (with `this`)")))

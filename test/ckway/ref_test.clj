@@ -1,5 +1,5 @@
 (ns ckway.ref-test
-  "Step 6, R9: `(kt/ref X y)` and `(kt/ref y)`."
+  "`(kt/ref X y)` and `(kt/ref y)`."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.call-test :as ct :refer [expansions]]
@@ -134,7 +134,7 @@
       (is (= "a" (apply (kt/ref f/Person firstName) [(first ps)])))
       (is (= 5 (do (f/writeProp0 (kt/ref f/topVar) 5) ((kt/ref f/topVar)))))
       (is (thrown? clojure.lang.ArityException ((kt/ref f/Person firstName))))
-      ;; F5 (fixes_test): a kt error with the real count; the ArityException is its cause
+      ;; (see fixes_test) a kt error with the real count; the ArityException is its cause
       (is (instance? clojure.lang.ArityException (ex-cause (try (apply (kt/ref f/greet) ["Bob"]) (catch Exception e e)))))
       (is (= "Yo Ann" (f/callRef (kt/ref f/Person .greet) person)) "and still the Kotlin Function2"))))
 
@@ -242,10 +242,10 @@
     (is (str/includes? (msg '(kt/ref f/WithCompanion make)) "no property"))))
 
 (deftest bound-references-are-not-supported
-  (testing "a local, an expression, a var, an enum entry (an object is H3: bound to the object)"
+  (testing "a local, an expression, a var, an enum entry (an object is a bound reference to the object)"
     (is (str/includes? (msg '(let [u (f/Person 1 "a")] (kt/ref u firstName))) "bound references are not supported"))
     (is (str/includes? (msg '(kt/ref (f/Person 1 "a") firstName)) "bound references are not supported"))
-    ;; step 8 (H3): (kt/ref f/Registry size) is legal Kotlin and now a bound reference, see hardening_test
+    ;; (kt/ref f/Registry size) is legal Kotlin and now a bound reference, see hardening_test
     (is (str/includes? (msg '(kt/ref f/Color.RED hex)) "bound references are not supported"))
     (is (str/includes? (msg '(kt/ref clojure.core/inc firstName)) "bound references are not supported")))
   (testing "String? has no ::"

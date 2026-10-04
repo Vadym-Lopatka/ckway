@@ -5,33 +5,54 @@ Each item was checked against the code or run. `hardening_test.clj` pins most of
 ## 1. Number width at a generic position
 
 Kotlin's `Int` is `java.lang.Integer`. A Clojure integer is a `Long`.
-At a parameter or result whose Kotlin type is a type parameter (`T`, JVM `Object`) `kt` gives an integer literal that fits
-`Int` the width `Int`; any other Clojure integer keeps the `Long`. A literal at a `T` that another argument or the receiver
-also has stays a `Long`, because Kotlin infers `T` from the other one and `kt` does not
-(`(c/.minus (c/listOf 1 2 3) 2)` removes nothing: write `(int 2)`).
+`kt` changes a number only when the DECLARED Kotlin type of the parameter says so (`Int`, `Short`, `Byte`, `Long`,
+`Float`, `Double`). At `Any`, `Any?`, `Number`, a type parameter `T` or a `vararg` of those, every Clojure value goes on
+unchanged: a Clojure integer is a `Long`, a literal or not. The static path, the dynamic path and a var used as a value
+do the same. (Only the choice between overloads that differ in a number type looks at a literal: `1` picks `Int` before
+`Long`, as in Kotlin.)
+
+So a collection that you build in Clojure works with Clojure integers:
+
+```clojure
+(map class (c/listOf 1 2))            ; (java.lang.Long java.lang.Long)
+(c/.contains (c/listOf 1 2 3) 2)      ; true
+(c/.minus (c/listOf 1 2 3) 2)         ; [1 3]
+(let [f c/listOf] (map class (f 1 2))) ; (java.lang.Long java.lang.Long)
+```
+
+Data that Kotlin code made with `Int` holds `Integer`s, and a `Long` is not equal to an `Integer`. A lookup in such data with
+a Clojure integer finds nothing: say the width with `(int x)`, or give the type with `:<>` (the receiver needs a
+known type, so that the call is selected at compile time):
+
+```clojure
+(def by-length (c/.associateBy (c/listOf "a" "bb") (fn [s] (count s))))   ; Kotlin Map<Int, String>: the keys are Integers
+(c/.get by-length 1)                  ; nil       the 1 is a Long
+(c/.get by-length (int 1))            ; "a"
+(c/.get by-length 1 :<> [Int String]) ; "a"       `:<>` converts the T parameter
+(contains? by-length 1)               ; false
+(def kotlin-ints (c/.map (t/.split "1,2,3" ",") (fn [s] (t/.toInt s))))   ; Kotlin List<Int>
+(c/.contains kotlin-ints 2)           ; false
+(c/.contains kotlin-ints (int 2))     ; true
+```
+
+A Kotlin function that casts a `T` to `Int` gets the `Long` and fails in Kotlin code:
 
 ```clojure
 (f/boxedT 1)             ; fun <T> boxedT(x: T) = (x as Int).toString()
-;; "1"                      the literal fits Int and nothing else shares T: it is an Int
-(let [n 1] (f/boxedT n)) ; n is not a literal: it keeps the Long
 ;; ClassCastException: class java.lang.Long cannot be cast to class java.lang.Integer
 ;;   at fx.HardeningKt.boxedT(Hardening.kt:66)      <- the Kotlin frame is the first one
-(f/boxedT (int 1))       ; the remedy: say the width yourself
-
-(c/.minus (c/listOf 1 2 3) 2)         ; [1 2 3]  the 2 is a Long (T is also the receiver's T); no element is equal to it
-(c/.minus (c/listOf 1 2 3) (int 2))   ; [1 3]
-(c/.contains (c/listOf 1 2 3) 2)      ; false     the same reason
-(f/listOfT 1 2)                       ; fun <T> listOfT(a: T, b: T): the two literals share T, so both are Longs
+(f/boxedT (int 1))       ; "1"   the remedy: say the width yourself
+(f/boxedT 1 :<> Int)     ; "1"
 ```
 
 `kt` converts when it knows the type: a call with `:<>` on a non-reified generic function (`(f/boxedT 1 :<> Int)`) converts
 a `T` parameter and result, a `vararg T`, and function types and fun interfaces that mention `T`
 (`(f/applyT 1 inc :<> Int)` gives Kotlin an `Integer` back from `inc`).
 
-`kt` does NOT convert: a `Long` that is not a literal (a `let` local, a result of `inc`), a literal at a `T` that another
-argument or the receiver has, the elements of a `List<T>`/`Map` that you pass, a member of a generic
-class (`Box<Int>.put(x)`), and the members of a `kt/reify` object of a generic interface (`kt/reify Visitor` returns a
-`Long` for `Visitor<Int>`; `kt/reify` has no type-argument syntax). Use `(int x)`, `(long x)`, `(mapv int xs)`.
+`kt` does NOT convert: an integer at `Any`, `Number` or a `T` without `:<>`, the elements of a `List<T>`/`Map` that you
+pass, a member of a generic class (`Box<Int>.put(x)`), and the members of a `kt/reify` object of a generic interface
+(`kt/reify Visitor` returns a `Long` for `Visitor<Int>`; `kt/reify` has no type-argument syntax). Use `(int x)`,
+`(long x)`, `(mapv int xs)`.
 
 `kt` never rewrites the `ClassCastException`: it is the JVM's own, thrown inside the Kotlin function, on the static and
 the dynamic path.
@@ -207,7 +228,7 @@ a map is passed as it is.
 
 `(def c (f/Other))` does not tell the compiler what `c` holds: a var is global and can be rebound. So a kt call on
 `c` is selected by name and arity. If one declaration fits, the static path casts `c` to its class and a wrong class is
-a `kt:` error at run time (`wrong-class`, `fixes_test` F2). If several fit, the dynamic path decides by the run-time
+a `kt:` error at run time (`wrong-class`, `fixes_test`). If several fit, the dynamic path decides by the run-time
 class, with a reflection warning (`*warn-on-reflection*`). A type hint or a local gives a static type:
 
 ```clojure
@@ -219,6 +240,13 @@ class, with a reflection warning (`*warn-on-reflection*`). A type hint or a loca
 A correct call on an untyped receiver costs one `instance?` check on top of the call. A wrong receiver says which
 call, which Kotlin declaration was selected, the actual class and, if that class has a property or function of the same
 name, how to write it: "`weigh` is a property of fx.Cart2: write (f/weigh cart)".
+
+A type hint that you write is the static type of the argument, as the declared type of a variable is in Kotlin: with a member
+`mu(x: String)` and an extension `B.mu(x: CharSequence)`, `(let [^CharSequence s "s"] (p/.mu b s))` calls the extension, and
+`(let [s "s"] (p/.mu b s))` the member. A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`,
+the element of a `doseq`) is an upper bound: the class of the value decides at run time. `^Object` says nothing. One
+exception: `^Number` for an argument that goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of
+the value decides, as for an inferred type.
 
 ## 14. `fun interface` with a value class in its method
 
@@ -303,6 +331,19 @@ not guess. The error lists each candidate with its Java interop call:
 ;;     ->  (kotlin.collections.CollectionsKt/sumOfInt x)    ; JVM descriptor (Ljava/lang/Iterable;)I
 (kotlin.collections.CollectionsKt/sumOfInt (c/listOf 1 2 3))   ; 6
 ```
+
+Type arguments count in the choice only where they can be seen. When two candidates are different Kotlin types, the type
+arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;
+`MutableList<E>` is invariant): `fun <T> gl(xs: List<T>)` and `fun gl(xs: Collection<Int>)` are unrelated (neither type is a
+subtype of the other), so the non-generic one wins, as in Kotlin. A pair that this cannot decide is treated as
+unrelated: then the rule "no vararg, not generic, no default" or the ambiguity error decides, never a guess. A
+pair that takes the same Kotlin class and differs only in the type argument (`Map<String, Any>` and `Map<K, V>`) is
+always an error: the value is a Clojure map, and the JVM erased what it holds.
+
+A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
+seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the
+error says that the element type cannot be seen, and the way out is to pass the elements positionally or a typed array
+(`(int-array xs)`, `(into-array String xs)`).
 
 An `inline` candidate has no public JVM method (`(c/.sumOf xs f)`: "no public JVM method (it is `inline`): write it in
 Clojure"). Write the loop in Clojure.
