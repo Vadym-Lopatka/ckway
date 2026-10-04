@@ -116,6 +116,7 @@
   (both [1 2] c/.filterNotNull [1 nil 2])
   (both [1 2 3] c/.plus [1] [2 3])
   (both [1 2] c/.plus [1] 2)
+  ;; T is shared by the list and the element: the literal keeps the Long that a Clojure vector holds (R13 rule)
   (both [1 3] c/.minus [1 2 3] 2)
   (both {"a" 2} c/.mapValues {"a" 1} (fn [e] 2)))
 
@@ -250,10 +251,30 @@
 
 ;; ---------------------------------------------------------------- limits
 
+(defn- ambiguity-message [v args]
+  (try (rt/call-dyn v args {}) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
+
 (deftest erased-type-arguments-stay-ambiguous
   (doseq [[v args] [[#'c/.sum [[1 2 3]]]
                     [#'c/.sumOf [[1 2 3] (fn [x] x)]]
                     [#'c/.maxOrNull [[1 2 3]]]
                     [#'c/.flatMap [[1] (fn [x] [x])]]]]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"is ambiguous" (rt/call-dyn v args {}))
-        (str v " is ambiguous at run time"))))
+    (is (re-find #"is ambiguous" (str (ambiguity-message v args))) (str v " is ambiguous at run time")))
+  (testing "the message says why, and gives the Java interop call of each candidate"
+    (let [m (ambiguity-message #'c/.sum [[1 2 3]])]
+      (is (re-find #"same JVM parameter types" m) m)
+      (is (re-find #"the JVM erases" m) m)
+      (is (re-find #"\(kotlin\.collections\.CollectionsKt/sumOfInt x\)" m) m)
+      (is (re-find #"\(kotlin\.collections\.CollectionsKt/sumOfLong x\)" m) m)
+      (is (re-find #"\(kotlin\.collections\.UCollectionsKt/sumOfUInt x\)" m) m))
+    (let [m (ambiguity-message #'c/.sumOf [[1 2 3] (fn [x] x)])]
+      (is (re-find #"the JVM erases" m) m)
+      (is (re-find #"result type of a lambda" m) m)
+      (is (re-find #"no public JVM method \(it is `inline`\)" m) m))
+    (let [m (ambiguity-message #'c/.maxOrNull [[1 2 3]])]
+      (is (re-find #"\(kotlin\.collections\.CollectionsKt/maxOrNull x\)" m) m)
+      (is (re-find #"JVM descriptor \(Ljava/lang/Iterable;\)Ljava/lang/Double;" m) m))
+    (let [m (ambiguity-message #'c/.flatMap [[1] (fn [x] [x])])]
+      (is (re-find #"\(kotlin\.collections\.CollectionsKt/flatMapSequence x y\)" m) m)))
+  (testing "the Java interop call the message names works"
+    (is (= 6 (kotlin.collections.CollectionsKt/sumOfInt [(int 1) (int 2) (int 3)])))))

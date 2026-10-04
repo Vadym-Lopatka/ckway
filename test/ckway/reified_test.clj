@@ -303,8 +303,8 @@
 (deftest known-limits
   ;; step 8 (H4): a member that takes the class's own T is bridged (see hardening_test). Before: "star projection".
   (testing "a member of a generic class that takes the class's T, and one that does not"
-    (is (= 5 (f/.only (f/GBox 5) :<> Long)))
-    (is (= 7 (f/.conv (f/GBox 5) 7 :<> Long))))
+    (is (= 5 (f/.only (f/GBox (long 5)) :<> Long)))
+    (is (= 7 (f/.conv (f/GBox (long 5)) 7 :<> Long))))
   (testing "an inline reified property is not supported (a clear message, no bridge)"
     (is (str/includes? (compile-error '(f/refName "x" :<> String)) "inline reified properties is not supported yet"))
     (is (str/includes? (compile-error '(f/refName "x")) "is `inline reified`")))

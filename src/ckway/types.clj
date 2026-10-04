@@ -83,13 +83,17 @@
 (defn- stdlib-entry [internal tparams]
   {:internal internal :tparams tparams :jvm (or (mapped-jvm internal) (meta/internal->binary internal))})
 
+(declare build-default-names)
+
 (def default-names
   "Kotlin default-import type names: {\"List\" {:internal \"kotlin/collections/List\" :tparams 1 :jvm \"java.util.List\"}}.
   Read from the stdlib on the class path when first needed (see the namespace docstring). The type aliases of the
   default-import packages that have no class file (`ArrayList`, `HashMap`, `Exception`...) are entries
   {:alias {:params [...] :type <type>}}, read from the Kotlin metadata of the package (`meta/public-aliases`).
-  A class of the same name wins over an alias. Documented cache (delay)."
-  (delay
+  A class of the same name wins over an alias. Documented cache (delay); `ckway.meta/clear-caches!` replaces it."
+  (delay (build-default-names)))
+
+(defn- build-default-names []
     (merge
      (into {} (for [pkg ["kotlin.text" "kotlin.sequences" "kotlin.ranges" "kotlin.collections" "kotlin"]
                     [simple a] (meta/public-aliases pkg)]
@@ -99,7 +103,9 @@
                 [simple {:internal internal :tparams tparams :jvm binary}]))
      (into {} (for [pkg ["kotlin/annotation" "kotlin/ranges" "kotlin/collections" "kotlin"]
                     {:keys [internal name tparams]} (builtin-classes pkg)]
-                [name (stdlib-entry internal tparams)])))))
+                [name (stdlib-entry internal tparams)]))))
+
+(meta/register-reset! ::default-names #(alter-var-root #'default-names (fn [_] (delay (build-default-names)))))
 
 ;; ---------------------------------------------------------------- resolving
 

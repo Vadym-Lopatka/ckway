@@ -215,13 +215,13 @@
 
 (deftest h4-reified-bridge-class-level-generics
   (testing "a member that takes the class's T"
-    (is (= 7 (f/.conv (f/GBox 5) 7 :<> Long)))
-    (is (nil? (f/.conv (f/GBox 5) "s" :<> Long)))
-    (is (= "s" (f/.conv (f/GBox 5) "s" :<> String)))
-    (is (nil? (f/.conv (f/GBox 5) nil :<> String)) "T is nullable")
-    (is (= 5 (f/.only (f/GBox 5) :<> Long)) "a member that does not mention T keeps working"))
+    (is (= 7 (f/.conv (f/GBox (long 5)) 7 :<> Long)))
+    (is (nil? (f/.conv (f/GBox (long 5)) "s" :<> Long)))
+    (is (= "s" (f/.conv (f/GBox (long 5)) "s" :<> String)))
+    (is (nil? (f/.conv (f/GBox (long 5)) nil :<> String)) "T is nullable")
+    (is (= 5 (f/.only (f/GBox (long 5)) :<> Long)) "a member that does not mention T keeps working"))
   (testing "a class-level type parameter with a bound"
-    (let [b (f/NBox 5)]
+    (let [b (f/NBox (long 5))]
       (is (= 7 (f/.conv b 7 :<> Long)))
       (is (= 5 (f/.back b :<> Long)))
       (is (nil? (f/.back b :<> String)))
@@ -239,7 +239,7 @@
     (is (nil? (f/.pick {"a" 1} "a" :<> [Any String])))
     (is (= 1 (f/.pick {"a" 1} "a" :<> [Long Long]))))
   (testing "the call is static, through a bridge"
-    (let [e (ct/expansions '(f/.conv (f/GBox 5) 7 :<> Long))]
+    (let [e (ct/expansions '(f/.conv (f/GBox (long 5)) 7 :<> Long))]
       (is (some #(re-find #"ckway\.bridge\.K_" (pr-str %)) (:static e)))
       (is (empty? (:dynamic e))))))
 
@@ -289,9 +289,11 @@
     (is (nil? (f/nullT nil (fn [x] x) :<> Int)))))
 
 (deftest h7-unknown-type-argument-leaves-the-value-alone
-  (testing "without :<> a Clojure integer in a T position stays a Long"
-    (is (instance? Long (f/sameT 1)))
-    (is (false? (f/isIntT 1)))
+  (testing "without :<> a Clojure integer VALUE in a T position stays a Long (an integer literal that fits Int is an Int, R13)"
+    (is (instance? Long (f/sameT (long 1))))
+    (is (false? (f/isIntT (long 1))))
+    (is (instance? Integer (f/sameT 1)))
+    (is (true? (f/isIntT 1)))
     (is (true? (f/isIntT 1 :<> Int)))
     (let [seen (atom nil)]
       (f/applyT 1 (fn [x] (reset! seen (class x)) (inc x)))
@@ -299,7 +301,7 @@
 
 (deftest h7-class-cast-exception-surfaces-with-the-kotlin-frame
   (testing "static path, dynamic path: not wrapped, the Kotlin frame is the first one"
-    (doseq [e [(thrown #(f/boxedT 1)) (thrown #(rt/call-dyn #'f/boxedT [1] {}))]]
+    (doseq [e [(thrown #(f/boxedT (long 1))) (thrown #(rt/call-dyn #'f/boxedT [(long 1)] {}))]]
       (is (instance? ClassCastException e) (str (class e)))
       (is (str/includes? (ex-message e) "java.lang.Long cannot be cast to class java.lang.Integer") (ex-message e))
       (let [fr (first (.getStackTrace ^Throwable e))]

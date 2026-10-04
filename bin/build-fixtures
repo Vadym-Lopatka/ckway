@@ -13,4 +13,12 @@ kotlinc -module-name stdlib -nowarn test-fixtures/stdlib/*.kt -d target/fixtures
 # the web library of the examples (examples/kotlin/web), the Kotlin side of ckway.web-test
 kotlinc -module-name web -nowarn -cp "$CORO" examples/kotlin/web/*.kt examples/kotlin/web/*/*.kt -d target/fixtures || exit 1
 # Kotlin code against the web library (for ckway.web-test)
-kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures
+kotlinc -module-name webfx -nowarn -cp "target/fixtures:$CORO" test-fixtures/webfx/*.kt -d target/fixtures || exit 1
+# an optional dependency that the test class path does NOT have (target/optdep), and Kotlin code compiled against it
+# (ckway.robust-test: one class that mentions a missing class must not break the package)
+rm -rf target/optdep && mkdir -p target/optdep
+kotlinc -module-name optdep -nowarn test-fixtures/optdep/*.kt -d target/optdep || exit 1
+kotlinc -module-name opt -nowarn -cp target/optdep test-fixtures/opt/*.kt -d target/fixtures || exit 1
+# a package that is NOT on the test class path: the tests put it there later (robust-test, R2/R3)
+rm -rf target/late-classes && mkdir -p target/late-classes
+kotlinc -module-name late -nowarn test-fixtures/late/*.kt -d target/late-classes
