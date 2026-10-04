@@ -1,6 +1,6 @@
 # ckway
 
-ckway is the Clojure to Kotlin way. The library namespace is `kt`.
+ckway is the Clojure to Kotlin way. The library namespace is `ckway.core`. This document uses the alias `kt` for it.
 
 Status: version 0.1.0, alpha. The API may change.
 

@@ -593,6 +593,8 @@ Clojure"). Write the loop in Clojure.
 A member of a Java class is not a var either, so where Kotlin would call the Java member, a Kotlin extension of the
 same name can be chosen: `(tx/.append sb 1)` (`tx` is `kotlin.text`) is the extension `StringBuilder.append(value: Short)`,
 Kotlin's `sb.append(1)` is Java's `append(int)`; the results are equal.
+Where the Kotlin extension of that name is no var (Kotlin refuses a call to it), only the member is left, and it is
+not a var: `(tx/.subSequence "abc" 0 1)` is an error. Use Java interop for the member: `(.subSequence "abc" 0 1)`.
 
 The members of Kotlin's built-in types (`Int.rangeTo`, `Map.keys`, `Map.getOrDefault`) are not vars. Use the extensions (`until`, `downTo`, `step`:
 `(r/.until 1 4)` is an `IntRange`) or Clojure's functions. A var of the same name can be another declaration:
