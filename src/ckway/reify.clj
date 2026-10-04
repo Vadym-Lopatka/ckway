@@ -596,15 +596,29 @@
   `Src.get(): Any`): a JVM method for each. The form that is written for one is the body of the others too, with the
   result checked against the result type of each (a kt error when it does not fit), unless the user writes that member
   too. When the leaves differ in their PARAMETER types one body cannot serve them: a kt error that says so."
-  [written members leaf-groups]
+  [written members leaf-groups jvm]
   (let [explicit (set (map #(jvm-key (:member %)) written))
         extra (reduce
                (fn [{:keys [taken out] :as acc} w]
                  (let [m (:member w) k (jvm-key m)
                        ks (disj (set (mapcat identity (filter #(contains? (set %) k) leaf-groups))) k)
+                       ;; the JVM name and the JVM parameter types, not the name that is written, say which methods are the
+                       ;; same member: a Java leaf is written `get`, a Kotlin one `.get`
+                       same-jvm-name? (fn [m2] (= (:name (:jvm m2)) (:name (:jvm m))))
+                       same-params? (fn [m2] (= (mapv :jvm-type (:slots m2)) (mapv :jvm-type (:slots m))))
                        sibs (for [m2 members
-                                  :when (and (contains? ks (jvm-key m2)) (not (explicit (jvm-key m2))) (not (taken (jvm-key m2)))
-                                             (= (:kind m2) (:kind m)) (= (:key m2) (:key m)))]
+                                  :when (and (not (explicit (jvm-key m2))) (not (taken (jvm-key m2)))
+                                             (not= (jvm-key m2) k)
+                                             (or
+                                              ;; a leaf override of the same member (a Kotlin name key, or the JVM name of a Java leaf)
+                                              (and (contains? ks (jvm-key m2))
+                                                   (or (and (= (:kind m2) (:kind m)) (= (:key m2) (:key m)))
+                                                       (same-jvm-name? m2)))
+                                              ;; an abstract method of another interface with the same JVM name and parameters, that
+                                              ;; differs only in the result type (a Java interface that does not extend the Kotlin one)
+                                              (and (:abstract? (get jvm (jvm-key m2)))
+                                                   (contains? #{:fn :get :java} (:kind m2)) (contains? #{:fn :get :java} (:kind m))
+                                                   (same-jvm-name? m2) (same-params? m2))))]
                               m2)]
                    (doseq [m2 sibs
                            :when (not= (mapv :jvm-type (:slots m2)) (mapv :jvm-type (:slots m)))]
@@ -637,7 +651,7 @@
         _ (doseq [[k ws] (group-by #(let [j (:jvm (:member %))] [(:name j) (:desc j)]) written)
                   :when (> (count ws) 1)]
             (fail (str "kt/reify: the member `" (:key (:member (first ws))) "` is written twice (" (str/join ", " (map #(r/short-pr (list (:name %) (vec (:params %)))) ws)) ")")))
-        written (serve-siblings written members (vals (bridge-leaves chain)))
+        written (serve-siblings written members (vals (bridge-leaves chain)) jvm)
         spec {:ifaces (mapv #(.getName ^Class %) classes) :iface-classes classes :methods (vec (class-methods written jvm members))}
         cname (bridge/reify-class (simple-name (.getName ^Class (first classes))) spec)
         frame (gensym "frame")

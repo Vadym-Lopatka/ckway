@@ -1004,6 +1004,26 @@
       :function [:function (:name d) (mapv tt (:params d)) (mapv tt (remove #(= :dispatch (:role %)) (:receivers d)))]
       [(:kind d) (:name d)])))
 
+(defn- with-inherited-defaults
+  "The override `d` with the default values of the declaration it overrides. Kotlin metadata marks a default value only on
+  the ORIGINAL declaration (an override may not repeat it), and a call that omits the parameter runs the `$default`
+  synthetic of the original, which calls the member virtually (`javap` of Kotlin's own `Far().mk()`: `invokestatic
+  Src.mk$default`). So the override takes the `:default?` flags and the `$default` JVM member of the original that has
+  them (an override chain has exactly one such declaration: Kotlin forbids new defaults on an override), and the
+  signature shows the `= ...`. `originals`: all declarations with the key of `d` in the supertypes."
+  [d originals]
+  (let [src (first (filter #(and (= :function (:kind %)) (:default (:jvm %)) (some :default? (:params %))) originals))]
+    (if (and src (:jvm d) (= (count (:params d)) (count (:params src))))
+      (let [params (mapv (fn [p o] (assoc p :default? (boolean (:default? o)))) (:params d) (:params src))
+            ret (:return d)
+            flags (:flags d)]
+        (assoc d :params params
+               :jvm (assoc (:jvm d) :default (:default (:jvm src)))
+               :signature (str (str/join (for [[k m] [[:suspend "suspend "] [:inline "inline "] [:infix "infix "] [:operator "operator "]]
+                                               :when (k flags)] m))
+                               (sig-text :function (:name d) (:receivers d) params ret (:type-params d)))))
+      d)))
+
 (defn- class-decls
   "All declarations contributed by one Kotlin class (its own var, members, companion members)."
   [binary ^KmClass k]
@@ -1042,7 +1062,9 @@
             narrowing? (fn [d] (when-let [is (by-key (member-key d))]
                                  (every? #(and (not= (ret-text d) (ret-text %)) (nil? (:type-param (:return %)))) is)))
             narrowed-keys (set (map member-key (filter narrowing? own-all)))
-            own (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))) own-all)
+            own (->> own-all
+                     (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))))
+                     (map #(if (narrowing? %) (with-inherited-defaults % (by-key (member-key %))) %)))
             inherited (remove #(contains? narrowed-keys (member-key %)) inherited)]
         (concat (class-var-decls ctx k) own inherited)))))
 

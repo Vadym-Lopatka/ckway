@@ -40,5 +40,12 @@ Also in this release (the fixes of the reviews before it):
 * `ckway.meta/own-declarations` is public; `kt/reify` no longer calls private functions of `ckway.meta`. An override that narrows the result type (`override fun get(): String` over `fun get(): Any`) is now the declaration a caller sees, so `(p/.get s)` is a `String` on the static path.
 * `-Dckway.interrupt.grace.ms` is clamped (at most 24 hours; negative is 0; not a number is the default): a huge value gave `ArithmeticException` instead of `InterruptedException`.
 * The interrupt flag that is set again after a cancelled call is set only on the thread of the body. A suspend call from a thread that inherited the context of the body (`future`, `bound-fn`) is a top-level call in that context with a Job that is a child of the Job of the body (`doc/limits.md`, 16).
+* An override that narrows the result type has the default values of the member it overrides (Kotlin marks them on the original only): `(q/.mk (q/Far))` with `interface Src { fun mk(x: Int = 7): Any }` and `class Far : Src { override fun mk(x: Int): String }` in another package works again, runs the `$default` synthetic of the original as kotlinc does (the override's body runs), and `doc` shows `x: Int = ...`.
+* A suspend call completes its own Job on every exit. A call from a child thread of a body (`future`, `pmap`) that throws before it suspends no longer leaves the Job of the body waiting for ever; a top-level call that throws no longer leaves its Job active.
+* Overload choice: a numeric preference on one parameter no longer overrides a disadvantage on another with an equal reference tier (`mx(CharSequence, Int)` / `mx(String, Long)` with `(p/mx "s" 1)` is ambiguous, as in Kotlin).
+* A call on an untyped receiver whose candidates are one member and its narrowing overrides (`(p/.get s)` with `interface Src { fun get(): Any }`, `StrSrc : Src { override fun get(): String }`) is a static virtual call of the most general declaration again, not the dynamic path.
+* `kt/reify`: the leaves of one member are matched by JVM name and parameter types, so one form serves a Java and a Kotlin leaf.
+* The bridge cache prints one line per JVM when a foreign file or directory sits on an entry name (the bridge is then not cached), and deletes a `.ckway-tmp-<uuid>` directory only when it holds class files and `entry.txt` only.
+* The "ambiguous" message for numbers suggests `4.0`, `(double x)`, `(float x)`; `4.0f` is not Clojure.
 
 [0.1.0]: https://github.com/Vadym-Lopatka/ckway/releases/tag/v0.1.0

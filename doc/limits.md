@@ -165,6 +165,9 @@ A constructor parameter counts as a property when the class has a public propert
   of each leaf when that leaf is called (a `kt:` error "expected CharSequence ... got ..."). A member that you write under
   each interface is used as written. If the leaves take different parameter types (`G1 : G<String>`, `G2 : G<Int>`) one body
   cannot serve both: a compile error that says to write the member under each interface.
+  The leaves are matched by JVM name and JVM parameter types, not by the written name, so a Java leaf (`CharSequence get();`,
+  written `get`) and a Kotlin leaf (`.get`) of one member are served by one form, also when the Java interface does not extend
+  the Kotlin one (an abstract method of the same JVM name and parameters that differs only in the result type).
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
@@ -362,11 +365,16 @@ were. The numbers are `keep-per-bridge`, `max-age-ms`, `stale-tmp-ms` and `touch
 kt deletes only what it can prove that it created. A directory is deleted (by a prune, a failed verification or a repair)
 only if (a) it lies directly inside `<dir>/bridges-v1` (the resolved parent is that directory), (b) it is a real directory,
 not a symbolic link, (c) its name is exactly the name that kt generates, `ckway.bridge.<class>-<32 hex digits>` for an
-entry or `.ckway-tmp-<uuid>` for a temporary directory, and (d) for an entry, everything in it is a plain file named
+entry or `.ckway-tmp-<uuid>` for a temporary directory, and (d) for an entry or a temporary directory, everything in it is a plain file named
 `*.class` or `entry.txt`. A plain file, any other directory (also `.tmp-*` of another tool, or a `.ckway-tmp-` name that
 is not a uuid), a directory with an entry name that holds anything else, and a symbolic link are never touched; a
 delete never follows a symbolic link (a link inside an entry is removed as a link, its target stays). Entries that an
 earlier layout wrote directly in `<dir>` are not read and not deleted.
+
+When such a thing sits on the exact name of an entry that kt wants to write (a file, a link, or a directory with other
+files), kt does not touch it and does not cache that bridge: every run compiles it again. kt prints ONE line to stderr
+per JVM that names the path. A `.ckway-tmp-<uuid>` directory older than one hour that holds anything but class files and
+`entry.txt` is not deleted either; kt prints one line per JVM that names it, and you delete it yourself.
 
 What this protects against: a class file in the cache that is damaged, truncated, replaced by a stale or foreign
 class, or edited without the matching hash; a cache that a different project or user left in the working directory
@@ -409,6 +417,11 @@ cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files 
   the thread, so `ExecutorService.shutdownNow` stops such a thread. The callee is not stopped by that (it ignored the
   cancellation); its late result is dropped. Measured with a grace of 400 ms: `InterruptedException` after 406 ms, flag clear.
   The in-body wait has no bound (a cancelled body waits for its callee: structured concurrency).
+* The Job of a call (the one of a top-level call, or of a call from a child thread) is completed on every exit of the call:
+  a normal return without suspension, a synchronous throw, a resume with a value or a failure, an interrupt, the grace
+  time. One macro, `ckway.co/wait-for`, owns this for the static emission and the function-value path, and `ckway.co/call-suspend`
+  for the dynamic path. A child thread of a body that makes a call that throws before it suspends (`@(future (p/boomNow))`)
+  therefore does not keep the Job of the body active.
 * The interrupt flag that is set again (above) is set only on the thread of the body itself, the one that the cancellation
   of the Job interrupts. A thread that only inherited the context of the body (`future`, `bound-fn`, a pool task started in
   the body) has no such thread: its flag is never set because of the cancellation. A suspend call that it makes is a call
@@ -460,6 +473,11 @@ subtype of the other), so the non-generic one wins, as in Kotlin. A pair that th
 unrelated: then the rule "no vararg, not generic, no default" or the ambiguity error decides, never a guess. A
 pair that takes the same Kotlin class and differs only in the type argument (`Map<String, Any>` and `Map<K, V>`) is
 always an error: the value is a Clojure map, and the JVM erased what it holds.
+
+A candidate wins only if it is at least as good as every other one on EVERY parameter. The closeness of a number to a
+number parameter (an `Int` literal prefers `Int`) never hides a disadvantage on another parameter: with `mx(a: CharSequence,
+b: Int)` and `mx(a: String, b: Long)`, `(p/mx "s" 1)` is ambiguous (kotlinc says so for `mx("s", 1)`). A var used as a value
+has no literal: `(let [f p/mx] (f "s" 1))` passes a `Long`, which only the `Long` overload takes, as `mx("s", 1L)` in Kotlin.
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
 seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the

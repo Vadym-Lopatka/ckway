@@ -5,7 +5,7 @@ CORO=$(clojure -Spath -A:coro) || exit 1
 rm -rf target/fixtures && mkdir -p target/fixtures
 # each compilation has its own -module-name: the Kotlin compiler finds top-level functions of a
 # class path directory through META-INF/<module>.kotlin_module, and one name would be overwritten
-kotlinc -module-name fx -Xcontext-parameters -nowarn -cp "$CORO" test-fixtures/fx/*.kt test-fixtures/fx/other/*.kt test-fixtures/fx/init/*.kt -d target/fixtures || exit 1
+kotlinc -module-name fx -Xcontext-parameters -nowarn -cp "$CORO" test-fixtures/fx/*.kt test-fixtures/fx/other/*.kt test-fixtures/fx/init/*.kt test-fixtures/fx/far/*.kt -d target/fixtures || exit 1
 # an interface compiled the old way (no JVM default methods, bodies in $DefaultImpls)
 kotlinc -module-name legacy -jvm-default=disable -nowarn test-fixtures/legacy/*.kt -d target/fixtures || exit 1
 # stdlib only (no kotlinx.coroutines): suspend calls and adapters must work without it
@@ -27,3 +27,5 @@ kotlinc -module-name opt -nowarn -cp target/optdep test-fixtures/opt/*.kt -d tar
 # a package that is NOT on the test class path: the tests put it there later (robust-test, R2/R3)
 rm -rf target/late-classes && mkdir -p target/late-classes
 kotlinc -module-name late -nowarn test-fixtures/late/*.kt -d target/late-classes
+# Java interfaces next to the Kotlin ones (kt/reify: one written form for a Java and a Kotlin leaf of one member)
+javac -cp "target/fixtures:$CORO" -d target/fixtures test-fixtures/java/pj/*.java || exit 1

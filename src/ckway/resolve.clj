@@ -663,6 +663,32 @@
 (defn- dominates? [a b]
   (and (every? true? (map <= a b)) (some true? (map < a b))))
 
+;; `dominates?` compares the tiers of the arguments: a tier is the closeness of a NUMBER to a number parameter (an
+;; Int literal prefers Int) and tells a reference parameter only as `Object` (3) or any other type (1). So two
+;; candidates with the same reference tier can differ on that parameter (`CharSequence` or `String`), and a numeric
+;; preference on another parameter must not hide it: Kotlin chooses a candidate only if it is at least as specific as
+;; every other one on EVERY parameter (`at-least-as-specific?`). See `choose*`.
+(defn- check-idxs
+  "The :idx of the written argument of each check of `check-items`, in order (the same shape as `tiers`)."
+  [items]
+  (mapcat (fn [item]
+            (cond (:omitted item) []
+                  (:vararg-coll item) [(:idx (:vararg-coll item))]
+                  (:vararg item) (map :idx (:vararg item))
+                  :else [(:idx item)]))
+          items))
+
+(declare entry-slots slot-subtype?)
+
+(defn- less-specific-somewhere?
+  "Does `b` have a parameter that is not a subtype of the parameter of `a` for the same written argument, where the two
+  tiers are equal (so `dominates?` saw no difference)? Then `a` does not beat `b`."
+  [a b]
+  (let [ta (zipmap (check-idxs (:items a)) (tiers (:checks a)))
+        tb (zipmap (check-idxs (:items b)) (tiers (:checks b)))
+        sa (entry-slots a) sb (entry-slots b)]
+    (boolean (some (fn [[i s]] (and (contains? sb i) (= (get ta i) (get tb i)) (not (slot-subtype? s (get sb i))))) sa))))
+
 (defn- member? [decl] (boolean (some #(= :dispatch (:role %)) (:receivers decl))))
 
 ;; ---------------------------------------------------------------- unsupported
@@ -982,7 +1008,7 @@
       (every? (fn [b] (some #(= :conv (nth % 2 nil)) (:checks b))) best)
       (str "\n  Why: every candidate needs a number that the argument is not: kt would have to convert it (an integer "
            "to a Double or a Float, a Long to an Int...), and it cannot choose the target. Kotlin refuses such a call too."
-           "\n  Way out: write the number as the type you mean: a floating-point literal (`4.0`, `4.0f`) or a conversion "
+           "\n  Way out: write the number as the type you mean: a floating-point literal (`4.0`) or a conversion "
            "(`(double x)`, `(float x)`, `(int x)`, `(long x)`).")
 
       (and (contains? kinds :function) (contains? kinds :property))
@@ -1066,6 +1092,27 @@
               {:kt/candidates (map :signature decls)}))
       ok)))
 
+(defn- same-member-root
+  "Of candidates that are all the SAME member (an original and the overrides that narrow its result type: one JVM name,
+  the same JVM parameter types, one kind, the same suspend flag), the candidate of the most general declaring class, if
+  there is one that every other declaring class extends; else nil. The call of that member is virtual, so it runs the
+  override of the object. Only used where the receiver is of unknown class (`choose*`): with several candidates
+  of REAL overloads (other JVM name or other parameter types, or unrelated classes) this is nil."
+  [viable]
+  (when (and (> (count viable) 1) (every? (comp member? :decl) viable))
+    (let [jm (fn [d] (if (= :property (:kind d)) (:getter d) (:jvm d)))
+          sig (fn [b]
+                (let [d (:decl b) m (jm d) desc (:desc m)]
+                  (when (and m (:name m) desc (not (:field m)) (#{:function :property} (:kind d)))
+                    [(:kind d) (:name d) (:name m) (subs desc 0 (inc (.indexOf ^String desc ")")))
+                     (boolean (:static? m)) (boolean (:suspend (:flags d))) (count (:params d))])))
+          sigs (map sig viable)
+          owner (fn [b] (some-> (:owner (:decl b)) jvm-class))]
+      (when (and (every? some? sigs) (apply = sigs))
+        (first (filter (fn [b] (let [c (owner b)]
+                                 (and c (every? (fn [o] (let [oc (owner o)] (and oc (.isAssignableFrom ^Class c ^Class oc)))) viable))))
+                       viable))))))
+
 (defn- choose*
   "Pick exactly one declaration (rule 7).
   => {:decl d :items items :checks checks [:tform form]}      one candidate
@@ -1126,8 +1173,13 @@
         (if (= 1 (count viable))
           (result (first viable))
           (if (and compile? (some unknown? viable))
-            (cond-> {:dynamic? true} tf (assoc :tform tform))
-            (let [best (remove (fn [b] (some #(dominates? (tiers (:checks %)) (tiers (:checks b))) viable)) viable)
+            ;; one member that narrowing overrides repeat: a static virtual call of the most general declaration
+            (if-let [root (same-member-root viable)]
+              (result root)
+              (cond-> {:dynamic? true} tf (assoc :tform tform)))
+            (let [best (remove (fn [b] (some #(and (dominates? (tiers (:checks %)) (tiers (:checks b))) (not (less-specific-somewhere? % b)))
+                                             viable))
+                               viable)
                   best (if (and (> (count best) 1) (some (comp member? :decl) best))
                          (filter (comp member? :decl) best)
                          best)
@@ -1301,7 +1353,7 @@
       (cond
         (and defaults? (not (:static? (:jvm decl))))
         {:op :static :class (:class jvm) :name (:name jvm) :unit? unit?
-         :args (vec (concat [{:entry target :jvm-type (:class (:jvm decl)) :target? true}] all masks [{:marker true}]))}
+         :args (vec (concat [{:entry target :jvm-type (:class jvm) :target? true}] all masks [{:marker true}]))}
         defaults?
         {:op :static :class (:class jvm) :name (:name jvm) :unit? unit?
          :args (vec (concat all masks [{:marker true}]))}

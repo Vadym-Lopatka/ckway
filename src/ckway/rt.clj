@@ -654,25 +654,26 @@
                    (:ret-td p) (let [td (:ret-td p)] #(<-kotlin td %))
                    :else identity)]
     (fn [^objects argv]
-      (let [k (when susp? (co/continuation))
-            _ (when (and (= :virtual op) target)
-                (let [t (target argv)]
-                  (when-not (.isInstance ^Class tclass t)
-                    (r/fail (str "kt: the receiver (`this`) expects " (.getName ^Class tclass) ", got "
-                                 (if (nil? t) "nil" (got-text t)) (when-let [sig (:sig p)] (str "\n  Kotlin: " sig)))))))
-            args (object-array n)
-            _ (dotimes [i n] (aset args i ((nth fns i) argv k)))
-            res (try
-                  (case op
-                    :static (if mh (call-jvm mh (vec args)) (.invoke ^Method member nil args))
-                    :virtual (if mh (call-jvm mh (into [(target argv)] args)) (.invoke ^Method member (target argv) args))
-                    :new (if mh (call-jvm mh (vec args)) (.newInstance ^Constructor member args))
-                    :get-static (.get field nil)
-                    :get-field (.get field (target argv))
-                    :set-static (.set field nil (aget args 0))
-                    :set-field (.set field (target argv) (aget args 0)))
-                  (catch InvocationTargetException e (throw (unwrap e))))
-            res (if k (co/wait-for k res) res)]
+      (let [run (fn [k]
+                  (when (and (= :virtual op) target)
+                    (let [t (target argv)]
+                      (when-not (.isInstance ^Class tclass t)
+                        (r/fail (str "kt: the receiver (`this`) expects " (.getName ^Class tclass) ", got "
+                                     (if (nil? t) "nil" (got-text t)) (when-let [sig (:sig p)] (str "\n  Kotlin: " sig)))))))
+                  (let [args (object-array n)]
+                    (dotimes [i n] (aset args i ((nth fns i) argv k)))
+                    (try
+                      (case op
+                        :static (if mh (call-jvm mh (vec args)) (.invoke ^Method member nil args))
+                        :virtual (if mh (call-jvm mh (into [(target argv)] args)) (.invoke ^Method member (target argv) args))
+                        :new (if mh (call-jvm mh (vec args)) (.newInstance ^Constructor member args))
+                        :get-static (.get field nil)
+                        :get-field (.get field (target argv))
+                        :set-static (.set field nil (aget args 0))
+                        :set-field (.set field (target argv) (aget args 0)))
+                      (catch InvocationTargetException e (throw (unwrap e))))))
+            ;; a suspend call: `call-suspend` owns the continuation (and the Job of the call) around the whole of `run`
+            res (if susp? (co/call-suspend run) (run nil))]
         (post res)))))
 
 ;; ---------------------------------------------------------------- the dynamic path and its cache

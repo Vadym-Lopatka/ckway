@@ -158,13 +158,30 @@
           (->Waiter (.plus ^CoroutineContext ctx job) job UNSET nil)))
       (->Waiter ctx nil UNSET nil))))
 
-(defn wait-for
-  "The value of a suspend call: `r` is the return value of the JVM method that got continuation `k`."
+(defn wait-for*
+  "The value of a suspend call: `r` is the return value of the JVM method that got continuation `k`. The call's own
+  Job (if any) is completed on every path: no suspension, a failure, a resume, an interrupt, the grace time."
   [^Continuation k r]
   (if (identical? r SUSPENDED)
     (try (.awaitResult ^ckway.co.IWait k)
          (finally (.release ^ckway.co.IWait k)))
     (do (.done ^ckway.co.IWait k) r)))
+
+(defmacro wait-for
+  "The value of a suspend call: `call` is the form that calls the JVM method with continuation `k`. If `call` throws
+  before it suspends, the call's own Job is completed (and the exception goes on); otherwise `wait-for*` does it.
+  Every suspend call goes through this macro or `call-suspend`, so no call site can forget the Job."
+  [k call]
+  `(let [k# ~k]
+     (wait-for* k# (try ~call
+                        (catch Throwable t# (.done ^ckway.co.IWait k#) (throw t#))))))
+
+(defn call-suspend
+  "Own the whole suspend call: make the continuation, run `(f k)` (the JVM call with `k`, and whatever prepares it),
+  wait for the result. A throw anywhere in `(f k)` completes the call's own Job."
+  [f]
+  (let [k (continuation)]
+    (wait-for k (f k))))
 
 ;; ---------------------------------------------------------------- running a body
 

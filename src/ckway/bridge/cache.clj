@@ -248,9 +248,20 @@
   (and (boolean (re-matches entry-name-re (.getName f))) (own-child? root f) (ours-shaped? f)))
 
 (defn- temp-dir?
-  "Is `f` a temporary directory of kt in `root`?"
+  "Is `f` a temporary directory of kt in `root`? The exact name, a real directory directly in `root`, and only class
+  files and `entry.txt` in it (as for an entry): a directory that is named like one but holds something else is not ours."
   [^File root ^File f]
-  (and (boolean (re-matches temp-name-re (.getName f))) (own-child? root f)))
+  (and (boolean (re-matches temp-name-re (.getName f))) (own-child? root f) (ours-shaped? f)))
+
+(defonce ^:private warned-in-the-way (atom false))
+(defonce ^:private warned-stale-tmp (atom false))
+
+(defn- warn-once!
+  "One line on stderr per JVM for the flag `flag` (an atom): the cache does not touch what is not its own, and says so
+  once, because otherwise it would silently stay off for that bridge."
+  [flag text]
+  (when (compare-and-set! flag false true)
+    (binding [*out* *err*] (println text))))
 
 (def ^:private binary-name-re #"[A-Za-z0-9_$.]+")
 
@@ -353,8 +364,13 @@
   [^File cache-dir cname keep]
   (let [now (System/currentTimeMillis)
         kids (vec (.listFiles cache-dir))]
-    (doseq [^File f kids :when (and (temp-dir? cache-dir f) (> (- now (.lastModified f)) stale-tmp-ms))]
-      (delete-tree! f))
+    (doseq [^File f kids :when (and (> (- now (.lastModified f)) stale-tmp-ms) (re-matches temp-name-re (.getName f)))]
+      (if (temp-dir? cache-dir f)
+        (delete-tree! f)
+        (when (own-child? cache-dir f)
+          (warn-once! warned-stale-tmp
+                      (str "ckway: " f " is named like a temporary directory of ckway but holds other files, so ckway will not "
+                           "delete it. Delete it yourself if it is stale.")))))
     (let [entries (filter #(entry-dir? cache-dir %) kids)
           old? (fn [^File f] (> (- now (.lastModified f)) max-age-ms))
           [old live] ((juxt filter remove) #(and (not= keep (.getName ^File %)) (old? %)) entries)
@@ -379,7 +395,11 @@
           (if (entry-dir? cache-dir final)
             (do (debug "entry " final " has no valid entry.txt, replaced")
                 (delete-tree! final))
-            (throw (ex-info (str final " is not an entry of kt and is not touched") {}))))
+            (do (warn-once! warned-in-the-way
+                            (str "ckway: " final " is in the way of the bridge cache: it is not an entry of ckway (a file, a link, or a "
+                                 "directory with other files), so ckway will not touch it and does not cache this bridge "
+                                 "(every run compiles it again). Move or delete it to turn the cache on."))
+                (throw (ex-info (str final " is not an entry of kt and is not touched") {})))))
         (when-not (.exists final)
           (try
             (when-not (make-dirs! tmp) (throw (ex-info "no temp dir" {})))
