@@ -1,5 +1,5 @@
 (ns ckway.suspend-test
-  "Step 4: Kotlin `suspend` (DESIGN-2 note 'suspend'; spike D checks S1-S12, X1-X3).
+  "Kotlin `suspend` (README, note on suspend):
   A suspend call waits for its result; a Clojure function at a suspend function type or at a
   `fun interface` with a suspend method is a coroutine body on its own virtual thread (ckway.co)."
   (:require [clojure.string :as str]
@@ -109,7 +109,7 @@
       (is (< ms 2000)))))
 
 (deftest s-a-context
-  (testing "outside any body the callee gets a context with no dispatcher and a Job of its own (review B6)"
+  (testing "outside any body the callee gets a context with no dispatcher and a Job of its own"
     (is (false? (f/hasDispatcher)))
     (is (some? (f/currentJob)) "a top-level call has its own Job (it used to have none: EmptyCoroutineContext)")
     (is (true? (f/isActiveNow)))

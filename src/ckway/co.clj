@@ -16,17 +16,24 @@
          - a body whose Job is being cancelled: the interrupt (it is the cancellation of that Job) is ignored. The
            callee got the cancellation through the Job in its context (it is the same Job) and resumes `k`,
            usually with a CancellationException, when it is done (a `finally` with NonCancellable work finishes
-           first). So the body unwinds only after its callee: structured-concurrency order;
-         - a call with its own Job (see 1): the interrupt cancels that Job, the thread keeps waiting until the
-           callee resumes `k` (bounded by the callee), then throws InterruptedException (the interrupt flag is
-           clear, the exception replaces it; the callee's result, if any, is dropped).
+           first). So the body unwinds only after its callee: structured-concurrency order. If the callee
+           returns a value although the Job is cancelling (it ignored the cancellation), the wait returns the
+           value, as in Kotlin, and sets the interrupt flag again: the next blocking operation of the body fails
+           at once, as the next suspension point does in Kotlin;
+         - a call with its own Job (see 1), as `runBlocking` does: the interrupt cancels that Job and the thread keeps
+           waiting for the callee to finish its cancellation, then throws InterruptedException (the interrupt flag
+           is clear, the exception replaces it; the callee's result, if any, is dropped). Unlike `runBlocking`
+           the wait is bounded: after the grace time (system property `ckway.interrupt.grace.ms`, default 5000)
+           or at a second interrupt the exception is thrown although the callee has not resumed `k` (a callee
+           that does not support cancellation), and the late result is dropped.
     3. `run-body k frame f`: the adapter of a suspend function type / fun interface. Runs `(f)` on a new
        virtual thread and returns COROUTINE_SUSPENDED. The thread sees `frame` (a Clojure binding frame
        from `capture-frame`, taken when the adapter was created) and `*context*` = (.getContext k).
        When `f` returns or throws, `k` is resumed through the interceptor of its context, exactly once on every
        path (a value, an exception, an Error, a hook that throws, an interceptor that throws), and the
        intercepted continuation is released (`releaseInterceptedContinuation`, which the contract of
-       ContinuationInterceptor asks for when the continuation is not used any more).
+       ContinuationInterceptor asks for when the continuation is not used any more). Never twice: the
+       interceptor gets a guard around `k` that lets only the first resume through.
     4. Everything that needs kotlinx.coroutines is in `ckway.co.kx`, loaded only if
        `kotlinx.coroutines.Job` is on the class path: ThreadContextElements of the context are applied
        on the body's thread (and restored; an element that throws makes the coroutine fail), and cancelling the
@@ -53,9 +60,16 @@
 
 ;; ---------------------------------------------------------------- calling a suspend function
 
-(definterface IWait (awaitResult []) (done []))
+(definterface IWait (awaitResult []) (done []) (release []))
 
 (declare kx)
+
+(defn- grace-nanos
+  "How long a top-level wait keeps waiting for a callee that was cancelled by an interrupt: the system property
+  `ckway.interrupt.grace.ms` (read at each wait), default 5000 ms."
+  ^long []
+  (* 1000000 (try (Long/parseLong (System/getProperty "ckway.interrupt.grace.ms" "5000"))
+                  (catch NumberFormatException _ 5000))))
 
 (deftype Waiter [^CoroutineContext ctx own-job ^:volatile-mutable result ^:volatile-mutable ^Thread waiter]
   Continuation
@@ -65,28 +79,44 @@
     (when-let [t waiter] (LockSupport/unpark t)))
   IWait
   (done [_] (when own-job ((:complete! @kx) own-job)))
+  (release [_] (set! waiter nil))
   (awaitResult [this]
     (set! waiter (Thread/currentThread))
     (let [hooks @kx]
       (try
-        (loop [interrupted? false]
+        ;; `deadline`: nil, or (top-level call) the System/nanoTime until which this thread waits for a callee
+        ;; that was told to cancel because the thread was interrupted
+        (loop [deadline nil]
           (let [r result]
             (if (identical? r UNSET)
-              (do (LockSupport/park this)
+              (do (if deadline
+                    (let [left (- (long deadline) (System/nanoTime))]
+                      (if (pos? left)
+                        (LockSupport/parkNanos this left)
+                        (throw (InterruptedException.))))
+                    (LockSupport/park this))
                   (if (Thread/interrupted)
                     (cond
+                      ;; a second interrupt of a top-level wait: stop waiting for the callee
+                      deadline (throw (InterruptedException.))
                       ;; a top-level call: its own Job is cancelled, the callee gets the cancellation and finishes
-                      ;; (this thread waits for it, bounded by the callee), then InterruptedException
-                      own-job (do ((:cancel! hooks) own-job) (recur true))
+                      ;; (this thread waits for it, at most the grace time), then InterruptedException
+                      own-job (do ((:cancel! hooks) own-job) (recur (+ (System/nanoTime) (grace-nanos))))
                       ;; in a body whose Job is being cancelled: the interrupt is the cancellation of this
                       ;; very Job, which the callee got through its context. Wait until it resumes `this`.
-                      (and hooks ((:cancelling? hooks) ctx)) (recur interrupted?)
+                      (and hooks ((:cancelling? hooks) ctx)) (recur nil)
                       :else (throw (InterruptedException.)))
-                    (recur interrupted?)))
+                    (recur deadline)))
               (cond
-                interrupted? (throw (InterruptedException.))
+                deadline (throw (InterruptedException.))
                 (instance? kotlin.Result$Failure r) (throw (.-exception ^kotlin.Result$Failure r))
-                :else r))))
+                :else (do
+                        ;; A body whose Job is cancelling and whose callee ignored the cancellation: the interrupt that
+                        ;; the cancellation sent may have been swallowed above. The body goes on with the value (as in
+                        ;; Kotlin, where the next suspension point throws), so its next blocking operation must fail.
+                        (when (and hooks (nil? own-job) ((:cancelling? hooks) ctx))
+                          (.interrupt (Thread/currentThread)))
+                        r)))))
         (finally (when own-job ((:complete! hooks) own-job)))))))
 
 (defn continuation
@@ -104,7 +134,8 @@
   "The value of a suspend call: `r` is the return value of the JVM method that got continuation `k`."
   [^Continuation k r]
   (if (identical? r SUSPENDED)
-    (.awaitResult ^ckway.co.IWait k)
+    (try (.awaitResult ^ckway.co.IWait k)
+         (finally (.release ^ckway.co.IWait k)))
     (do (.done ^ckway.co.IWait k) r)))
 
 ;; ---------------------------------------------------------------- running a body
@@ -134,25 +165,39 @@
 
 (defn- failure? [r] (instance? kotlin.Result$Failure r))
 
+(defn- uncaught!
+  "Give `t` to the uncaught exception handler of this thread (nobody else can handle it)."
+  [^Throwable t]
+  (let [^Thread th (Thread/currentThread)
+        ^Thread$UncaughtExceptionHandler h (or (.getUncaughtExceptionHandler th) (Thread/getDefaultUncaughtExceptionHandler) th)]
+    (.uncaughtException h th t)))
+
 (defn- resume!
   "Resume `k` with the Result `res` through the interceptor (the dispatcher) of its context, as Kotlin's own
   suspend helpers do, and release the intercepted continuation afterwards (the contract of
   ContinuationInterceptor: it was got from interceptContinuation, and is not used any more after the resume).
-  If the interceptor or the resume throws, `k` is resumed directly with that failure: the coroutine never
-  hangs. (If even that throws, the exception goes to the uncaught exception handler.)"
+  `k` is resumed exactly once. The interceptor gets a guard around `k` that lets only the first resume through.
+  If `interceptContinuation` throws, `k` is resumed directly with that failure: the coroutine never hangs. If
+  `resumeWith` of the intercepted continuation throws, the exception comes after the continuation ran (an
+  unconfined interceptor that runs it inline and fails in its own completion) or before it was resumed
+  (a dispatcher that refuses the task): in the first case it goes to the uncaught exception handler, in the
+  second `k` is resumed with it."
   [^Continuation k res]
-  (try
-    (let [ip (.get (.getContext k) ContinuationInterceptor/Key)
-          ^Continuation ic (if ip (.interceptContinuation ^ContinuationInterceptor ip k) k)]
-      (try (.resumeWith ic res)
+  (let [resumed (java.util.concurrent.atomic.AtomicBoolean. false)
+        guard (reify Continuation
+                (getContext [_] (.getContext k))
+                (resumeWith [_ r] (when (.compareAndSet resumed false true) (.resumeWith k r))))
+        fallback! (fn [^Throwable t]
+                    (try (.resumeWith guard (failure t))
+                         (catch Throwable t2 (uncaught! t2))))
+        ip (try (.get (.getContext k) ContinuationInterceptor/Key) (catch Throwable _ nil))
+        ic (try (if ip (.interceptContinuation ^ContinuationInterceptor ip guard) guard)
+                (catch Throwable t (fallback! t) nil))]
+    (when ic
+      (try (.resumeWith ^Continuation ic res)
+           (catch Throwable t (if (.get resumed) (uncaught! t) (fallback! t)))
            (finally
-             (when ip (try (.releaseInterceptedContinuation ^ContinuationInterceptor ip ic) (catch Throwable _ nil))))))
-    (catch Throwable t
-      (try (.resumeWith k (failure t))
-           (catch Throwable t2
-             (let [^Thread th (Thread/currentThread)
-                   ^Thread$UncaughtExceptionHandler h (or (.getUncaughtExceptionHandler th) (Thread/getDefaultUncaughtExceptionHandler) th)]
-               (.uncaughtException h th t2)))))))
+             (when ip (try (.releaseInterceptedContinuation ^ContinuationInterceptor ip ic) (catch Throwable _ nil))))))))
 
 (defn- run-hooked
   "The body with the kotlinx hooks: => the Result (a value, or a Failure). Failures of a hook are failures of

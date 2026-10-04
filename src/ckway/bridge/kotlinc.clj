@@ -30,16 +30,22 @@
 
 (defn available? [] (some? (load-compiler-class)))
 
+(def compiler-dependency
+  "The dependency that provides the compiler, as in a `deps.edn`: the library and the exclusions that the
+  compiler runs without. Its version is `kotlin-version`, the version of the Kotlin libraries that kt runs with."
+  {:lib 'org.jetbrains.kotlin/kotlin-compiler-embeddable
+   :exclusions ['org.jetbrains.kotlin/kotlin-reflect]})
+
 (defn missing-message
   "The error text for a reified call that needs the compiler. `what` says which call."
   [what]
   (str "kt: " what " is an `inline reified` call. kt compiles a small Kotlin bridge for it, which needs the Kotlin "
        "compiler on the class path, and no stored bridge for this call exists (no AOT class, no entry in the "
-       "disk cache).\n  Add org.jetbrains.kotlin/kotlin-compiler-embeddable " (kotlin-version) " with the `:kotlinc` alias of deps.edn:\n"
-       "    :kotlinc {:extra-deps {org.jetbrains.kotlin/kotlin-compiler-embeddable {:mvn/version \"" (kotlin-version)
-       "\" :exclusions [org.jetbrains.kotlin/kotlin-reflect]}}}\n"
-       "  and start with it (clojure -M:kotlinc ...). Only the JVM that compiles needs it: AOT-compile the namespace, "
-       "or keep the disk cache, and other JVMs run without it."))
+       "disk cache).\n  Add the compiler to the deps.edn of your project (under :deps, or in an alias that you start the JVM with):\n"
+       "    " (:lib compiler-dependency) " {:mvn/version \"" (kotlin-version) "\" :exclusions " (pr-str (:exclusions compiler-dependency)) "}\n"
+       "  The compiler is needed only to compile a `:<>` call, not at run time once the bridge is stored: AOT-compile "
+       "your namespaces with it, or run once with it so that the disk cache keeps the bridge, and other JVMs "
+       "run without it."))
 
 (defn- jvm-target
   "The Kotlin -jvm-target for the bridge: `opts` :jvm-target (made by `ckway.bridge/jvm-target`: the class-file

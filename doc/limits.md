@@ -85,6 +85,12 @@ A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtua
   `ckway.co`), and a top-level suspend call has no `Job`; an interrupt of a thread that waits for such a call ends the
   wait with `InterruptedException` while the Kotlin call goes on (see 16). With JDK 21 to 23, `synchronized` in a body pins the carrier thread (JEP 491 fixed this in 24; from the
   `ckway.co` docstring, not measured here).
+* A suspend call that ignores the cancellation of the body (`withContext(NonCancellable) { delay(300) }`) returns its
+  value to the body, as in Kotlin. kt then sets the interrupt flag of the body's thread again, so the next blocking
+  operation (`Thread/sleep`, a lock) fails at once with the `CancellationException` of the cancel, and the next suspend
+  call sees the cancelled `Job`. In a `withTimeout(100)`: Kotlin's own body that suspends again after such a callee ends
+  at 308 ms; the Clojure body with `(Thread/sleep 3000)` after it ends at 303 ms (`round3b_test`, M2). Before, the
+  interrupt was swallowed by the wait and the sleep ran its 3000 ms.
 
 ## 5. More than 20 parameters
 
@@ -120,6 +126,16 @@ A constructor parameter counts as a property when the class has a public propert
   is fine: write `(.visit [this x] ...)` once. The class also has the JVM bridge method `visit(Object)Object` (as
   kotlinc makes), so Kotlin code that holds the object as `Vis<String>` works. The erased twin is not offered
   as a second candidate, so no type hint is needed.
+  The same holds for an override that narrows only the result (`interface GStr : GSrc<String> { override fun get(): String }`,
+  `override val name: String` over `val name: Any`), for a suspend member, for a value class in the signature
+  (`override fun id(): Uid` over `fun id(): Any`: the bridge unboxes and boxes), over any number of levels and when two
+  super-interfaces declare the same member (`R3Both : R3Left, R3Right`). Each Kotlin member is ONE writable member, the
+  most specific one; the class gets that JVM method and a bridge method for every JVM signature it overrides.
+  kt reads the declarations of the interface itself from its Kotlin metadata, because `ckway.meta` lists an override
+  only when its Kotlin parameter types differ from the original's (`kt/reify` calls two private functions of
+  `ckway.meta` for this). Overloads that differ only in `Int` and `Int?` (`f(Int?)`, `f(Int)`: JVM `Integer` and `int`) are
+  two members: write them with the hints `^Integer` and `^int` (a hint that is exactly the JVM class of the parameter is
+  the exact fit; `^Integer` alone for an `Int` still fits when no other overload does).
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
@@ -143,7 +159,10 @@ A constructor parameter counts as a property when the class has a public propert
 ## 9. `:<>` and the Kotlin compiler
 
 * `inline reified` calls are compiled by the Kotlin compiler into a small bridge. The JVM that compiles needs the
-  `:kotlinc` alias (`kotlin-compiler-embeddable`). Without it: an error that names the alias, unless the bridge is stored.
+  compiler (`kotlin-compiler-embeddable`) on its class path. Without it: an error that gives the dependency to add to the
+  `deps.edn` of your project (library, version of the Kotlin stdlib that kt runs with, and the exclusion of
+  `kotlin-reflect`) and says that the compiler is needed only to compile a `:<>` call, not at run time, unless the bridge is stored.
+  (The `:kotlinc` alias of this repository is only for its own tests; a project that uses ckway has no such alias.)
 * A stored bridge needs no compiler: AOT-compiled code carries it (it is written to `*compile-path*`), and the
   per-user disk cache keeps the others (see 15). A cache entry is keyed on the source, the Kotlin versions and the
   class files it depends on.
@@ -235,9 +254,15 @@ type or member is checked for a value class only; any other class there is passe
 
 Where. `-Dckway.cache.dir=<dir>` selects the directory; an empty value turns the cache off. Without the property:
 `$XDG_CACHE_HOME/ckway` (if set and absolute), `%LOCALAPPDATA%\ckway` on Windows, else `~/.cache/ckway`. It is never the
-working directory. kt creates the directory with owner-only permissions (`rwx------`) where the file system has POSIX
-permissions. The default directory is used only if it belongs to the current user and neither group nor others can
-write it; otherwise the cache is off (the directory you name with the property is not checked).
+working directory: if the resolved default directory is not absolute (the JDK sets `user.home` to `?` for a user with no
+passwd entry, common in containers), the cache is off. kt creates the directory with owner-only permissions (`rwx------`)
+where the file system has POSIX permissions. An existing directory is used only if, after symbolic links are resolved,
+it is a directory that belongs to the current user and neither group nor others can write it. This holds for the default
+directory and for the one you name with the property. The owner is compared with the owner of a file that the process
+creates (not with `user.name`, which is `?` for such a user). For the default directory a failed check is silent
+(`-Dckway.debug=true` says why). For `-Dckway.cache.dir` it is an explicit setting, so kt turns the cache off and prints
+ONE line to stderr (once per JVM), for example `ckway: the bridge cache is OFF: the directory /tmp/c of -Dckway.cache.dir
+can be written by its group. Run `chmod 700 /tmp/c` ...`.
 
 What an entry is. A directory `<bridge class>-<key>` with the class files and `entry.txt` (written last, the directory
 is renamed into place, so a reader sees all of an entry or none, and two JVMs that write the same entry cannot mix it).
@@ -245,9 +270,18 @@ is renamed into place, so a reader sees all of an entry or none, and two JVMs th
 target, the SHA-256 of every class the call depends on (including the part classes of a multi-file facade, where the
 inline bodies are) and the version of the Kotlin compiler that made the entry. A class file is defined only after
 its SHA-256 matches. An entry that fails (hash, a class that cannot be defined or linked, a missing inner class, a
-damaged `entry.txt`) is deleted and the bridge is compiled again. A cache directory that cannot be created or written
+damaged `entry.txt`) is deleted and the bridge is compiled again. A directory of an entry with a missing or unparsable
+`entry.txt` is damaged in the same way: a lookup deletes it, and a store replaces it (before, it stayed and the bridge was
+compiled at every start). A cache directory that cannot be created or written
 means "no cache": no error, the bridge is compiled every run. `-Dckway.debug=true` prints one line for each such case.
 A JVM without the compiler on its class path cannot name the compiler version; it finds the entry by the rest of the key.
+
+Pruning. Every store prunes: of one bridge name the 8 most recently used entries are kept (two projects, or two branches,
+with different versions of one Kotlin library do not evict each other), an entry that was not used for 90 days is deleted
+whatever its bridge, and a `.tmp-<uuid>` directory older than one hour (a JVM that was killed while it wrote) is deleted.
+"Used" is the modification time of the entry directory; a hit sets it to now when it is older than one hour. That does not
+touch the class files or `entry.txt`, so the atomic write and the hash check stay as they were. The numbers are
+`keep-per-bridge`, `max-age-ms`, `stale-tmp-ms` and `touch-after-ms` in `ckway.bridge.cache`.
 
 What this protects against: a class file in the cache that is damaged, truncated, replaced by a stale or foreign
 class, or edited without the matching hash; a cache that a different project or user left in the working directory
@@ -255,8 +289,8 @@ class, or edited without the matching hash; a cache that a different project or 
 
 What it does NOT protect against: someone who can write both the class file and `entry.txt` in the cache directory can
 plant code that runs with your privileges, because the hash lives next to the class. That is why the default directory
-is per user, owner-only, and refused if others can write it. Do not point `ckway.cache.dir` at a directory that other users
-can write (`/tmp`, a shared build directory), and do not share the cache between trust domains. If in doubt, turn the
+is per user, owner-only, and refused if others can write it. A `ckway.cache.dir` that others can write (`/tmp`, a shared
+build directory) is refused with a warning. Do not share the cache between trust domains. If in doubt, turn the
 cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files are then part of your build).
 
 ## 16. Waiting for a Kotlin suspend call: cancellation and interrupts
@@ -270,16 +304,31 @@ cache off (`-Dckway.cache.dir=`) or AOT-compile the namespaces (the class files 
   code (`Thread/sleep`, a lock) is still stopped by the interrupt that the cancellation sends.
   Any other interrupt of a body (not caused by its Job) ends the wait with `InterruptedException` and the callee keeps
   running: kt cannot cancel a call whose Job is the body's own.
+  If the callee returns a value although the Job is cancelling (it ignored the cancellation), the body gets the value and
+  the interrupt flag is set again (see 4).
 * A suspend call from outside any body gets a Job of its own (`coroutineContext.job` works). If the waiting thread is
-  interrupted, that Job is cancelled and the thread keeps waiting until the callee has resumed (bounded by how long the
-  callee takes to cancel); then it gets `InterruptedException`. The interrupt flag is clear when the exception arrives
-  (as for any `InterruptedException`), and the callee's late result is dropped.
+  interrupted, that Job is cancelled and the thread keeps waiting for the callee to finish its cancellation; then it gets
+  `InterruptedException`, also when the callee returned a value. The interrupt flag is clear when the exception arrives
+  (as for any `InterruptedException`), and the callee's late result is dropped. This is what `kotlinx.coroutines.runBlocking`
+  does (1.10.2 and 1.11.0; `round3b_test` runs it): with a cancellable callee that has a slow `finally`, `runBlocking`
+  threw `InterruptedException` after 412 ms, flag clear, after the cleanup (`cleaned=true`). With a callee that never
+  resumes (`suspendCoroutine { }`) `runBlocking` stayed blocked for ever, in `TIMED_WAITING`, also after a second
+  interrupt. kt differs there on purpose: the wait is bounded. It ends with `InterruptedException` when the grace time
+  has passed (system property `ckway.interrupt.grace.ms`, read at each wait, default 5000 ms) or at a second interrupt of
+  the thread, so `ExecutorService.shutdownNow` stops such a thread. The callee is not stopped by that (it ignored the
+  cancellation); its late result is dropped. Measured with a grace of 400 ms: `InterruptedException` after 406 ms, flag clear.
+  The in-body wait has no bound (a cancelled body waits for its callee: structured concurrency).
 * Without kotlinx.coroutines: no Job, no cancellation. An interrupt ends the wait with `InterruptedException` at once
   and the Kotlin call goes on.
 * `catch Exception` in a body catches the `InterruptedException` of a cancel (see 4).
 * A coroutine body resumes its continuation exactly once: on a value, an exception, an `Error`, a `ThreadContextElement` that
   throws in `updateThreadContext` or `restoreThreadContext` (the coroutine fails with that exception), or an interceptor
-  that throws. `releaseInterceptedContinuation` is called after the resume.
+  that throws. `releaseInterceptedContinuation` is called after the resume. The interceptor gets a guard around the
+  continuation that lets only the first resume through. If `interceptContinuation` throws, the continuation is resumed
+  directly with that exception. If `resumeWith` of the intercepted continuation throws after the continuation ran (an
+  unconfined interceptor whose completion fails), the exception goes to the uncaught exception handler and the
+  continuation is NOT resumed again (`round3b_test`, M9: one completion, not two); if it throws before (a dispatcher that
+  refuses the task), the continuation is resumed with that exception.
 
 ## 17. Compiler noise
 

@@ -6,9 +6,9 @@
   `inline` functions this way). A bridge is a small class with ONE public static method `call`
   that calls the target. The bridge name has only characters that Clojure keeps.
 
-  A second use of the same storage (step 7): `reify-class`, the class of a `kt/reify` form. Kind `R`.
+  A second use of the same storage: `reify-class`, the class of a `kt/reify` form. Kind `R`.
 
-  Contract (step 5 adds a second kind of bridge and uses the same naming and storage):
+  Contract (the call bridge, kind `K`, and the `kt/reify` class, kind `R`, share the naming and the storage):
 
     target  = {:kind :static|:virtual  :class \"fx.Uid\"  :name \"box-impl\"  :desc \"(J)Lfx/Uid;\"}
     (needed? target)       does a direct `.` form fail? (name is not Clojure-safe, or the member is not public)

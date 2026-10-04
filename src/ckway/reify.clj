@@ -30,6 +30,12 @@
   overloads with the same name and count are told apart by hints on the parameters (`^Integer` or `^int` for
   a Kotlin Int, `^String`, `^fx.Uid` for a value class).
 
+  Narrowed types: an interface that overrides a member with a more specific result or parameter type
+  (`StrSrc : Src { override fun get(): String }`, `StrVis : Vis<String>`) has ONE writable member, the most specific
+  one. The class implements that JVM method and a bridge method for every JVM signature it overrides (the erased
+  one, the covariant ones), as kotlinc does; a bridge to a method that takes or returns a value class unboxes and
+  boxes it.
+
   A member that is not written: an interface default body (JVM default method, or the older style with the
   body in `I$DefaultImpls`) and a default property getter stay. An ABSTRACT member that is not written is a
   run-time error when it is called (`AbstractMethodError` that names the member), as in Clojure `reify`.
@@ -45,7 +51,8 @@
             [ckway.meta :as meta]
             [ckway.resolve :as r])
   (:import [java.lang.invoke MethodType]
-           [java.lang.reflect GenericArrayType Method Modifier ParameterizedType Type TypeVariable WildcardType]))
+           [java.lang.reflect GenericArrayType Method Modifier ParameterizedType Type TypeVariable WildcardType]
+           [kotlin.metadata.jvm KotlinClassMetadata$Class]))
 
 (set! *warn-on-reflection* true)
 
@@ -139,23 +146,7 @@
                     acc (.getGenericInterfaces k)))]
     (go c {} {})))
 
-(defn- bridged
-  "{[name desc] [name desc2]}: an abstract method of a super-interface that a method of a sub-interface overrides
-  with more specific types (`Vis<T>.visit(Object)Object` and `StrVis.visit(String)String` for `StrVis : Vis<String>`).
-  The JVM class needs a bridge method for the first, as kotlinc and javac make one."
-  [chain]
-  (into {}
-        (for [^Class c2 chain
-              [^Class c1 env] (super-envs c2)
-              :when (contains? (set chain) c1)
-              ^Method m1 (instance-methods c1)
-              :when (Modifier/isAbstract (.getModifiers m1))
-              ^Method m2 (instance-methods c2)
-              :when (and (= (.getName m1) (.getName m2))
-                         (not= (desc-of m1) (desc-of m2))
-                         (= (mapv #(r/box-class (erasure % env)) (.getGenericParameterTypes m1))
-                            (mapv #(r/box-class %) (.getParameterTypes m2))))]
-          [[(.getName m1) (desc-of m1)] [(.getName m2) (desc-of m2)]])))
+(declare bridged)
 
 (defn- jvm-methods
   "{[name desc] {:class declaring-interface :method Method :abstract? bool :bridge-to [name desc] :conflict [classes]}}
@@ -192,8 +183,20 @@
     (when (= (count jts) (count ks))
       (mapv (fn [k jt] (assoc k :jvm-type jt)) ks jts))))
 
+(defn- own-declarations
+  "The declarations of the members that the Kotlin interface `c` declares itself, an override that narrows a type
+  included. (`meta/class-members` leaves out an override whose parameters equal the ones of the member it
+  overrides, `fun get(): String` over `fun get(): T`, because both are one member to a caller; here both are
+  written members of their JVM method.) The two `meta` functions are private there."
+  [^Class c]
+  (let [m (@#'meta/read-meta c)]
+    (when (instance? KotlinClassMetadata$Class m)
+      (let [k (.getKmClass ^KotlinClassMetadata$Class m)]
+        (filter #(= (.getName c) (:owner %))
+                (@#'meta/declared-members {:binary (.getName c) :internal (.getName k) :km k}))))))
+
 (defn- kotlin-members [^Class c]
-  (for [d (meta/class-members (.getName c))
+  (for [d (own-declarations c)
         :when (and (#{:function :property} (:kind d)) (some #(= :dispatch (:role %)) (:receivers d)))
         m (case (:kind d)
             :function
@@ -229,18 +232,22 @@
 (defn- kotlin-interface? [^Class c]
   (boolean (some #(= :class (:kind %)) (meta/class-members (.getName c)))))
 
+(defn- jvm-key [m] [(:name (:jvm m)) (:desc (:jvm m))])
+
 (defn- members-of [chain jvm]
-  (let [twin? (fn [m] (:bridge-to (get jvm [(:name (:jvm m)) (:desc (:jvm m))])))
-        from-chain (for [^Class c chain
-                         m (if (kotlin-interface? c)
-                             (filter #(contains? jvm [(:name (:jvm %)) (:desc (:jvm %))]) (kotlin-members c))
-                             (map #(java-member c %) (instance-methods c)))
-                         :when (not (twin? m))]
-                     m)
-        from-object (for [^Method m (.getDeclaredMethods Object)
+  (let [all (concat (for [^Class c chain
+                          m (if (kotlin-interface? c)
+                              (filter #(contains? jvm (jvm-key %)) (kotlin-members c))
+                              (map #(java-member c %) (instance-methods c)))]
+                      m)
+                    (for [^Method m (.getDeclaredMethods Object)
                           :when (object-methods [(.getName m) (desc-of m)])]
-                      (java-member Object m))]
-    (->> (concat from-chain from-object)
+                      (java-member Object m)))
+        present (set (map jvm-key all))
+        ;; the member of an erased JVM signature is hidden when the more specific member that overrides it is offered
+        twin? (fn [m] (when-let [leaf (:bridge-to (get jvm (jvm-key m)))] (contains? present leaf)))]
+    (->> all
+         (remove twin?)
          (reduce (fn [[seen out] m] (let [k [(:key m) (:name (:jvm m)) (:desc (:jvm m))]]
                                       (if (seen k) [seen out] [(conj seen k) (conj out m)])))
                  [#{} []])
@@ -253,11 +260,20 @@
   [m]
   (str "(" (:key m) " [" (str/join " " (cons "this" (map :name (:slots m)))) "])"))
 
-(defn- members-text [members]
-  (str/join "\n"
-            (for [[iface ms] (group-by :iface (remove #(= "java.lang.Object" (:iface %)) members))]
-              (str "  " iface (if (= :java (:kind (first ms))) " (Java: plain method names)" " (Kotlin)") "\n"
-                   (str/join "\n" (for [m ms] (str "    " (written-form m) "  " (:signature m))))))))
+(defn- members-text [members chain]
+  (let [shown (remove #(= "java.lang.Object" (:iface %)) members)]
+    (if (seq shown)
+      (str/join "\n"
+                (for [[iface ms] (group-by :iface shown)]
+                  (str "  " iface (if (= :java (:kind (first ms))) " (Java: plain method names)" " (Kotlin)") "\n"
+                       (str/join "\n" (for [m ms] (str "    " (written-form m) "  " (:signature m)))))))
+      ;; never an empty list for an interface that has methods: show the JVM methods
+      (str/join "\n"
+                (for [^Class c chain
+                      :let [ms (instance-methods c)]
+                      :when (seq ms)]
+                  (str "  " (.getName c) " (JVM methods)\n"
+                       (str/join "\n" (for [^Method m ms] (str "    " (.getName m) (desc-of m))))))))))
 
 (defn- candidates-text [ms]
   (str/join "\n" (for [m ms] (str "    " (written-form m) "  " (:signature m)))))
@@ -265,17 +281,100 @@
 (defn- slot-class ^Class [slot]
   (or (some-> slot :type :value-class :class r/jvm-class) (r/jvm-class (:jvm-type slot))))
 
-(defn- hints-fit? [m hints]
-  (every? true? (map (fn [^Class h slot]
-                       (or (nil? h)
-                           (let [sc (slot-class slot)] (and sc (= (r/box-class h) (r/box-class sc))))))
-                     hints (:slots m))))
+(defn- slot-fits?
+  "Do the slots `sa` (of the member of the super-interface; `g` is the generic type of its JVM parameter, `env` the
+  type arguments that the sub-interface gives) and `sb` (of the overriding member) stand for the same parameter?
+  Only where the super-interface has a type variable is a primitive the same as its box (`Vis<Int>.visit(Object)`
+  and `visit(int)`); everywhere else the types must be equal, so `f(Int?)` and `f(Int)` are two members."
+  [sa sb ^Type g env]
+  (if (instance? TypeVariable g)
+    (= (r/box-class (erasure g env)) (r/box-class (slot-class sb)))
+    (and (= (slot-class sa) (slot-class sb))
+         (or (not (or (-> sa :type :value-class) (-> sb :type :value-class)))
+             (= (boolean (-> sa :type :nullable?)) (boolean (-> sb :type :nullable?)))))))
 
-(declare hint-name)
+(defn- method-of
+  "The public instance method of `c` with JVM name and descriptor `k`, or nil."
+  ^Method [^Class c [n d]]
+  (first (filter #(and (= n (.getName ^Method %)) (= d (desc-of %))) (instance-methods c))))
+
+(defn- reflection-pairs
+  "[[super-key sub-key] ...] by the JVM signatures alone: an abstract method of a super-interface and a method of
+  a sub-interface with the same name and the same parameters (those of the super-interface with the type
+  arguments of the sub-interface put in), that differ in their descriptors (a covariant result, a more specific
+  parameter)."
+  [chain]
+  (for [^Class c2 chain
+        [^Class c1 env] (super-envs c2)
+        :when (contains? (set chain) c1)
+        ^Method m1 (instance-methods c1)
+        :when (Modifier/isAbstract (.getModifiers m1))
+        ^Method m2 (instance-methods c2)
+        :when (and (= (.getName m1) (.getName m2))
+                   (not= (desc-of m1) (desc-of m2))
+                   (= (count (.getParameterTypes m1)) (count (.getParameterTypes m2)))
+                   (every? true? (map (fn [^Type g ^Class p2]
+                                        (if (instance? TypeVariable g)
+                                          (= (r/box-class (erasure g env)) (r/box-class p2))
+                                          (= (erasure g env) p2)))
+                                      (.getGenericParameterTypes m1) (.getParameterTypes m2))))]
+    [[(.getName m1) (desc-of m1)] [(.getName m2) (desc-of m2)]]))
+
+(defn- kotlin-pairs
+  "[[super-key sub-key] ...] by the Kotlin declarations: the same member (same kind and name, parameters that
+  stand for the same types) declared by a super-interface and by a sub-interface under different JVM names or
+  descriptors. This finds what the JVM signatures hide: a value class makes the JVM name of the override
+  mangled (`id()Object` and `id-z32cIck()I`)."
+  [chain]
+  (let [in-chain (set chain)
+        members (into {} (for [^Class c chain :when (kotlin-interface? c)] [c (vec (kotlin-members c))]))]
+    (for [^Class c2 chain
+          [^Class c1 env] (super-envs c2)
+          :when (and (in-chain c1) (members c1) (members c2))
+          a (members c1)
+          :let [^Method ma (method-of c1 (jvm-key a))]
+          :when (and ma (Modifier/isAbstract (.getModifiers ma)))
+          b (members c2)
+          :when (and (= (:kind a) (:kind b)) (= (:key a) (:key b))
+                     (not= (jvm-key a) (jvm-key b))
+                     (= (count (:slots a)) (count (:slots b)))
+                     (every? true? (map #(slot-fits? %1 %2 %3 env) (:slots a) (:slots b) (.getGenericParameterTypes ma))))]
+      [(jvm-key a) (jvm-key b)])))
+
+(defn- bridged
+  "{[name desc] [name desc]}: an abstract method of a super-interface and the most specific method that overrides
+  it with other types (`Vis<T>.visit(Object)Object` and `StrVis.visit(String)String` for `StrVis : Vis<String>`;
+  `Src.get()Object` and `StrSrc.get()String`). Through any number of levels the target is the last override
+  (`L1.g()Object`, `L2.g()CharSequence`, `L3.g()String`: both of the first two map to the third). The JVM
+  class needs a bridge method for each key, as kotlinc and javac make."
+  [chain]
+  (let [pairs (distinct (remove (fn [[a b]] (= a b)) (concat (reflection-pairs chain) (kotlin-pairs chain))))
+        next-of (reduce (fn [m [a b]] (update m a (fnil conj []) b)) {} pairs)
+        leaves (fn leaves [k seen]
+                 (if-let [ns (seq (remove seen (get next-of k)))]
+                   (mapcat #(leaves % (conj seen k)) ns)
+                   (when (seq seen) [k])))]
+    (into {} (for [k (keys next-of)
+                   :let [leaf (first (leaves k #{}))]
+                   :when leaf]
+               [k leaf]))))
+
+(defn- hints-fit?
+  "Do the type hints of a written form fit the slots of member `m`? A hint that is exactly the class of the slot
+  (`^int` for `Int`, `^Integer` for `Int?`) is the exact fit. A boxed or primitive hint for the other one is a
+  loose fit (`^Integer` for `Int` is how `reify` is written). The members that fit exactly are preferred."
+  [m hints]
+  (let [fits (fn [same?]
+               (every? true? (map (fn [^Class h slot]
+                                    (or (nil? h) (let [sc (slot-class slot)] (and sc (same? h sc)))))
+                                  hints (:slots m))))]
+    {:exact (fits =) :loose (fits #(= (r/box-class %1) (r/box-class %2)))}))
+
+(declare hint-name hint-text)
 
 (defn- pick-member
   "The member that the written form `w` implements, or a kt error."
-  [members chain-names {:keys [name argc hints] :as w}]
+  [members chain chain-names {:keys [name argc hints] :as w}]
   (let [key (str name)
         by-key (filter #(= key (:key %)) members)
         in-section (filter #(contains? chain-names (:iface %)) by-key)
@@ -283,7 +382,7 @@
         by-arity (filter #(= argc (inc (count (:slots %)))) cands)]
     (cond
       (empty? by-key)
-      (fail (str "kt/reify: `" key "` is not a member of the interfaces. Members that you can write:\n" (members-text members)
+      (fail (str "kt/reify: `" key "` is not a member of the interfaces. Members that you can write:\n" (members-text members chain)
                  "\n  A Kotlin function is written with a `.` prefix (`.run`), a Kotlin property with its plain name, "
                  "a member of a Java interface with its Java method name."))
       (empty? by-arity)
@@ -291,18 +390,20 @@
                  (candidates-text cands)))
       (= 1 (count by-arity)) (first by-arity)
       :else
-      (let [fit (filter #(hints-fit? % hints) by-arity)]
+      (let [fits (map (fn [m] [m (hints-fit? m hints)]) by-arity)
+            exact (map first (filter (comp :exact second) fits))
+            fit (if (= 1 (count exact)) exact (map first (filter (comp :loose second) fits)))]
         (if (= 1 (count fit))
           (first fit)
           (let [shown (if (seq fit) fit by-arity)
-                diff (first (filter (fn [i] (> (count (distinct (map #(hint-name (nth (:slots %) i)) shown))) 1))
+                diff (first (filter (fn [i] (> (count (distinct (map #(hint-text (nth (:slots %) i)) shown))) 1))
                                     (range (dec argc))))]
             (fail (str "kt/reify: `" key "` with " argc (if (= 1 argc) " parameter" " parameters") " is ambiguous. Candidates:\n"
                        (candidates-text shown)
                        (if diff
                          (str "\n  Tell them apart with a type hint on a parameter, as in `reify`: parameter " (inc diff)
                               " (after `this`) is "
-                              (str/join " or " (map #(str "^" (or (hint-name (nth (:slots %) diff)) "java.lang.Object")) shown)))
+                              (str/join " or " (map #(str "^" (or (hint-text (nth (:slots %) diff)) "java.lang.Object")) shown)))
                          "\n  They differ by more than the types of their parameters, so no type hint can select one")
                        (when (and diff (empty? fit)) ". The hints that you wrote fit none of them")
                        "."))))))))
@@ -315,6 +416,13 @@
   (let [^Class c (slot-class slot)]
     (when (and c (not= Object c) (not (.isArray c)) (not= Void/TYPE c))
       (.getName (r/box-class c)))))
+
+(defn- hint-text
+  "Class name for a hint that tells overloads apart in an error message: the exact class of the slot (`int`, not `java.lang.Integer`)."
+  [slot]
+  (let [^Class c (slot-class slot)]
+    (when (and c (not= Object c) (not (.isArray c)) (not= Void/TYPE c))
+      (.getName c))))
 
 (defn- slot-in
   "[hint-class-name conv] for an argument that Kotlin passes in `slot`: `conv` makes the form of the value
@@ -448,6 +556,16 @@
                               (= want (vec (.getParameterTypes s))) (= (.getReturnType m) (.getReturnType s)))]
                s)))))
 
+(defn- bridge-convs
+  "{:arg-vcs [binary-name-or-nil ...] :ret-vc binary-name-or-nil}: where the more specific method `m` takes or returns
+  the underlying value of a value class, a bridge method that has the erased type unboxes the argument and boxes the
+  result."
+  [m]
+  (when m
+    {:arg-vcs (mapv #(some-> (r/vc-conv (:type %) (:jvm-type %)) :vc :class) (:slots m))
+     :ret-vc (when (and (#{:fn :get} (:kind m)) (not (:suspend? m)))
+               (some-> (r/vc-conv (:ret m) (ret-jvm-name m)) :vc :class))}))
+
 (defn- class-methods
   "The methods of the generated class, written ones first in the written order."
   [written jvm members]
@@ -468,7 +586,8 @@
      (for [[[n d :as k] {:keys [abstract? class method bridge-to]}] (sort-by key jvm)
            :when (and abstract? (not (by-key k)))]
        (cond
-         bridge-to {:impl :bridge :name n :desc d :target-desc (second bridge-to)}
+         bridge-to (merge {:impl :bridge :name n :desc d :target-name (first bridge-to) :target-desc (second bridge-to)}
+                          (bridge-convs (first (filter #(= bridge-to (jvm-key %)) members))))
          :else
          (if-let [s (default-impls class method)]
            {:impl :delegate :name n :desc d :impls (.getName (.getDeclaringClass s)) :impls-desc (desc-of s)}
@@ -487,7 +606,7 @@
                       (fn [i [sec form]]
                         (let [w (parse-member form)
                               names (set (map #(.getName ^Class %) (interface-chain [(:class sec)])))
-                              m (pick-member members names w)]
+                              m (pick-member members chain names w)]
                           (when (> (+ (:argc w) (if (:suspend? m) 1 0)) 20)
                             (fail (str "kt/reify: `" (:name w) "` has more than 20 parameters (with `this`): not supported")))
                           (assoc w :member m :idx i)))

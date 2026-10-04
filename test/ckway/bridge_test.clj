@@ -37,7 +37,7 @@
   (is (false? (bridge/needed? {:kind :static :class "fx.BasicsKt" :name "greet$default" :desc "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;"}))
       "$ is kept by the compiler")
   (is (thrown-with-msg? clojure.lang.ExceptionInfo #"kt: .*no\.such\.Class" (bridge/needed? {:kind :static :class "no.such.Class" :name "x" :desc "()V"}))
-      "a member that cannot be found is a kt error (review B13), not silently 'no bridge needed'"))
+      "a member that cannot be found is a kt error, not silently 'no bridge needed'"))
 
 (deftest bridge-class-works-and-is-idempotent
   (let [n1 (bridge/bridge-class box-uid)

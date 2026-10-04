@@ -1,5 +1,5 @@
 (ns ckway.review-b-test
-  "Review findings B1-B15: the bridge disk cache, the coroutine layer, `kt/reify`, keyword-safe Kotlin source.
+  "The bridge disk cache, the coroutine layer, `kt/reify`, keyword-safe Kotlin source.
   Fixtures: test-fixtures/fx/ReviewB.kt, test-fixtures/kw (package kw.`in`), test-fixtures/old11 (JVM target 11).
   Tests that need a fresh JVM start one with the class path of this one."
   (:require [clojure.edn :as edn]
@@ -280,7 +280,8 @@
     (is (some? (cache/lookup dir cn "base1" nil)) "a JVM without a compiler finds the entry by its base key")
     (is (nil? (cache/lookup dir cn "other-base" nil)) "...but only when everything else is the same")
     (cache/store! dir cn "base2" "2.4.20" classes)
-    (is (nil? (cache/lookup dir cn "base1" "2.4.20")) "the same compiler with changed inputs replaces the older entry")
+    (is (some? (cache/lookup dir cn "base1" "2.4.20")) "the same compiler with changed inputs does not evict the older entry: another project may need it (pruned by age and count)")
+    (is (some? (cache/lookup dir cn "base2" "2.4.20")))
     (is (= (cache/compiler-version) "2.4.20"))))
 
 (deftest b3-part-classes-of-a-multi-file-facade-are-stamped

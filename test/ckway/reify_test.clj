@@ -1,5 +1,6 @@
 (ns ckway.reify-test
-  "Step 7: `kt/reify` (DESIGN-2 rule 10), rules R1 to R10 of the brief. Each rule is tested from the Kotlin side
+  "`kt/reify` (README, rule 10): interfaces, names, parameters, overloads, return values, suspend members,
+  members that are not written, mangled names, annotations, the object. Each is tested from the Kotlin side
   (a Kotlin function in `fx` calls the Clojure object) and from the Clojure side (`kt` calls on the object)."
   (:require [clojure.java.shell]
             [clojure.string :as str]
@@ -503,7 +504,7 @@
       (is (= "a!" (f/useVisitor v "a")))
       (is (= 1 @done))
       (is (= "b!" (f/.visit v "b")))))
-  (testing "DESIGN PROBLEM: T is never substituted, so a Long is not turned into an Int. For a Visitor<Int> the JVM method is visit(Object): Object"
+  (testing "limit: T is never substituted, so a Long is not turned into an Int. For a Visitor<Int> the JVM method is visit(Object): Object"
     (let [v (kt/reify f/Visitor (.visit [this x] (inc x)) (.done [this] nil))]
       (is (= 3 (f/visitInt v)) "Kotlin unboxes through Number: works")
       (is (false? (f/visitIsTwo v)) "but Kotlin's `r == 2` is Integer.equals(Long): false. The body returned a Long"))
@@ -523,7 +524,7 @@
       (is (true? (f/run o)))
       (.run ^Runnable o)
       (is (= [:ran] @log))))
-  (testing "DESIGN PROBLEM: written under a sub-interface of both, the name is ambiguous and a hint cannot tell them apart"
+  (testing "limit: written under a sub-interface of both, the name is ambiguous and a hint cannot tell them apart"
     (let [e (compile-error '(kt/reify f/RunsToo (run [this] true)))]
       (is (str/includes? e "`run` with 1 parameter is ambiguous") e)
       (is (str/includes? e "val fx.Runs.run: Boolean") e)

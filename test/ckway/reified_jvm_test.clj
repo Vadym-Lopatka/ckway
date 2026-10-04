@@ -1,5 +1,5 @@
 (ns ckway.reified-jvm-test
-  "Step 5, T3: the compiler dependency and the storage of Kotlin bridges, each in its own JVM:
+  "The compiler dependency and the storage of Kotlin bridges, each in its own JVM:
   no compiler on the class path, the disk cache, a changed target, AOT."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -50,12 +50,11 @@
                 (println \"MSG\" (pr-str (try (eval '(f/typeName :<> String)) (catch Throwable t (ex-message (loop [t t] (if-let [c (.getCause t)] (recur c) t)))))))")
         msg (edn/read-string (second (re-find #"MSG (\".*\")" (:out r))))]
     (is (zero? (:exit r)) (:err r))
-    (testing "the error says exactly which dependency and which alias to add"
+    (testing "the error says exactly which dependency to add to the deps.edn of the consumer"
       (is (str/includes? msg "is an `inline reified` call"))
       (is (str/includes? msg "(f/typeName :<> String)"))
-      (is (str/includes? msg "org.jetbrains.kotlin/kotlin-compiler-embeddable 2.4.20"))
-      (is (str/includes? msg "`:kotlinc` alias"))
-      (is (str/includes? msg ":kotlinc {:extra-deps {org.jetbrains.kotlin/kotlin-compiler-embeddable {:mvn/version \"2.4.20\""))
+      (is (str/includes? msg "org.jetbrains.kotlin/kotlin-compiler-embeddable {:mvn/version \"2.4.20\" :exclusions [org.jetbrains.kotlin/kotlin-reflect]}"))
+      (is (not (str/includes? msg "-M:kotlinc")) "a consumer has no :kotlinc alias")
       (is (str/includes? msg "no stored bridge for this call exists")))
     (testing "a call that needs no bridge works without the compiler"
       (let [r (jvm (join-cp (without-compiler (cp-entries))) {"ckway.cache.dir" (.getPath cache)}

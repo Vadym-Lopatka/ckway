@@ -192,21 +192,33 @@
       :else (.visitTypeInsn mv Opcodes/CHECKCAST (.getInternalName to)))))
 
 (defn- bridge-method!
-  "`name desc` casts its arguments and calls `name target-desc` of this class (the more specific override)."
-  [^ClassWriter cw ^String self {:keys [name desc target-desc]}]
+  "`name desc` casts its arguments and calls `target-name target-desc` of this class (the more specific override).
+  `arg-vcs` (one entry for each argument: a binary class name or nil) and `ret-vc`: where the override takes or
+  returns the underlying value of a value class, the argument is unboxed (`unbox-impl`) and the result boxed
+  (`box-impl`)."
+  [^ClassWriter cw ^String self {:keys [name desc target-name target-desc arg-vcs ret-vc]}]
   (let [mv (.visitMethod cw (+ Opcodes/ACC_PUBLIC Opcodes/ACC_BRIDGE Opcodes/ACC_SYNTHETIC) ^String name ^String desc nil nil)
         from (Type/getArgumentTypes ^String desc)
-        to (Type/getArgumentTypes ^String target-desc)]
+        to (Type/getArgumentTypes ^String target-desc)
+        target-name (or target-name name)]
     (.visitCode mv)
     (.visitVarInsn mv Opcodes/ALOAD 0)
-    (reduce (fn [slot [^Type f ^Type t]]
+    (reduce (fn [slot [i ^Type f ^Type t]]
               (.visitVarInsn mv (.getOpcode f Opcodes/ILOAD) (int slot))
-              (convert! mv f t)
+              (if-let [vc (get arg-vcs i)]
+                (do (.visitTypeInsn mv Opcodes/CHECKCAST (internal vc))
+                    (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL (internal vc) "unbox-impl" (str "()" (.getDescriptor t)) false))
+                (convert! mv f t))
               (+ slot (.getSize f)))
-            1 (map vector from to))
-    (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL self ^String name ^String target-desc false)
+            1 (map vector (range) from to))
+    (.visitMethodInsn mv Opcodes/INVOKEVIRTUAL self ^String target-name ^String target-desc false)
     (let [rf (Type/getReturnType ^String target-desc) rt (Type/getReturnType ^String desc)]
-      (when-not (= "V" (.getDescriptor rt)) (convert! mv rf rt))
+      (cond
+        (= "V" (.getDescriptor rt)) nil
+        ret-vc (do (.visitMethodInsn mv Opcodes/INVOKESTATIC (internal ret-vc) "box-impl"
+                                     (str "(" (.getDescriptor rf) ")L" (internal ret-vc) ";") false)
+                   (convert! mv (Type/getObjectType (internal ret-vc)) rt))
+        :else (convert! mv rf rt))
       (.visitInsn mv (.getOpcode rt Opcodes/IRETURN)))
     (.visitMaxs mv 0 0)
     (.visitEnd mv)))
@@ -230,8 +242,9 @@
     :impl :fn        also :idx (index into the array of Clojure functions) and :annotations
     :impl :delegate  also :impls (binary name of `I$DefaultImpls`) and :impls-desc
     :impl :abstract  also :message
-    :impl :bridge    also :target-desc: the method `name` with `target-desc` of this class (an override with
-                     more specific types, as kotlinc and javac make a bridge method)
+    :impl :bridge    also :target-name (default: `name`), :target-desc, and for value classes :arg-vcs and
+                     :ret-vc: the method `target-name target-desc` of this class (an override with more specific
+                     types, as kotlinc and javac make a bridge method)
   The class implements the interfaces and clojure.lang.IObj (like a Clojure `reify`). Its constructor
   takes the Object[] of functions (called with `this` and the boxed JVM arguments, each returns the
   boxed JVM result) and the metadata map. Names with `-` (mangled Kotlin names) are no problem here."
