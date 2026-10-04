@@ -1,0 +1,36 @@
+#!/bin/sh
+# Kotlin's own answers for the calls of test-fixtures/oracle/*.kt (one call per line: `c("id") { call }`), for the
+# selection comparison of ckway.round6-test. A call that kotlinc refuses with "overload resolution ambiguity" has the
+# answer AMBIGUOUS, one that it refuses because no candidate takes the arguments ("none of the following candidates is
+# applicable", "argument type mismatch") has the answer NONE; any other compiler error fails the build. The rest is compiled and run.
+# Usage: bin/kotlin-oracle <class path with the fixtures> <output file>
+cd "$(dirname "$0")/.." || exit 1
+CP="$1"; OUT="$2"
+W=target/oracle
+rm -rf "$W" && mkdir -p "$W/src" "$W/classes"
+: > "$OUT.tmp"
+for f in test-fixtures/oracle/*.kt; do
+  b=$(basename "$f" .kt)
+  if kotlinc -module-name oracle -nowarn -cp "$CP" "$f" -d "$W/classes" 2> "$W/$b.err"; then
+    cp "$f" "$W/src/$b.kt"
+  else
+    # every error must be an ambiguity, or no applicable candidate, on a call line
+    known='error: (overload resolution ambiguity|none of the following candidates is applicable|argument type mismatch)'
+    if grep -E '\.kt:[0-9]+:[0-9]+: error: ' "$W/$b.err" | grep -Ev "$known" | grep -q .; then
+      cat "$W/$b.err" >&2; echo "bin/kotlin-oracle: $f has an error that is no overload resolution ambiguity" >&2; exit 1
+    fi
+    amb=$(grep -E '\.kt:[0-9]+:[0-9]+: error: overload resolution ambiguity' "$W/$b.err" | sed -E 's/^.*\.kt:([0-9]+):.*$/\1/' | sort -un | tr '\n' ' ')
+    none=$(grep -E '\.kt:[0-9]+:[0-9]+: error: (none of the following|argument type mismatch)' "$W/$b.err" | sed -E 's/^.*\.kt:([0-9]+):.*$/\1/' | sort -un | tr '\n' ' ')
+    [ -n "$amb$none" ] || { cat "$W/$b.err" >&2; exit 1; }
+    awk -v amb="$amb" -v none="$none" -v out="$OUT.tmp" '
+      BEGIN { n = split(amb, a, " "); for (i = 1; i <= n; i++) ans[a[i]] = "AMBIGUOUS"
+              n = split(none, a, " "); for (i = 1; i <= n; i++) ans[a[i]] = "NONE" }
+      (NR in ans) { if (match($0, /c\("[^"]+"\)/)) { id = substr($0, RSTART + 3, RLENGTH - 5); print id "\t" ans[NR] >> out; print ""; next }
+                    print "bin/kotlin-oracle: a compiler error on a line that is no call: " $0 > "/dev/stderr"; exit 1 }
+      { print }' "$f" > "$W/src/$b.kt" || exit 1
+    kotlinc -module-name oracle -nowarn -cp "$CP" "$W/src/$b.kt" -d "$W/classes" || exit 1
+  fi
+  pkg=$(sed -n 's/^package \(.*\)$/\1/p' "$f" | head -1)
+  kotlin -cp "$CP:$W/classes" "$pkg.${b}Kt" >> "$OUT.tmp" || exit 1
+done
+mv "$OUT.tmp" "$OUT"

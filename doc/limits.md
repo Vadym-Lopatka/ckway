@@ -470,7 +470,8 @@ Type arguments count in the choice only where they can be seen. When two candida
 arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;
 `MutableList<E>` is invariant): `fun <T> gl(xs: List<T>)` and `fun gl(xs: Collection<Int>)` are unrelated (neither type is a
 subtype of the other), so the non-generic one wins, as in Kotlin. A pair that this cannot decide is treated as
-unrelated: then the rule "no vararg, not generic, no default" or the ambiguity error decides, never a guess. A
+unrelated: then a function without type parameters is taken before a generic one (Kotlin does the same), or the
+ambiguity error decides, never a guess. A
 pair that takes the same Kotlin class and differs only in the type argument (`Map<String, Any>` and `Map<K, V>`) is
 always an error: the value is a Clojure map, and the JVM erased what it holds.
 
@@ -478,6 +479,32 @@ A candidate wins only if it is at least as good as every other one on EVERY para
 number parameter (an `Int` literal prefers `Int`) never hides a disadvantage on another parameter: with `mx(a: CharSequence,
 b: Int)` and `mx(a: String, b: Long)`, `(p/mx "s" 1)` is ambiguous (kotlinc says so for `mx("s", 1)`). A var used as a value
 has no literal: `(let [f p/mx] (f "s" 1))` passes a `Long`, which only the `Long` overload takes, as `mx("s", 1L)` in Kotlin.
+
+The whole choice is Kotlin's (`ckway.resolve/most-specific`; `test/ckway/round6_test.clj` compares 109 calls with what
+`kotlinc` itself chooses):
+
+* Two candidates are compared by the argument that each parameter receives, wherever a named argument puts it. With
+  `oo(a: Int, b: Long)` and `oo(b: Int, a: Short)`, `(p/oo :a 1 :b 2)` is ambiguous, as in Kotlin.
+* For an integer literal Kotlin's order of the integer types is `Int` before `Long`, `Short` and `Byte`, and `Short` before
+  `Byte`. `Long` against `Short` or `Byte` is ambiguous: `(p/n 1)` with `n(a: Short)` and `n(a: Long)` is an error, as
+  `n(1)` is in Kotlin. A conversion of a number that `kt` makes itself has `kt`'s own order (a `BigInt` is a `Long` before
+  it is an `Int`); Kotlin has no such call.
+* `Any` and `String?` are unrelated (neither is a subtype of the other): `(p/r "x")` with `r(a: Any)` and `r(a: String?)`
+  is ambiguous, as in Kotlin.
+* The shape decides only between candidates whose parameter types are equally specific: the one without a `vararg`,
+  then the one that uses FEWER defaults (`d(a: Int, b: Int = 0)` before `d(a: Int, b: Int = 0, c: Int = 0)` for `(p/d 1)`).
+  With `s5(a: Long, b: String = "d")` and `s5(a: Int, b: CharSequence = "d", c: Int = 0)`, `(p/s5 1 "x")` is ambiguous (each
+  is better on one parameter), though only the second leaves a default out.
+* A Clojure function at a `fun interface` parameter is compared as the function type of its method (Kotlin: SAM
+  conversion), by the number of parameters. Between a function type and a `fun interface` that are equally specific,
+  the function type is taken: `(c/.sort xs (fn [a b] ...))` is `sort(comparison: (T, T) -> Int)`, not `sort(comparator)`.
+
+A member that a class has through two unrelated supertypes (`interface Q1 { fun run2(): String }`, `interface Q2 { fun
+run2(): String }`, `class QC : Q1, Q2`) is one member: `(p/.run2 (p/QC))` is one virtual call. Members are the same when
+they are both functions (or both properties) of one Kotlin name with the same JVM name and JVM parameter types; `pm(x:
+Int)` and `pm(x: Long)` stay two overloads. Not covered: two supertypes that declare the member with parameter types that
+differ only before erasure (`interface G<T> { fun f(x: T) }`, `interface H { fun f(x: String) }`, `class C : G<String>, H`):
+their JVM parameter types differ, so `(p/.f (p/C) "x")` is chosen by specificity (`H.f`), which is the same method here.
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
 seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the

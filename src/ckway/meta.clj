@@ -23,8 +23,10 @@
   also from another package or jar; includes interface members with a default body and
   members of an interface that the class delegates to). Such a member is the declaration of
   the supertype itself (:owner and the call target are the supertype, the call is virtual),
-  so the same inherited declaration is the same map in every package that reaches it. A
-  member that a class overrides is not listed again for that class. A member that comes from
+  so the same inherited declaration is the same map in every package that reaches it (`declared-members` reads each
+  member once; a var holds one declaration for one JVM member: `add-decl`). A
+  member that a class overrides is not listed again for that class. An override has the default values of the member it
+  overrides. A member that comes from
   a supertype without Kotlin metadata (a Java class or interface, `kotlin.Any`, a mapped
   Kotlin type such as `kotlin.collections.List`) is NOT a var: plain Java interop
   `(.getX obj)` covers it, and the walk ends on that branch. Type arguments of a generic
@@ -68,6 +70,8 @@
                                    ; Kotlin metadata does not). The dispatch receiver of such a
                                    ; member is still a receiver for Clojure; the call ignores it.
                   :default {:class .. :name \"greet$default\" :desc .. :static? true}}
+                                   ; :class is the class that really has the synthetic: for a member of an
+                                   ; interface the interface or `Iface$DefaultImpls` (`default-owner`)
                  or {:class .. :field \"NAME\" :static? true} for a field read,
                  or {:class .. :instance-field \"INSTANCE\"} for an object,
                  or nil when the declaration has no usable JVM member.
@@ -648,6 +652,18 @@
       ctor? {:class class :name "<init>" :desc new-desc :static? false :marker "kotlin.jvm.internal.DefaultConstructorMarker"}
       :else {:class class :name (str name "$default") :desc new-desc :static? true})))
 
+(defn- default-owner
+  "The `$default` synthetic `m` of an instance member, with `:class` the class that really has it. The Kotlin metadata
+  does not say where the compiler put it, the class files do: for a member of an INTERFACE it is the interface itself
+  (JVM default methods: Kotlin 2.2 and later, `-jvm-default=enable|no-compatibility`) or, when the interface has none,
+  `Iface$DefaultImpls` (`-jvm-default=disable`: every Kotlin before 2.2). The descriptor is the same in both: the
+  first parameter is the interface. A synthetic that neither class has is returned as it is."
+  [{:keys [class name desc] :as m}]
+  (let [impls (str class "$DefaultImpls")]
+    (if (and (nil? (member-flags class name desc)) (member-flags impls name desc))
+      (assoc m :class impls)
+      m)))
+
 (defn- value-param [tps jvm-type ^KmValueParameter p]
   (let [vt (.getVarargElementType p)]
     {:name (.getName p) :type (km-type tps (.getType p)) :default? (Attributes/getDeclaresDefaultValue p)
@@ -736,7 +752,9 @@
         tp (type-params-of tps (.getTypeParameters f))
         flags (cond-> (fn-flags f (:name jvm)) (not dispatch) (conj :static))
         jvm (when jvm (cond-> jvm (some :default? params)
-                              (assoc :default (with-access (when jvm-owner owner) (default-jvm jvm nvalue false instance-desc)))))
+                              (assoc :default (with-access (when jvm-owner owner)
+                                                (cond-> (default-jvm jvm nvalue false instance-desc)
+                                                  (and dispatch (not static?)) default-owner)))))
         name (.getName f)]
     (cond->
      {:kind :function :name name :var-name (if (seq rcvs) (str "." name) name)
@@ -947,16 +965,55 @@
      :dispatch {:role :dispatch :type (cond-> self vc (assoc :value-class? true :value-class vc))}
      :instance-desc (str "L" (str/replace binary "." "/") ";")}))
 
+(defn- member-key
+  "Two members with the same key are the same Kotlin member (an override has the key of its original)."
+  [d]
+  (let [tt #(type-text (:type %))]
+    (case (:kind d)
+      :function [:function (:name d) (mapv tt (:params d)) (mapv tt (remove #(= :dispatch (:role %)) (:receivers d)))]
+      [(:kind d) (:name d)])))
+
+(defn- with-inherited-defaults
+  "The override `d` with the default values of the declaration it overrides. Kotlin metadata marks a default value only on
+  the ORIGINAL declaration (an override may not repeat it), and a call that omits the parameter runs the `$default`
+  synthetic of the original, which calls the member virtually (`javap` of Kotlin's own `Far().mk()`: `invokestatic
+  Src.mk$default`). So the override takes the `:default?` flags and the `$default` JVM member of the original that has
+  them (an override chain has exactly one such declaration: Kotlin forbids new defaults on an override), and the
+  signature shows the `= ...`. `originals`: all declarations with the key of `d` in the supertypes (each of them already
+  has the defaults that IT inherits: `declared-members`)."
+  [d originals]
+  (let [src (first (filter #(and (= :function (:kind %)) (:default (:jvm %)) (some :default? (:params %))) originals))]
+    (if (and src (:jvm d) (= :function (:kind d)) (= (count (:params d)) (count (:params src))))
+      (let [params (mapv (fn [p o] (assoc p :default? (boolean (:default? o)))) (:params d) (:params src))
+            ret (:return d)
+            flags (:flags d)]
+        (assoc d :params params
+               :jvm (assoc (:jvm d) :default (:default (:jvm src)))
+               :signature (str (str/join (for [[k m] [[:suspend "suspend "] [:inline "inline "] [:infix "infix "] [:operator "operator "]]
+                                               :when (k flags)] m))
+                               (sig-text :function (:name d) (:receivers d) params ret (:type-params d)))))
+      d)))
+
 (def ^:private declared-members-cache
   "Documented cache: Kotlin internal class name -> the members that class declares."
   (atom {}))
 (register-reset! ::declared-members-cache #(reset! declared-members-cache {}))
 
-(declare finish-decls)
+(declare finish-decls inherited-decls)
 
-(defn- declared-members [{:keys [binary internal km]}]
-  (or (get @declared-members-cache internal)
-      (let [ds (vec (finish-decls binary (container-decls (member-ctx binary internal km) km)))]
+(defn- declared-members
+  "The members that the Kotlin class declares itself, overrides included: THE declaration of each of them. Everything
+  that shows such a member - the var of the class's own package, the var of a subclass in any package (`inherited-decls`),
+  `own-declarations`, `primary-properties` - takes the map from here, so they all see one and the same declaration.
+  An override has the default values that it inherits (`with-inherited-defaults`): a fact about the member, not about
+  the path that reached it. Cached; `refresh?` reads the class again (the index of its own package is being built)."
+  [{:keys [binary internal km]} & [refresh?]]
+  (or (when-not refresh? (get @declared-members-cache internal))
+      (let [originals (group-by member-key (inherited-decls km))
+            ds (->> (container-decls (member-ctx binary internal km) km)
+                    (map #(with-inherited-defaults % (originals (member-key %))))
+                    (finish-decls binary)
+                    vec)]
         (swap! declared-members-cache assoc internal ds)
         ds)))
 
@@ -983,7 +1040,8 @@
 (defn- inherited-decls
   "Public members that the Kotlin supertypes of `k` declare, transitively (superclass and
   interfaces; they can be in another package or jar). The declarations are the ones of the
-  supertype itself: owner and call target are the supertype, so the call is virtual. A supertype
+  supertype itself (`declared-members`): owner and call target are the supertype, so the call is virtual. A supertype
+  that is reached on several paths (a diamond) is read once. A supertype
   without Kotlin metadata (Java class, kotlin.Any, mapped types) ends the walk on its branch."
   [^KmClass k]
   (loop [queue (supertype-names k) seen #{} out []]
@@ -995,34 +1053,6 @@
                  (into out (declared-members sc))
                  out)))
       out)))
-
-(defn- member-key
-  "Two members with the same key are the same Kotlin member (an override has the key of its original)."
-  [d]
-  (let [tt #(type-text (:type %))]
-    (case (:kind d)
-      :function [:function (:name d) (mapv tt (:params d)) (mapv tt (remove #(= :dispatch (:role %)) (:receivers d)))]
-      [(:kind d) (:name d)])))
-
-(defn- with-inherited-defaults
-  "The override `d` with the default values of the declaration it overrides. Kotlin metadata marks a default value only on
-  the ORIGINAL declaration (an override may not repeat it), and a call that omits the parameter runs the `$default`
-  synthetic of the original, which calls the member virtually (`javap` of Kotlin's own `Far().mk()`: `invokestatic
-  Src.mk$default`). So the override takes the `:default?` flags and the `$default` JVM member of the original that has
-  them (an override chain has exactly one such declaration: Kotlin forbids new defaults on an override), and the
-  signature shows the `= ...`. `originals`: all declarations with the key of `d` in the supertypes."
-  [d originals]
-  (let [src (first (filter #(and (= :function (:kind %)) (:default (:jvm %)) (some :default? (:params %))) originals))]
-    (if (and src (:jvm d) (= (count (:params d)) (count (:params src))))
-      (let [params (mapv (fn [p o] (assoc p :default? (boolean (:default? o)))) (:params d) (:params src))
-            ret (:return d)
-            flags (:flags d)]
-        (assoc d :params params
-               :jvm (assoc (:jvm d) :default (:default (:jvm src)))
-               :signature (str (str/join (for [[k m] [[:suspend "suspend "] [:inline "inline "] [:infix "infix "] [:operator "operator "]]
-                                               :when (k flags)] m))
-                               (sig-text :function (:name d) (:receivers d) params ret (:type-params d)))))
-      d)))
 
 (defn- class-decls
   "All declarations contributed by one Kotlin class (its own var, members, companion members)."
@@ -1053,7 +1083,8 @@
             inherited (inherited-decls k)
             by-key (group-by member-key inherited)
             ret-text #(some-> (:return %) type-text)
-            own-all (container-decls (member-ctx binary internal k) k)
+            ;; the class's own members are the declarations that every other reader gets (`declared-members`)
+            own-all (declared-members {:binary binary :internal internal :km k} true)
             ;; an override is one member with the original (same key), and the original stands for it - unless it has
             ;; another result type: `override fun get(): String` over `fun get(): Any` is the member that a caller
             ;; must see (the result is a String), so it replaces the original
@@ -1062,9 +1093,7 @@
             narrowing? (fn [d] (when-let [is (by-key (member-key d))]
                                  (every? #(and (not= (ret-text d) (ret-text %)) (nil? (:type-param (:return %)))) is)))
             narrowed-keys (set (map member-key (filter narrowing? own-all)))
-            own (->> own-all
-                     (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))))
-                     (map #(if (narrowing? %) (with-inherited-defaults % (by-key (member-key %))) %)))
+            own (remove #(and (contains? by-key (member-key %)) (not (narrowing? %))) own-all)
             inherited (remove #(contains? narrowed-keys (member-key %)) inherited)]
         (concat (class-var-decls ctx k) own inherited)))))
 
@@ -1243,18 +1272,29 @@
        (= (:flags a) (:flags b))
        (not= (:class (:jvm a)) (:owner a))))
 
+(defn- jvm-member-id
+  "The identity of the JVM member that `d` stands for: [declaring class, JVM name (or field), descriptor]; for a
+  declaration without a JVM member (the placeholder of a class without a constructor, an alias) the declaration itself."
+  [d]
+  (let [m (if (= :property (:kind d)) (or (:getter d) (:jvm d)) (:jvm d))]
+    (if (:class m)
+      [(:class m) (or (:name m) (:field m) (:instance-field m)) (:desc m)]
+      d)))
+
 (defn- add-decl
-  "`ds` with the declaration `d` added, unless it is already there or is the same Kotlin function as one that
-  is (see `same-function?`); then the one whose JVM name is the Kotlin name is kept."
+  "`ds` with the declaration `d` added, unless its JVM member is already there (one Kotlin member is one declaration of
+  a var, however it was reached: declared by a class of the package, inherited by a subclass, through several
+  supertypes), or it is the same Kotlin function as one that is (see `same-function?`); then the one whose JVM name is
+  the Kotlin name is kept."
   [ds d]
-  (cond
-    (some #(= d %) ds) ds
-    :else
-    (if-let [i (first (keep-indexed #(when (same-function? d %2) %1) ds))]
-      (if (and (not= (:name (:jvm (nth ds i))) (:name d)) (= (:name d) (:name (:jvm d))))
-        (assoc ds i d)
-        ds)
-      (conj ds d))))
+  (let [id (jvm-member-id d)]
+    (if (some #(= id (jvm-member-id %)) ds)
+      ds
+      (if-let [i (first (keep-indexed #(when (same-function? d %2) %1) ds))]
+        (if (and (not= (:name (:jvm (nth ds i))) (:name d)) (= (:name d) (:name (:jvm d))))
+          (assoc ds i d)
+          ds)
+        (conj ds d)))))
 
 (defn- build-index [pkg]
   (->> (class-names-in pkg)

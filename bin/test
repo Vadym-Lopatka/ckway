@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.." || exit 1
 rm -rf target/cache && mkdir -p target && mkdir -m 700 target/cache
 XDG_CACHE_HOME="$(pwd)/target/cache"; export XDG_CACHE_HOME
 bin/build-fixtures || exit 1
-clojure -M:test:coro:kotlinc -r 'ckway\.(meta|call|fn|aot|value|bridge|co|suspend|types|reified|reified-jvm|hardening|static|set|ref|data|cache|reify|fixes|web|review-b|stdlib|select|robust|round3b|round3|round4|round5)-test' || exit 1
+clojure -M:test:coro:kotlinc -r 'ckway\.(meta|call|fn|aot|value|bridge|co|suspend|types|reified|reified-jvm|hardening|static|set|ref|data|cache|reify|fixes|web|review-b|stdlib|select|robust|round3b|round3|round4|round5|round6)-test' || exit 1
 # stdlib only: no kotlinx.coroutines on the class path
 clojure -M:test -n ckway.nocoro-test || exit 1
 # the newest kotlinx-coroutines (1.11.0: `runBlocking` is declared twice in the facade): the coroutine tests again

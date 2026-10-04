@@ -8,6 +8,13 @@ rm -rf target/fixtures && mkdir -p target/fixtures
 kotlinc -module-name fx -Xcontext-parameters -nowarn -cp "$CORO" test-fixtures/fx/*.kt test-fixtures/fx/other/*.kt test-fixtures/fx/init/*.kt test-fixtures/fx/far/*.kt -d target/fixtures || exit 1
 # an interface compiled the old way (no JVM default methods, bodies in $DefaultImpls)
 kotlinc -module-name legacy -jvm-default=disable -nowarn test-fixtures/legacy/*.kt -d target/fixtures || exit 1
+# the same interface defaults in the two other `-jvm-default` modes of this compiler (ckway.round6-test, Z2): the source
+# of the legacy pass with another package name, and one interface with the annotation that only that mode accepts
+rm -rf target/gen-src && mkdir -p target/gen-src/jd6en target/gen-src/jd6nc
+sed 's/^package fx\.legacy6$/package fx.jd6en/' test-fixtures/legacy/Round6Legacy.kt > target/gen-src/jd6en/Round6Modes.kt || exit 1
+sed 's/^package fx\.legacy6$/package fx.jd6nc/' test-fixtures/legacy/Round6Legacy.kt > target/gen-src/jd6nc/Round6Modes.kt || exit 1
+kotlinc -module-name jd6en -jvm-default=enable -nowarn target/gen-src/jd6en/Round6Modes.kt test-fixtures/jvmdefault/Enable.kt -d target/fixtures || exit 1
+kotlinc -module-name jd6nc -jvm-default=no-compatibility -nowarn target/gen-src/jd6nc/Round6Modes.kt test-fixtures/jvmdefault/NoCompat.kt -d target/fixtures || exit 1
 # stdlib only (no kotlinx.coroutines): suspend calls and adapters must work without it
 kotlinc -module-name stdlib -nowarn test-fixtures/stdlib/*.kt -d target/fixtures || exit 1
 # the web library of the examples (examples/kotlin/web), the Kotlin side of ckway.web-test
@@ -29,3 +36,5 @@ rm -rf target/late-classes && mkdir -p target/late-classes
 kotlinc -module-name late -nowarn test-fixtures/late/*.kt -d target/late-classes
 # Java interfaces next to the Kotlin ones (kt/reify: one written form for a Java and a Kotlin leaf of one member)
 javac -cp "target/fixtures:$CORO" -d target/fixtures test-fixtures/java/pj/*.java || exit 1
+# Kotlin's own answers for the selection comparison of ckway.round6-test (Z4): target/fixtures/round6-oracle.txt
+bin/kotlin-oracle "target/fixtures" target/fixtures/round6-oracle.txt || exit 1
