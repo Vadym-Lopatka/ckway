@@ -1,5 +1,5 @@
 (ns ckway.types-test
-  "Step 5, T1: type forms (DESIGN-2 rule 5) as Kotlin source text and JVM classes."
+  "Type forms (README rule 5) as Kotlin source text and JVM classes."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.core :as kt]
@@ -82,11 +82,11 @@
   (testing "the names come from the stdlib; a built-in that is neither mapped nor a class would be a hole"
     (is (> (count @ty/default-names) 120))
     (doseq [[n {:keys [jvm alias]}] @ty/default-names
-            ;; step 8 (H2b): a type alias (ArrayList, Exception...) has no class of its own; its target must exist
+            ;; a type alias (ArrayList, Exception...) has no class of its own; its target must exist
             :let [jvm (or jvm (some-> (ty/jvm-class (:type alias)) .getName))]]
       (is (class? (try (Class/forName ^String jvm false (clojure.lang.RT/baseLoader)) (catch Throwable _ nil)))
           (str n " -> " jvm))))
-  (testing "the names that the brief lists"
+  (testing "the default Kotlin names"
     (doseq [n '[Any Unit Nothing Int Long Short Byte Double Float Boolean Char String Number List MutableList Map
                 MutableMap Set MutableSet Collection Iterable Sequence Pair Triple Array IntArray LongArray
                 ShortArray ByteArray DoubleArray FloatArray BooleanArray CharArray]]

@@ -11,6 +11,8 @@
   :coro-next {:override-deps {org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.11.0"}}}
   :test {:extra-paths ["test" "target/fixtures"]
          :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         ;; a test run never writes into the per-user bridge cache, also when it does not go through bin/test
+         :jvm-opts ["-Dckway.cache.dir=target/cache"]
          :main-opts ["-m" "cognitect.test-runner"]}
   ;; kt compiles a Kotlin bridge for an `inline reified` call (`:<>`), in this JVM, with the Kotlin
   ;; compiler. Not a dependency of the library: add this alias (version = kotlin-metadata-jvm above)
@@ -23,4 +25,6 @@
                          {:mvn/version "2.4.20" :exclusions [org.jetbrains.kotlin/kotlin-reflect]}}}
   ;; the examples: the compiled Kotlin libraries `shop` and `web` (examples/build) and kotlinx.coroutines
   :examples {:extra-paths ["." "examples/target/classes"]
-             :extra-deps {org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.10.2"}}}}}
+             :extra-deps {org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.10.2"}}
+             ;; the examples keep their bridges under target/, not in the per-user cache
+             :jvm-opts ["-Dckway.cache.dir=target/examples-cache"]}}}

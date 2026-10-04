@@ -4,6 +4,14 @@ All notable changes to this project are in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is alpha: the API may change before 1.0.
 
+## [Unreleased]
+
+* One number rule: `kt` changes a number only when the declared Kotlin parameter type says so (`Int`, `Short`, `Byte`, `Long`, `Float`, `Double`). At `Any`, `Number` or a type parameter a Clojure integer stays a `Long`, a literal or not (before, a literal that fits `Int` became an `Int` there, which made lookups in lists and maps built in Clojure miss).
+* The code that `kt` emits uses only qualified names, so a local of your code named `int`, `long`, `name`, `count`... cannot capture one.
+* Overload choice: a conversion of a number that `kt` makes itself (an integer for a `Double`) is used only when no overload takes the value as it is; type arguments count in the choice of the most specific overload (`List<T>` is not a subtype of `Collection<Int>`); a type hint that you write (`^CharSequence s`) is the static type of the argument; a collection passed as a whole to a `vararg` chooses between overloads when its elements can be seen, and the error says so when they cannot.
+* A member that the JVM hides, in a class that is not public (`@InlineOnly` functions of the standard library), is called through a bridge with `invokeExact`: about 8 times faster than before.
+* An integer literal that is out of range for its `Int`, `Short` or `Byte` parameter is a compile-time error with the same words as the run-time check.
+
 ## [0.1.0] - 2026-10-04
 
 First release. Clojure calls Kotlin with `ckway.core` (alias `kt`). The 11 rules:

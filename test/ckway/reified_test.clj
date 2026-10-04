@@ -1,5 +1,5 @@
 (ns ckway.reified-test
-  "Step 5, T2, T4, T5: type arguments with `:<>` (DESIGN-2 rule 5). A reified call is made by a Kotlin
+  "Type arguments with `:<>` (README rule 5). A reified call is made by a Kotlin
   bridge that the Kotlin compiler builds (needs the :kotlinc alias; bin/test runs with it)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -54,7 +54,7 @@
     (is (= "v:Any?:null" (f/describe nil :<> Any?)))
     (is (= "v:Any?:7" (f/describe 7 :<> Any?)))
     (is (= "v:List<Map<String, Any?>>:[]" (f/describe [] :<> (List (Map String Object?))))
-        "DESIGN-2 line 24 writes Object?: Kotlin sees java.lang.Object as Any"))
+        "Object? is written for java.lang.Object: Kotlin sees java.lang.Object as Any"))
   (testing "nullable and nested generic forms"
     (is (= "v:String?:null" (f/describe nil :<> String?)))
     (is (= "v:Box2?:null" (f/describe nil :<> f/Box2?)))
@@ -230,7 +230,7 @@
     (is (= java.util.Map (-> (f/kTypeOf :<> (Map String Any?)) .getClassifier jclass)))
     (is (= 2 (count (.getArguments (f/kTypeOf :<> (Map String Any?))))))))
 
-;; ---------------------------------------------------------------- T4: a generic function that is not reified
+;; ---------------------------------------------------------------- a generic function that is not reified
 
 (deftest non-reified-type-arguments
   (testing ":<> is legal and changes nothing at run time"
@@ -263,7 +263,7 @@
   (testing "a class-level type parameter stays erased (not done): the member keeps its T"
     (is (= 1 (f/.firstOf (f/Box2 [1]) :<> Long)))))
 
-;; ---------------------------------------------------------------- T5: errors
+;; ---------------------------------------------------------------- errors
 
 (deftest kotlin-compile-errors
   (let [t (try (eval '(f/sumAs 1 2 :<> String)) nil (catch Throwable t t))
@@ -301,14 +301,14 @@
 ;; ---------------------------------------------------------------- limits that are known and tested as limits
 
 (deftest known-limits
-  ;; step 8 (H4): a member that takes the class's own T is bridged (see hardening_test). Before: "star projection".
+  ;; a member that takes the class's own T is bridged (see hardening_test). Before: "star projection".
   (testing "a member of a generic class that takes the class's T, and one that does not"
     (is (= 5 (f/.only (f/GBox (long 5)) :<> Long)))
     (is (= 7 (f/.conv (f/GBox (long 5)) 7 :<> Long))))
   (testing "an inline reified property is not supported (a clear message, no bridge)"
     (is (str/includes? (compile-error '(f/refName "x" :<> String)) "inline reified properties is not supported yet"))
     (is (str/includes? (compile-error '(f/refName "x")) "is `inline reified`")))
-  ;; step 8 (H2b): the stdlib type aliases (ArrayList, HashMap...) are Kotlin default names, read from the stdlib metadata
+  ;; the stdlib type aliases (ArrayList, HashMap...) are Kotlin default names, read from the stdlib metadata
   (testing "Kotlin type aliases (ArrayList, HashMap...) are default names"
     (is (= "ArrayList" (f/typeName :<> (ArrayList String))))
     (is (= "ArrayList" (f/typeName :<> (java.util.ArrayList String))) "and the Java class works")))

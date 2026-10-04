@@ -39,7 +39,7 @@
     (is (instance? web.Router router))
     (is (instance? web.Router @seen) "the block was called with the Router of the context")
     (is (identical? router @seen)))
-  (testing "B4 (step 3 stopped here): the parameter of the block is a Router, so w/.get is resolved; since step 4 the suspend handler type is supported"
+  (testing "the parameter of the block is a Router, so w/.get is resolved; the suspend handler type is supported"
     (is (some? (binding [*ns* (the-ns 'ckway.web-test)]
                  ((eval '(fn [server] (w/.context server "/x" (fn [r] (w/.get r "/x" (fn [ex] "hi")))))) (w/Server :listen (java.net.InetSocketAddress. 0))))))))
 
@@ -71,7 +71,7 @@
     (is (= 5000 (t/inWholeMilliseconds (t/seconds t/Duration 5))))
     (is (= 5000 (rt/call-dyn #'t/inWholeMilliseconds [(rt/call-dyn #'t/seconds [t/Duration 5] {})] {})))))
 
-;; ---------------------------------------------------------------- end to end with a real server (step 4)
+;; ---------------------------------------------------------------- end to end with a real server
 
 (defn- request [^HttpClient client port path]
   (-> (HttpRequest/newBuilder (URI/create (str "http://localhost:" port path))) (.header "Accept" "text/plain") .build))
@@ -160,7 +160,7 @@
   (let [end (+ (System/currentTimeMillis) 3000)]
     (loop [] (cond (>= (count @log) n) true (> (System/currentTimeMillis) end) false :else (do (Thread/sleep 10) (recur))))))
 
-;; ---------------------------------------------------------------- step 5: type arguments against the web library
+;; ---------------------------------------------------------------- type arguments against the web library
 
 (deftest web-type-arguments
   (let [server (w/Server :listen (InetSocketAddress. 0))
@@ -250,7 +250,7 @@
       (is (= java.util.Map (java-class t)))
       (is (= 2 (count (.getArguments t)))))))
 
-;; ---------------------------------------------------------------- step 6: kt/set!, kt/ref, kt/data against the web library
+;; ---------------------------------------------------------------- kt/set!, kt/ref, kt/data against the web library
 
 (defn- static-proof
   "What the compiler emits while it compiles `form` in this namespace: the static forms, the dynamic ones, the warnings."
@@ -371,7 +371,7 @@
   (testing "a value class itself"
     (is (= {:value 200} (kt/data (w/OK w/StatusCode))))))
 
-;; ---------------------------------------------------------------- step 7: kt/reify against the web library
+;; ---------------------------------------------------------------- kt/reify against the web library
 
 (deftest web-reify-hooks-and-extension
   (let [server (w/Server :listen (InetSocketAddress. 0))
@@ -440,7 +440,7 @@
           (finally (.shutdownNow pool)))))))
 
 (deftest web-type-aliases
-  (testing "H2: `typealias Headers = com.sun.net.httpserver.Headers`: (w/Headers) constructs the Java class"
+  (testing "`typealias Headers = com.sun.net.httpserver.Headers`: (w/Headers) constructs the Java class"
     (let [h (w/Headers)]
       (is (instance? com.sun.net.httpserver.Headers h))
       (is (instance? com.sun.net.httpserver.Headers (rt/call-dyn #'w/Headers [] {})))))

@@ -1,7 +1,7 @@
 (ns ckway.meta
   "Kotlin metadata -> package index. Pure data, no code generation.
 
-  Also public (step 5): `class-info` (value class / fun interface facts of a class), `static-method?`,
+  Also public: `class-info` (value class / fun interface facts of a class), `static-method?`,
   `static-field?`, `classpath-files` (the class path as Files, incl. what Clojure's DynamicClassLoader
   added), `public-classes` (the public top-level Kotlin classes of a package, for `ckway.types`).
 
@@ -65,7 +65,7 @@
     :jvm         {:class \"fx.User\" :name \"greet\" :desc \"(Ljava/lang/String;)Ljava/lang/String;\"
                   :static? false   ; true for a top-level member and for a @JvmStatic member of an object
                                    ; (also @JvmField and const of an object): the JVM class says it, the
-                                   ; Kotlin metadata does not (step 5). The dispatch receiver of such a
+                                   ; Kotlin metadata does not). The dispatch receiver of such a
                                    ; member is still a receiver for Clojure; the call ignores it.
                   :default {:class .. :name \"greet$default\" :desc .. :static? true}}
                  or {:class .. :field \"NAME\" :static? true} for a field read,
@@ -121,7 +121,7 @@
            [java.util.jar JarFile JarEntry]
            [kotlin.metadata Attributes KmType KmClassifier$Class KmClassifier$TypeParameter
             KmClassifier$TypeAlias KmTypeAlias KmDeclarationContainer KmClass KmFunction KmProperty
-            KmConstructor KmValueParameter KmTypeParameter KmTypeProjection ClassKind MemberKind Visibility
+            KmConstructor KmValueParameter KmTypeParameter KmTypeProjection KmVariance ClassKind MemberKind Visibility
             KmPropertyAccessorAttributes]
            [kotlin.metadata.jvm KotlinClassMetadata KotlinClassMetadata$Class KotlinClassMetadata$FileFacade
             KotlinClassMetadata$MultiFileClassPart JvmExtensionsKt JvmMethodSignature JvmFieldSignature]))
@@ -489,6 +489,36 @@
       (when (load-class (internal->binary internal)) (swap! class-info-cache assoc internal info))
       info)))
 
+(def ^:private builtin-variances
+  "Declaration-site variance of the type parameters of the Kotlin built-in types, which the JVM shows as Java classes
+  (`kotlin/collections/List` is `java.util.List`): there is no Kotlin metadata to read them from."
+  {"kotlin/collections/Iterable" [:out] "kotlin/collections/Collection" [:out] "kotlin/collections/List" [:out]
+   "kotlin/collections/Set" [:out] "kotlin/collections/Map" [:inv :out] "kotlin/collections/Map.Entry" [:out :out]
+   "kotlin/collections/MutableIterable" [:inv] "kotlin/collections/MutableCollection" [:inv]
+   "kotlin/collections/MutableList" [:inv] "kotlin/collections/MutableSet" [:inv]
+   "kotlin/collections/MutableMap" [:inv :inv] "kotlin/collections/MutableMap.MutableEntry" [:inv :inv]
+   "kotlin/collections/MutableIterator" [:inv] "kotlin/collections/Iterator" [:out]
+   "kotlin/Array" [:inv] "kotlin/Pair" [:out :out] "kotlin/Triple" [:out :out :out] "kotlin/Comparable" [:in]
+   "kotlin/Lazy" [:out] "kotlin/Result" [:out] "kotlin/sequences/Sequence" [:out]})
+
+(def class-variances
+  "Declaration-site variance of the type parameters of the Kotlin class with this internal name: a vector of :out, :in
+  or :inv (invariant), or nil when it is not known (the class is not found). A Java class is invariant in every
+  parameter. Documented cache."
+  (memo
+   ::class-variances
+   (fn [internal]
+     (or (builtin-variances internal)
+         (when-let [[_ n] (re-matches #"kotlin/Function(\d+)" internal)]
+           (conj (vec (repeat (parse-long n) :in)) :out))
+         (when-let [c (load-class (internal->binary internal))]
+           (let [m (read-meta c)]
+             (if (instance? KotlinClassMetadata$Class m)
+               (mapv (fn [^KmTypeParameter p]
+                       (condp = (.getVariance p) KmVariance/OUT :out KmVariance/IN :in :inv))
+                     (.getTypeParameters (.getKmClass ^KotlinClassMetadata$Class m)))
+               (vec (repeat (count (.getTypeParameters c)) :inv)))))))))
+
 ;; ---------------------------------------------------------------- types
 
 (defn- suspend-fn-type
@@ -518,8 +548,13 @@
   (when t
     (let [c (.getClassifier t)
           cname (when (instance? KmClassifier$Class c) (.getName ^KmClassifier$Class c))
+          ;; a use-site projection (`MutableList<out Int>`) is kept as :variance :out or :in
           args (mapv (fn [^KmTypeProjection p]
-                       (if-let [pt (.getType p)] (km-type tps pt) {:star? true}))
+                       (if-let [pt (.getType p)]
+                         (let [v (.getVariance p)]
+                           (cond-> (km-type tps pt)
+                             (and v (not= KmVariance/INVARIANT v)) (assoc :variance (if (= KmVariance/OUT v) :out :in))))
+                         {:star? true}))
                      (.getArguments t))
           info (when cname (class-info cname))
           abbr (some-> (.getAbbreviatedType t) .getClassifier)]

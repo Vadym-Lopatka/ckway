@@ -1,5 +1,5 @@
 (ns ckway.coro-next-test
-  "S3: kotlinx-coroutines 1.11.0. Its `runBlocking` is public in two parts of the multi-file facade `BuildersKt`
+  "kotlinx-coroutines 1.11.0. Its `runBlocking` is public in two parts of the multi-file facade `BuildersKt`
   (`BuildersKt__BuildersKt`, and `runBlockingK` of `BuildersKt__Builders_concurrentKt`), so the index saw the function
   twice and every call was \"ambiguous\" with two identical candidates. Run by `bin/test` in a JVM with the alias
   `:coro-next` (not in the main run: it needs that version; `coro-1-11-0-is-on-the-class-path` checks it)."

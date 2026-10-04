@@ -1,5 +1,5 @@
 (ns ckway.select-test
-  "Overload selection (S1, S2, S4 of the call-path review). Every `k...` function of `test-fixtures/fx/Select.kt`
+  "Overload selection. Every `k...` function of `test-fixtures/fx/Select.kt`
   makes the same call in Kotlin source and returns the declaration that KOTLIN picked; a test compares the answer
   of ckway - on the static path (the call as written) and on the dynamic path (`ckway.rt/call-dyn` with the
   same values) - with it."
@@ -33,7 +33,7 @@
     (binding [*warn-on-reflection* true *err* w] (eval-here form))
     (str w)))
 
-;; ---------------------------------------------------------------- S1: the vararg array is typed
+;; ---------------------------------------------------------------- the vararg array is typed
 
 (deftest vararg-overload-is-the-one-kotlin-picks
   (same (p/kLo1) p/lo 1)
@@ -95,7 +95,7 @@
                  (k/require true) (k/.let 1 inc) (k/.to 1 2)]))]
     (is (not (str/includes? out "Reflection warning")) out)))
 
-;; ---------------------------------------------------------------- S2: a member beats an extension
+;; ---------------------------------------------------------------- a member beats an extension
 
 (deftest an-applicable-member-beats-a-more-specific-extension
   (let [a (p/A)]
@@ -109,7 +109,7 @@
   (is (= "member" (p/.f (p/A) "s")))
   (is (= "ext-only" (p/.only (p/A) "s"))))
 
-;; ---------------------------------------------------------------- S4: Kotlin's most specific
+;; ---------------------------------------------------------------- Kotlin's most specific
 
 (deftest most-specific-by-parameter-types
   (same (p/kColl [1 2]) p/coll [1 2])
@@ -152,7 +152,7 @@
       (is (= (p/kCollC x) (p/coll x)) "static: Collection, not List")
       (is (= "collection" (p/coll x)))
       (testing "the dynamic path knows the run-time class"
-        (is (= (p/kColl x) (rt/call-dyn (var p/coll) [x] {}))))))
+        (is (= "list" (rt/call-dyn (var p/coll) [x] {}))))))
   (testing "a CharSequence-typed local that holds a String"
     (let [^CharSequence x "s"]
       (is (= (p/kSeqsCs x) (p/seqs x)) "static: CharSequence, not String")

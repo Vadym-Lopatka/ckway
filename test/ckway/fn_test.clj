@@ -1,5 +1,5 @@
 (ns ckway.fn-test
-  "DESIGN-2 rule 6: functions. A Clojure function goes where Kotlin wants a function type or a
+  "README rule 6: functions. A Clojure function goes where Kotlin wants a function type or a
   fun interface, a lambda receiver is the first parameter, a Kotlin function value is a Clojure function."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -15,9 +15,9 @@
 
 (defn- ev [form] (binding [*ns* (the-ns 'ckway.call-test)] (eval form)))
 
-;; ---------------------------------------------------------------- B1 function types
+;; ---------------------------------------------------------------- function types
 
-(deftest b1-function-types
+(deftest function-types
   (testing "arguments pass through, the Long result becomes an Int"
     (both 2 f/apply1 (fn [x] (inc x)) 1)
     (both 10 f/apply1 (fn [x] (* 5 x)) 2)
@@ -67,7 +67,7 @@
     (is (str/includes? (root-message (thrown #((ev '(fn [g] (f/apply1 g 1))) 5))) "kt: expected a function"))
     (is (str/includes? (root-message (thrown #(rt/call-dyn #'f/apply1 [5 1] {}))) "`f` is Function1 but got Long"))
     (is (str/includes? (compile-error '(f/apply1 nil 1)) "`nil` passed to non-nullable `f`")))
-  (testing "a function of the wrong arity (F1): a kt error that says what Kotlin called, the ArityException is the cause"
+  (testing "a function of the wrong arity: a kt error that says what Kotlin called, the ArityException is the cause"
     (let [g (fn [a b] a)
           e (thrown #(f/apply1 g 1))
           e2 (thrown #(rt/call-dyn #'f/apply1 [g 1] {}))
@@ -78,7 +78,7 @@
       (is (instance? clojure.lang.ArityException (ex-cause e2)))
       (println "WRONG-ARITY message:" (ex-message e)))))
 
-(deftest b1-static-expansion
+(deftest static-expansion
   (let [x (expansions '(fn [] (f/apply1 (fn [x] (inc x)) 1)))]
     (is (empty? (:dynamic x)))
     (is (= "" (:warnings x)))
@@ -86,9 +86,9 @@
     (is (str/includes? (pr-str (:static x)) "reify"))
     (println "EXPANSION (f/apply1 (fn [x] (inc x)) 1) =>" (pr-str (first (:static x))))))
 
-;; ---------------------------------------------------------------- B2 fun interface
+;; ---------------------------------------------------------------- fun interface
 
-(deftest b2-fun-interface
+(deftest fun-interface
   (both true f/check (fn [x] (pos? x)) 1)
   (both false f/check (fn [x] (pos? x)) -1)
   (both true f/check even? 4)
@@ -105,7 +105,7 @@
     (let [p (reify fx.Pred (test [_ x] (= x 1)))]
       (is (identical? p (f/idPred p)))
       (is (identical? p (rt/call-dyn #'f/idPred [p] {})))))
-  (testing "static path and dynamic path both make a reify class (F2: no java.lang.reflect.Proxy)"
+  (testing "static path and dynamic path both make a reify class (no java.lang.reflect.Proxy)"
     (let [s (f/idPred (fn [x] true))
           d (rt/call-dyn #'f/idPred [(fn [x] true)] {})]
       (is (not (Proxy/isProxyClass (class s))))
@@ -121,9 +121,9 @@
       (is (empty? (:dynamic x)))
       (println "EXPANSION (f/check (fn [x] (pos? x)) 1) =>" (pr-str (first (:static x)))))))
 
-;; ---------------------------------------------------------------- B3 Kotlin function value
+;; ---------------------------------------------------------------- Kotlin function value
 
-(deftest b3-kotlin-function-values
+(deftest kotlin-function-values
   (let [g (f/adder 10)]
     (testing "callable as a Clojure function, and still the original FunctionN"
       (is (= 11 (g 1)))
@@ -163,9 +163,9 @@
   (testing "a Clojure function returned from a Clojure function adapts too"
     (is (= 3 (f/nested (fn [a] (fn [b] (+ a b))))))))
 
-;; ---------------------------------------------------------------- B4 typing inside a fn literal
+;; ---------------------------------------------------------------- typing inside a fn literal
 
-(deftest b4-fn-literal-parameter-types
+(deftest fn-literal-parameter-types
   (let [form '(f/.ctx (f/Router2) "/p" (fn [r] (f/.get r "/x" (fn [p] (str "got " p)))))
         x (expansions `(fn [] ~form))]
     (testing "the call on the parameter is resolved statically (control below shows it is ambiguous otherwise)"
@@ -211,9 +211,9 @@
       (is (= "" (:warnings x))))
     (is (= 1 (f/apply1 (fn [n] (when (= "int" (f/amb n)) n)) 1)))))
 
-;; ---------------------------------------------------------------- B5 annotations
+;; ---------------------------------------------------------------- annotations
 
-(deftest b5-annotation-on-fn-literal
+(deftest annotation-on-fn-literal
   (testing "function type: the annotation is on the invoke method that Kotlin reflects on"
     (is (true? (f/markerOf ^{fx.Marker true} (fn [x] x))))
     (is (false? (f/markerOf (fn [x] x)))))
@@ -223,22 +223,22 @@
   (testing "dynamic path: no annotations (the adapter is built at run time from the types, not from your fn literal)"
     (is (false? (rt/call-dyn #'f/markerOf [^{fx.Marker true} (fn [x] x)] {})))))
 
-;; ---------------------------------------------------------------- B6 still not supported
+;; ---------------------------------------------------------------- still not supported
 
-(deftest b6-not-supported-yet
+(deftest not-supported-yet
   (let []
-    (testing "suspend function types and suspend fun interface methods are supported since step 4 (see ckway.suspend-test)"
+    (testing "suspend function types and suspend fun interface methods are supported (see ckway.suspend-test)"
       (is (= "susp" (f/withSusp (fn [x] x))))
       (is (= "usp" (f/useSusp (fn [x] x))))
       (is (= "usp" (rt/call-dyn #'f/useSusp [(fn [x] x)] {}))))
     (testing "an object that already implements it is fine"
       (is (= "susp" (f/withSusp (reify Function2 (invoke [_ a b] a))))))))
 
-;; ---------------------------------------------------------------- F1, F2 (step 3)
+;; ---------------------------------------------------------------- wrong arity, checked exceptions
 
 (defn str-two [a b] a)
 
-(deftest f1-wrong-arity-message
+(deftest wrong-arity-message
   (let [msg "kt: Kotlin called this function as (Int) -> Int with 1 argument, but the Clojure function does not accept 1 argument"]
     (testing "a fn, a var, a zero-argument fn: the same message on both paths, the ArityException is the cause"
       (doseq [g [(fn [a b] a) #'str-two (fn [] 1)]
@@ -263,7 +263,7 @@
         (is (instance? clojure.lang.ArityException e))
         (is (instance? clojure.lang.ArityException e2))))))
 
-(deftest f2-checked-exception-reaches-kotlin-as-itself
+(deftest checked-exception-reaches-kotlin-as-itself
   (let [boom (fn [x] (throw (java.io.IOException. "boom")))]
     (testing "Kotlin code catches the IOException that the Clojure function throws (static reify and dynamic adapter)"
       (is (= "io:boom" (f/catchIo boom)))

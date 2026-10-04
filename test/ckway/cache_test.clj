@@ -1,5 +1,5 @@
 (ns ckway.cache-test
-  "Step 6, P1: the call cache of the dynamic path (`ckway.rt/call-dyn`)."
+  "The call cache of the dynamic path (`ckway.rt/call-dyn`)."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.call-test :as ct]
@@ -125,7 +125,7 @@
     (/ (double (- (System/nanoTime) t0)) n)))
 
 (defn- uncached
-  "A var with the metadata of `v` but no cache: every call selects and plans again (the cost before step 6)."
+  "A var with the metadata of `v` but no cache: every call selects and plans again (the cost without a cache)."
   [v]
   (let [u (intern (create-ns 'ckway.cache-test.scratch) (symbol (str (.sym ^clojure.lang.Var v))))]
     (alter-meta! u (constantly (dissoc (meta v) :kt/cache)))

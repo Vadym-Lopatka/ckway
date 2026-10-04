@@ -1,7 +1,7 @@
 (ns ckway.value-test
-  "Step 3: value classes (DESIGN-2 rule 7, note \"Value class\"). In Clojure a value-class value is
+  "Value classes (README rule 7). In Clojure a value-class value is
   always the boxed object; kt unboxes where the JVM slot holds the underlying type and boxes a
-  result of such a slot. Every V1-V5 case runs on the static path (as written) and on the
+  result of such a slot. Every case runs on the static path (as written) and on the
   dynamic path (`rt/call-dyn`) with the same assertions."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
@@ -15,9 +15,9 @@
 
 (defn- uid ^fx.Uid [n] (f/Uid n))
 
-;; ---------------------------------------------------------------- V2 constructing
+;; ---------------------------------------------------------------- constructing
 
-(deftest v2-construct
+(deftest construct
   (testing "primary constructor: constructor-impl + box-impl, the result is the boxed object"
     (both (uid 5) f/Uid 5)
     (is (instance? fx.Uid (f/Uid 5)))
@@ -52,9 +52,9 @@
     (is (str/includes? (compile-error '(t/Duration)) "has no public constructor"))
     (is (str/includes? (compile-error '(kk/UInt)) "has no public constructor"))))
 
-;; ---------------------------------------------------------------- V1 calls
+;; ---------------------------------------------------------------- calls
 
-(deftest v1-top-level-calls
+(deftest top-level-calls
   (testing "parameter and return are value classes"
     (both (uid 6) f/nextUid (uid 5))
     (both (uid 6) f/nextUid (f/Uid 5))
@@ -89,7 +89,7 @@
     (is (= "uid" (f/tag ^fx.Uid (uid 1))))
     (is (= "name" (f/tag ^fx.Name (f/Name "n"))))))
 
-(deftest v1-members
+(deftest members
   (let [h (f/Holder (uid 5))]
     (testing "member with a value-class parameter and return"
       (is (= (uid 15) (f/.bump h (uid 10))))
@@ -109,7 +109,7 @@
         (is (= "tracked:5" (rt/call-dyn #'f/.track [tr (uid 5)] {})))
         (is (= "tracked:5" (f/.track ^fx.Tracker tr (uid 5))))))))
 
-(deftest v1-companion
+(deftest companion
   (testing "factory in the companion: the JVM returns the underlying value"
     (both (uid 9) f/.of f/Uid 9))
   (testing "property of the companion with a mangled getter"
@@ -117,9 +117,9 @@
   (testing "const"
     (both 99 f/LIMIT f/Uid)))
 
-;; ---------------------------------------------------------------- V3 members of a value class
+;; ---------------------------------------------------------------- members of a value class
 
-(deftest v3-value-class-members
+(deftest value-class-members
   (let [u (uid 5)]
     (testing "the primary property is a plain getter of the box"
       (both 5 f/v u)
@@ -143,9 +143,9 @@
       (is (instance? fx.Uid (f/nextUid u)))
       (is (not (number? (f/nextUid u)))))))
 
-;; ---------------------------------------------------------------- V4 stdlib value classes
+;; ---------------------------------------------------------------- stdlib value classes
 
-(deftest v4-duration
+(deftest duration
   (testing "member-extension property of the companion; receivers in JVM order: companion, then the Int"
     (both (t/seconds t/Duration 5) t/seconds t/Duration 5)
     (is (instance? kotlin.time.Duration (t/seconds t/Duration 5)))
@@ -162,7 +162,7 @@
     (both (t/seconds t/Duration 4) f/twice (t/seconds t/Duration 2))
     (is (= "4s" (str (f/twice (t/seconds t/Duration 2)))))))
 
-(deftest v4-uint-and-result
+(deftest uint-and-result
   (testing "kotlin.UInt as parameter and return"
     (both (f/mkU 42) f/u (f/mkU 41))
     (is (instance? kotlin.UInt (f/u (f/mkU 41))))
@@ -185,9 +185,9 @@
       (is (= "bad" (ex-message (kk/.exceptionOrNull bad))))
       (is (= "bad" (ex-message (rt/call-dyn #'kk/.exceptionOrNull [bad] {})))))))
 
-;; ---------------------------------------------------------------- V5 function types
+;; ---------------------------------------------------------------- function types
 
-(deftest v5-value-classes-in-function-types
+(deftest value-classes-in-function-types
   (testing "a Clojure function takes and returns boxed objects, adapters pass them unchanged"
     (both (uid 6) f/mapUid (uid 5) (fn [u] (f/.plus u 1)))
     (both (uid 5) f/mapUid (uid 5) identity)

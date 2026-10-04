@@ -1,5 +1,5 @@
 (ns ckway.static-test
-  "Step 5, T6: @JvmStatic members of an object, @JvmField and const (the index said :static? false)."
+  "@JvmStatic members of an object, @JvmField and const (the index said :static? false)."
   (:require [clojure.test :refer [deftest is testing]]
             [ckway.call-test :as ct :refer [both expansions]]
             [ckway.core :as kt]

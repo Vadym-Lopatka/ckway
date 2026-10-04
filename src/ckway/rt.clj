@@ -3,7 +3,7 @@
   applied to the actual classes of the arguments, then a reflective JVM call.
   Also the small helpers that statically emitted forms call.
 
-  Call cache (step 6, P1). Selecting and planning a call costs microseconds, and they depend only on the
+  Call cache. Selecting and planning a call costs microseconds, and they depend only on the
   declarations of the var, the classes of the values (and nil), the names of the named arguments and the
   integer-literal marks. `call-dyn` therefore keeps the result of `prepare` (a function of the written
   values, with the reflective `Method` looked up once) in a ConcurrentHashMap under the key `call-key`.
@@ -410,7 +410,7 @@
         :else (r/fail (str "kt: expected a function for a parameter of type " (.getName iface) ", got " (.getName (class g))))))
 
 (defn arity-error
-  "The error for a Clojure function of the wrong arity that Kotlin called (F1). `e` is the
+  "The error for a Clojure function of the wrong arity that Kotlin called. `e` is the
   ArityException, `g` the Clojure function, `text` what Kotlin called (a Kotlin function type or
   `Iface.method(types)`), `n` the number of arguments Kotlin gave. An ArityException that was not
   raised by `g` itself (by a call deeper in its body) is returned unchanged."
@@ -592,22 +592,12 @@
       (r/fail (str "kt: parameter `" pname "` (" ptext ") expects " (.getName c) ", got " (.getName (class v)) " " (pr-str v)
                    (when sig (str "\n  Kotlin: " sig)))))))
 
-(defn- int-literal-reader
-  "`get` (a reader of a written value), but an integer LITERAL of the call that fits Int is an Integer when the JVM
-  class `c` is a supertype of Integer other than Integer itself (Object for `Any` and `T`, Number, Comparable):
-  Kotlin types such a literal as Int. The static path does the same (`ckway.resolve/conv-form`)."
-  [e get ^Class c]
-  (if (and c (= :int (:lit (:info e))) (not (.isPrimitive c)) (not= c Integer) (.isAssignableFrom c Integer))
-    (fn [argv] (let [v (get argv)]
-                 (if (and (instance? Long v) (<= Integer/MIN_VALUE (long v) Integer/MAX_VALUE)) (Integer/valueOf (int (long v))) v)))
-    get))
-
 (defn- arg-fn
   "Function of [argument vector, continuation] that gives the JVM value for the plan argument `a`.
   `sig` is the Kotlin declaration, for messages."
   [a sig]
   (cond
-    (:entry a) (let [get (int-literal-reader (:entry a) (entry-reader (:entry a)) (some-> (:jvm-type a) r/jvm-class))]
+    (:entry a) (let [get (entry-reader (:entry a))]
                  (if-let [c (some-> (:jvm-type a) r/jvm-class)]
                    (cond (:adapt a) (let [ad (:adapt a)] (fn [argv _] (adapt-arg ad (get argv))))
                          (:vc a) (let [un (unboxer (:vc a))] (fn [argv _] (un (get argv))))
@@ -619,8 +609,7 @@
     (:mask a) (let [m (Integer/valueOf (int (:mask a)))] (fn [_ _] m))
     (:marker a) (fn [_ _] nil)
     (:cont a) (fn [_ k] k)
-    (:vararg a) (let [ect (some-> ^Class (r/jvm-class (:jvm-type a)) .getComponentType)
-                      rs (mapv #(int-literal-reader % (entry-reader %) ect) (:vararg a))
+    (:vararg a) (let [rs (mapv entry-reader (:vararg a))
                       un (when-let [vc (:elem-vc a)] (unboxer vc))
                       jt (:jvm-type a)]
                   (fn [argv _] (->array jt (map (fn [r] (let [x (r argv)] (if un (un x) x))) rs))))
@@ -760,7 +749,7 @@
   [^clojure.lang.Var v decls pos named lits]
   (let [var-name (str (.sym v))
         n (count pos)
-        info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k))))
+        info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k) :val x)))
         parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
                 :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (info k x) :idx (+ n i)}]) named))}
         {:keys [decl items checks]} (r/choose var-name decls parsed false)]

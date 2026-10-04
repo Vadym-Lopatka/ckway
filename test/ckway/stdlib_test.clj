@@ -1,5 +1,5 @@
 (ns ckway.stdlib-test
-  "S5 of the call-path review: calls into the real Kotlin stdlib (`kotlin`, `kotlin.collections`, `kotlin.text`,
+  "Calls into the real Kotlin stdlib (`kotlin`, `kotlin.collections`, `kotlin.text`,
   `kotlin.sequences`, `kotlin.ranges`). Each call is made on the static path (as written) and on the dynamic path
   (`ckway.rt/call-dyn` with the same values), and the result is compared with a literal.
 
@@ -116,7 +116,7 @@
   (both [1 2] c/.filterNotNull [1 nil 2])
   (both [1 2 3] c/.plus [1] [2 3])
   (both [1 2] c/.plus [1] 2)
-  ;; T is shared by the list and the element: the literal keeps the Long that a Clojure vector holds (R13 rule)
+  ;; T is shared by the list and the element: the literal keeps the Long that a Clojure vector holds (an integer is not converted at a generic position)
   (both [1 3] c/.minus [1 2 3] 2)
   (both {"a" 2} c/.mapValues {"a" 1} (fn [e] 2)))
 

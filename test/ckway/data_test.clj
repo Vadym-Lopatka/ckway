@@ -1,5 +1,5 @@
 (ns ckway.data-test
-  "Step 6, R11: `(kt/data x)`."
+  "`(kt/data x)`."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.core :as kt]
