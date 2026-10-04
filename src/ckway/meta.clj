@@ -808,35 +808,46 @@
      :setter-visibility (when-let [^KmPropertyAccessorAttributes a (.getSetter p)] (keyword (str/lower-case (str (Attributes/getVisibility a)))))
      :signature (str (if (Attributes/isVar p) "var " "val ") (subs (sig-text :property name rcvs [] ret) 4))}))
 
-;; A hidden-deprecated declaration: `@Deprecated(level = DeprecationLevel.HIDDEN)`, or `@DeprecatedSinceKotlin(hiddenSince
-;; = "1.6")` (the stdlib's old `maxBy`, which returned `T?`). Kotlin source cannot call it (the compiler keeps it for
-;; old binaries only), so it is no var. The Kotlin metadata does not say it; the class file does: kotlinc makes the
-;; JVM member ACC_SYNTHETIC and keeps the annotations (a property has them on its synthetic `...$annotations` method).
-;; ACC_SYNTHETIC alone is not enough: `@JvmSynthetic` sets it too, and Kotlin calls such a function.
-(defn- hidden-deprecated?
+;; A declaration that Kotlin refuses to call because it is deprecated: `@Deprecated(level = DeprecationLevel.ERROR)` (a
+;; call is a compile error) or `HIDDEN` (the declaration is invisible; the compiler keeps it for old binaries only), or
+;; `@DeprecatedSinceKotlin(errorSince = "1.5", hiddenSince = "1.6")` when the Kotlin version of the stdlib on the class
+;; path has reached that version (the stdlib's old `maxBy`, which returned `T?`; `MutableList.sort(comparison)`, whose
+;; body only throws). Kotlin source cannot call it, so it is no var. The Kotlin metadata does not say it; the class file
+;; does: the annotations are kept there (a property has them on its synthetic `...$annotations` method).
+(defn- version-reached?
+  "Has the Kotlin on the class path reached the version `since` (\"1.5\", \"1.9.20\")? false for a blank string."
+  [^String since]
+  (boolean (when-not (str/blank? since)
+             (let [want (mapv parse-long (re-seq #"\d+" since))
+                   v kotlin.KotlinVersion/CURRENT
+                   have [(.getMajor v) (.getMinor v) (.getPatch v)]
+                   n (max (count want) 3)
+                   pad (fn [xs] (vec (take n (concat xs (repeat 0)))))]
+               (not (neg? (compare (pad have) (pad want))))))))
+
+(defn- refused-deprecated?
   [^java.lang.reflect.AnnotatedElement e]
   (boolean (when e
              (try (or (when-let [^kotlin.Deprecated a (.getAnnotation e kotlin.Deprecated)]
-                        (= kotlin.DeprecationLevel/HIDDEN (.level a)))
+                        (contains? #{kotlin.DeprecationLevel/ERROR kotlin.DeprecationLevel/HIDDEN} (.level a)))
                       (when-let [^kotlin.DeprecatedSinceKotlin a (.getAnnotation e kotlin.DeprecatedSinceKotlin)]
-                        (not (str/blank? (.hiddenSince a)))))
+                        (or (version-reached? (.errorSince a)) (version-reached? (.hiddenSince a)))))
                   (catch Throwable _ false)))))
 
-(defn- hidden-method?
-  "Is the JVM method `sig` of the class `cname` a hidden-deprecated declaration? `annotations?`: it is the synthetic
-  method that holds the annotations of a property. false when the class cannot reflect."
-  [cname ^JvmMethodSignature sig annotations?]
+(defn- refused-method?
+  "Is the JVM method `sig` of the class `cname` (the method of a function, or the synthetic method that holds the
+  annotations of a property) a declaration that Kotlin refuses to call (`refused-deprecated?`)? false when the class
+  cannot reflect."
+  [cname ^JvmMethodSignature sig]
   (boolean (when-let [c (and sig (load-class cname))]
-             (when-let [m (declared-method c (.getName sig) (.getDescriptor sig))]
-               (and (or annotations? (.isSynthetic m)) (hidden-deprecated? m))))))
+             (refused-deprecated? (declared-method c (.getName sig) (.getDescriptor sig))))))
 
-(defn- hidden-ctor?
+(defn- refused-ctor?
   [^Class c ^JvmMethodSignature sig]
   (boolean (when (and c sig)
              (some (fn [^java.lang.reflect.Constructor k]
-                     (and (.isSynthetic k)
-                          (= (.getDescriptor sig) (.toMethodDescriptorString (MethodType/methodType Void/TYPE (.getParameterTypes k))))
-                          (hidden-deprecated? k)))
+                     (and (= (.getDescriptor sig) (.toMethodDescriptorString (MethodType/methodType Void/TYPE (.getParameterTypes k))))
+                          (refused-deprecated? k)))
                    (try (.getDeclaredConstructors c) (catch LinkageError _ nil))))))
 
 (defn- own-member?
@@ -849,12 +860,12 @@
   (concat
    (for [^KmFunction f (.getFunctions c)
          :when (and (visible? (Attributes/getVisibility f)) (own-member? (Attributes/getKind f))
-                    (not (hidden-method? (or (:jvm-owner ctx) (:owner ctx)) (JvmExtensionsKt/getSignature f) false)))
+                    (not (refused-method? (or (:jvm-owner ctx) (:owner ctx)) (JvmExtensionsKt/getSignature f))))
          :let [d (try (function-decl ctx f) (catch LinkageError _ nil))] :when d]
      d)
    (for [^KmProperty p (.getProperties c)
          :when (and (visible? (Attributes/getVisibility p)) (own-member? (Attributes/getKind p))
-                    (not (some #(hidden-method? % (JvmExtensionsKt/getSyntheticMethodForAnnotations p) true)
+                    (not (some #(refused-method? % (JvmExtensionsKt/getSyntheticMethodForAnnotations p))
                                (distinct (remove nil? [(:jvm-owner ctx) (:owner ctx) (:field-owner ctx)])))))
          :let [d (try (property-decl ctx p) (catch LinkageError _ nil))] :when d]
      d)))
@@ -899,7 +910,7 @@
       (let [jc (load-class binary)
             ctors (for [^KmConstructor c (.getConstructors k)
                         :when (and (visible? (Attributes/getVisibility c))
-                                   (not (hidden-ctor? jc (JvmExtensionsKt/getSignature c))))]
+                                   (not (refused-ctor? jc (JvmExtensionsKt/getSignature c))))]
                     (ctor-decl ctx c))
             entries (for [n (.getEnumEntries k)]
                       {:kind :enum-entry :name n :var-name (str simple "." n) :owner binary :receivers [] :params []
@@ -1161,7 +1172,7 @@
         self-type (class-type internal (map #(.getName ^KmTypeParameter %) (.getTypeParameters k)))]
     (cond
       (not (visible? vis)) []
-      (hidden-deprecated? (load-class binary)) []
+      (refused-deprecated? (load-class binary)) []
       (contains? #{ClassKind/ENUM_ENTRY ClassKind/ANNOTATION_CLASS} kind) []
       (= ClassKind/COMPANION_OBJECT kind)
       ;; members of a companion hang off the outer class var

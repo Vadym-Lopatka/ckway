@@ -208,10 +208,11 @@
     "a9" (s/a9 "x" (fn [x] x))})
 
 (def ^:private erased-limit
-  "Calls where Kotlin chooses by the type argument of a VALUE (`MutableList<String>`: the `T : Comparable<T>` overload)
-  and the library cannot: both candidates take the same Kotlin class, the JVM erased what the list holds. The library
-  says ambiguous (doc/limits.md, 18)."
-  #{"u4-strings" "u4-arraylist"})
+  "Calls where Kotlin chooses by the type argument of a VALUE and the library cannot, because the JVM erased what the
+  collection holds: the library says ambiguous (doc/limits.md, 18). `u4`: both candidates take the same Kotlin class
+  and one has `T : Comparable<T>`. Since the seventh review (V1) also `u9` (`T : Number` in `MutableList<T>`) and `u5`
+  (one `T` for two `MutableList<T>`): until then the library took the bounded candidate for every list."
+  #{"u4-strings" "u4-arraylist" "u5-lists" "u5-arraylists" "u9-mutable" "u9-arraylist"})
 
 (deftest w234-the-oracle-and-the-table-have-the-same-calls
   (is (= (set (keys calls)) (set (keys @oracle)))))
@@ -228,7 +229,7 @@
     (doseq [b other] (println "  DISAGREE" (pr-str b)))
     (is (= [] (vec other)))
     (is (every? #(= :ambiguous (:kt %)) limit) "the limit is an error, never another choice")
-    (is (= 6 (count limit)))))
+    (is (= 18 (count limit)))))
 
 ;; ---------------------------------------------------------------- W2 on the stdlib
 
@@ -343,8 +344,9 @@
     (is (not (has-var? "c" ".privateMember"))))
   (testing "what Kotlin source CAN call stays"
     (all-paths (c/kSynth) (c/synth))
-    (is (= ["synth" "since" "optin" "warned" "errored"] [(c/synth) (c/since) (c/optIn) (c/warned) (c/errored)])
-        "@JvmSynthetic, @SinceKotlin, @RequiresOptIn, @Deprecated WARNING and ERROR")
+    (is (= ["synth" "since" "optin" "warned"] [(c/synth) (c/since) (c/optIn) (c/warned)])
+        "@JvmSynthetic, @SinceKotlin, @RequiresOptIn, @Deprecated WARNING")
+    (is (not (has-var? "c" "errored")) "@Deprecated ERROR: no var since the seventh review (V3)")
     (is (= [4 8 9] [(c/.publicMember (c/Vis7)) (c/publicProp (c/Vis7)) (c/.synthMember (c/Vis7))])))
   (testing "a real library: the hidden `Channel(capacity)` of kotlinx.coroutines, the stdlib's old `maxBy` (hiddenSince)"
     (is (= 1 (count (filter #(str/includes? (:signature %) "fun <E> Channel(") (:kt/decls (meta #'ch/Channel))))))

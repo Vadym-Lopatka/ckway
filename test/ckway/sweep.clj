@@ -155,7 +155,7 @@
   (try (let [res (f)] (if (:dynamic? res) :deferred (jvm-key (:decl res))))
        (catch clojure.lang.ExceptionInfo e
          (let [m (str (ex-message e))]
-           (cond (str/includes? m "take the same JVM parameter types") :ambiguous-erased
+           (cond (or (str/includes? m "take the same JVM parameter types") (str/includes? m "what a collection holds")) :ambiguous-erased
                  (str/includes? m "is ambiguous") :ambiguous
                  (:kt/no-fit (ex-data e)) :no-fit
                  :else [:error (first (str/split-lines m))])))))

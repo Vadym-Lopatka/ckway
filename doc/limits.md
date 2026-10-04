@@ -226,13 +226,17 @@ A constructor parameter counts as a property when the class has a public propert
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
 * A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
-  `@PublishedApi`; `protected`; `private`), and a hidden-deprecated one (`@Deprecated(level = DeprecationLevel.HIDDEN)`, or
-  `@DeprecatedSinceKotlin(hiddenSince = ...)`: the stdlib's old `maxBy` that returns `T?`, the one-parameter `Channel(capacity)`
-  of kotlinx.coroutines). The Kotlin metadata does not mark a hidden declaration; `kt` reads it from the class file
-  (the JVM member is synthetic and has the annotation). For a class that cannot reflect (19) that check is not made.
-  `@JvmSynthetic`, `@SinceKotlin` and `@RequiresOptIn` declarations ARE vars (Kotlin can call them). So is a declaration
-  with `@Deprecated(level = DeprecationLevel.ERROR)`: Kotlin refuses a call of it at compile time, `kt` makes the call
-  (`(kc/.sort xs f)` of the stdlib then throws `NotImplementedError`: that is its body).
+  `@PublishedApi`; `protected`; `private`), and one that Kotlin refuses because it is deprecated:
+  `@Deprecated(level = DeprecationLevel.ERROR)` (a call is a compile error in Kotlin; the stdlib's
+  `MutableList.sort(comparison)`, `String.toUpperCase()`, `appendln`) and `DeprecationLevel.HIDDEN`, also through
+  `@DeprecatedSinceKotlin(errorSince = ..., hiddenSince = ...)` when the Kotlin of the stdlib on the class path has
+  reached that version (the stdlib's old `maxBy` that returns `T?`; the one-parameter `Channel(capacity)` of
+  kotlinx.coroutines is hidden by its level). A class with such a deprecation is no var either, with its members.
+  The Kotlin metadata does not mark these declarations; `kt` reads the annotations from the class file. For a class
+  that cannot reflect (19) that check is not made. `@JvmSynthetic`, `@SinceKotlin`, `@RequiresOptIn` and
+  `@Deprecated` with the level WARNING ARE vars (Kotlin can call them). One difference from Kotlin is left: Kotlin
+  still RESOLVES a call to an ERROR-level declaration and then refuses it, so `err(a: Int = 1)` (ERROR) hides
+  `err(a: Int = 1, b: Int = 2)` for `err()` in Kotlin; `kt` does not see the first and calls the second.
 
 ## 11. Kotlin metadata
 
@@ -261,6 +265,11 @@ The keys are keywords there too (`":a"`). The remedy is to hand over a Java map 
 (`(java.util.HashMap. m)`) or a Kotlin data class (`kt/data` goes the other way: class to map). `(instance? Iterable m)`
 and `(instance? java.util.Map m)` are both true for a map; for a vector only the first is. kt does not change the value:
 a map is passed as it is.
+
+A set or a map is not a PREDICATE. `kt` adapts it to a function type when that is the only way to pass it (18), but it
+does not apply Clojure's truthiness to the result: Kotlin wants a `Boolean`. `(kc/.filter xs #{1 2})` is "kt: expected a
+Boolean where Kotlin expects a Boolean, got java.lang.Long" (the set returns the element), `(kc/.any xs #{2})` is "kt:
+nil where Kotlin expects a non-null Boolean". Write `(fn [x] (contains? s x))`.
 
 The choice between overloads sees the same two faces. `(kc/.toMap {1 2})` (`kc` is `kotlin.collections`) is ambiguous:
 `Iterable<Pair<K, V>>.toMap()` and `Map<K, V>.toMap()` both take a Clojure map, and neither type is a subtype of the
@@ -309,6 +318,10 @@ parameter, the Kotlin declaration and the actual class. A correct call costs one
 A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`, the element of a `doseq`) is an upper
 bound: the class of the value decides at run time. `^Object` says nothing. One exception: `^Number` for an argument that
 goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of the value decides, as for an inferred type.
+
+An upper bound also lets a MEMBER of the run-time class win over an extension on the static type: with `open class E1`,
+`class E2 : E1() { fun show() }` and `fun E1.show()`, Kotlin's `val e: E1 = E2(); e.show()` is the extension, and
+`(p/.show (p/e1))` (`fun e1(): E1`, the object is an `E2`) is the member; `(p/.show ^E1 (p/e1))` is the extension.
 
 A type that the LIBRARY puts on a local is never a hint that you wrote, so it is an upper bound too: the parameters of a
 `fn` literal that you pass at a Kotlin function type (the library tags them with the Kotlin parameter types so that nested
@@ -524,8 +537,7 @@ The whole choice is Kotlin's (`ckway.resolve/most-specific`; `test/ckway/round6_
   (`(kc/.map xs {1 :a})`, `(let [k :name] (kc/.map xs k))`). That adapter is a conversion, like `kt`'s own conversion
   of a number: a candidate that needs it is used only when no candidate takes the values as they are. `(kc/.removeAll ml
   [1 2])` is `removeAll(elements: Collection<T>)`, not `removeAll(predicate)`. A Clojure function (`fn`) is a function:
-  no conversion. (The result of the adapted value is checked as any function's: a set as a predicate returns the
-  element, not a `Boolean`, so `(kc/.filter xs #{1 2})` is a `kt:` error; write `(fn [x] (contains? s x))`.)
+  no conversion. (The result of the adapted value is checked as any function's: see 12 for a set as a predicate.)
 
 An override and the member that it overrides are one member, whatever the JVM does with them: `override fun amt(): W`
 (a value class: JVM name `amt-<hash>`) over `fun amt(): Any`, `override fun put(x: String)` in a `Box<String>` over
@@ -542,11 +554,33 @@ whose default the other interface declares (`interface W1 { fun wd(x: Int = 1) }
 `class WC : W1, W2`: `(p/.wd ^W2 x)` is `"wd1"`); Kotlin refuses that for a `W2`. The hint is an upper bound there, and
 the object decides.
 
-What the JVM erases stays a limit in two more shapes. Two candidates on the SAME class that differ only in the bound of
-a type parameter (`fun <T> MutableList<T>.u4()`, `fun <T : Comparable<T>> MutableList<T>.u4()`): Kotlin chooses by what
-the list holds, `kt` says ambiguous. And a read-only `List` is a `java.util.List`, as a `MutableList` is: where the
-stdlib has one overload for each (`asReversed`, `withDefault` for maps), a `listOf` and a Clojure vector get the
-`MutableList` one (`(kc/.asReversed [1 2 3])` is a `ReversedList` view; reading it is fine).
+Two candidates are ordered only on what can be seen. The JVM erases what a collection HOLDS, so a candidate whose
+parameter asks something of it is never put before one that asks less, nor the other way round: the call is ambiguous,
+and the error says so and lists the Java interop call of each candidate. That is the case for a type parameter with a
+declared bound at a type-argument position (`fun <T : Number> u9(a: MutableList<T>)` and `fun <T> u9(a:
+MutableCollection<T>)`: Kotlin takes the first for a list of numbers and the second for a list of strings, a
+`java.util.ArrayList` does not show which; `<T : Comparable<T>>`, `<T : Any>` against `Collection<T?>` are the same) and
+for one type variable at two parameters of which one is invariant (`lk(a: MutableList<T>, b: MutableList<T>)` against
+`lk(a: MutableCollection<A>, b: MutableCollection<B>)`). The way out for a generic function is `:<>`: the type arguments
+are then known, `(p/u9 xs :<> Int)` is the bounded one, and with `:<> String` it is no candidate (`String` is no
+`Number`). Candidates that ask the SAME, or nothing, are ordered by their classes as before
+(`MutableList<T>.removeAll(predicate)` before `MutableIterable<T>.removeAll(predicate)`). The type arguments of a value
+are never known otherwise: not from a nested `kt` call either.
+NOT covered: a CONCRETE type argument. `gl(xs: List<T>)` and `gl(xs: Collection<Int>)`: the non-generic one is taken
+for every list (`(p/gl ["a"])` too, where Kotlin takes `List<T>`); so is `two(a: Collection<String>, b: Collection<Int>)`
+before `two(a: List<T>, b: List<T>)`.
+
+A Clojure persistent collection (vector, list, map, set, lazy seq) is READ-ONLY. It implements the `java.util`
+interfaces, which are Kotlin's `Mutable*` types, but it cannot be changed. Taking it at a `MutableList`, `MutableMap`...
+parameter is a conversion, like the function adapter: a candidate that takes it as a read-only type is used first
+(`iv(x: MutableList<Int>)` / `iv(x: Iterable<Int>)`: `(p/iv [1])` is the `Iterable` one, as Kotlin's `iv(listOf(1))`;
+`(kc/.asReversed [1 2 3])` is `List.asReversed`), when its parameter holds the same thing (`MutableList<Int>` gives way to
+`Iterable<Int>`, not to `Collection<String>`: that stays ambiguous). When only a `Mutable*` candidate exists, the call
+is made, and a change then throws `java.lang.UnsupportedOperationException` (`(kc/.removeAll [1 2 3] [1])`). A
+`java.util.ArrayList` or `(kc/mutableListOf ...)` takes the `Mutable*` overload. The result of a `kt` call that Kotlin
+declares as a read-only `List`, `Set`, `Map`, `Collection` or `Iterable` is read-only too where the call is written in
+the argument (`(p/iv (p/readOnly))`); through a local, on the dynamic path and for a var used as a value only the class
+of the object is known (`java.util.Arrays$ArrayList` for `listOf(1, 2)`), and that is a mutable list for the JVM.
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
 seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the

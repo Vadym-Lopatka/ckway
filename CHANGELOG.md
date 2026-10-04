@@ -56,5 +56,8 @@ Also in this release (the fixes of the reviews before it):
 * A vector, map, set, keyword or var is passed as what it is before it is adapted as a function: `(kc/.removeAll ml [1 2])` is the `Collection` overload. A value that only the adapter can pass is adapted as before.
 * For a Clojure function: a Kotlin function type, then a Kotlin `fun interface`; a Java functional interface only when every candidate has one.
 * Hidden-deprecated declarations (`@Deprecated(level = HIDDEN)`, `@DeprecatedSinceKotlin(hiddenSince = ...)`) are no vars: `(ch/Channel)` is Kotlin's three-parameter factory, `(kc/.maxBy xs f)` is the one that Kotlin calls.
+* Two candidates are not ordered on what a collection holds (the JVM erased it): a bounded type parameter at a type-argument position (`<T : Number> u9(a: MutableList<T>)` / `<T> u9(a: MutableCollection<T>)`) or one type variable for two invariant collections makes the call ambiguous, with the reason, the Java interop calls and `:<>` as the way out (`(p/u9 xs :<> Int)`); the type arguments of `:<>` are checked against the bounds in the choice.
+* A Clojure persistent collection is read-only: a `Mutable*` parameter is a conversion for it, so `iv(x: Iterable<Int>)` is taken before `iv(x: MutableList<Int>)` for `[1]`, and `(kc/.asReversed [1 2 3])` is `List.asReversed`. With only a `Mutable*` candidate the call is made and a change throws `UnsupportedOperationException`.
+* Declarations with `@Deprecated(level = ERROR)` (also by `@DeprecatedSinceKotlin(errorSince = ...)`) are no vars, as Kotlin refuses a call of them: `MutableList.sort(comparison)`, `String.toUpperCase()`, `appendln`.
 
 [0.1.0]: https://github.com/Vadym-Lopatka/ckway/releases/tag/v0.1.0

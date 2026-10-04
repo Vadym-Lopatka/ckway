@@ -184,6 +184,10 @@
        (let [r (try (ns-resolve *ns* head) (catch Exception _ nil))]
          (and (var? r) (= 'ckway.core (ns-name (.ns ^clojure.lang.Var r))) (= 'reify (.sym ^clojure.lang.Var r))))))
 
+(def ^:private read-only-kotlin
+  #{"kotlin/collections/Iterable" "kotlin/collections/Collection" "kotlin/collections/List" "kotlin/collections/Set"
+    "kotlin/collections/Map"})
+
 (defn- nested-call-info
   "Info for a form that is itself a call of a kt var: when exactly one declaration fits, its
   Kotlin return type. Errors are left for the expansion of that inner call."
@@ -198,10 +202,12 @@
         (try
           (let [parsed (parse-args var-name decls (rest form) (fn [f] {:arg f :info (form-info env f)}))
                 r (choose var-name decls parsed true)]
-            (bound-info (and (:decl r)
-                             (if (contains? r :tform)
-                               (typed-return-class (:decl r) (types/resolve-forms *ns* (:tform r)))
-                               (return-class (:decl r))))))
+            (cond-> (bound-info (and (:decl r)
+                                     (if (contains? r :tform)
+                                       (typed-return-class (:decl r) (types/resolve-forms *ns* (:tform r)))
+                                       (return-class (:decl r)))))
+              ;; Kotlin declares the result as a read-only collection (see `applicability*`)
+              (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)))
           (catch clojure.lang.ExceptionInfo e
             (if (:kt/error (ex-data e)) {} (throw e))))))))
 
@@ -561,7 +567,7 @@
 (defn- lit-note [info]
   (when (= :long (:lit info)) " (an integer literal that does not fit Int)"))
 
-(declare applicability*)
+(declare applicability* mutable-kotlin?)
 
 (defn- could-be?
   "Can a value whose compile-time class is the upper bound `ac` be an instance of `pc`? True when
@@ -611,7 +617,14 @@
         [:no (str "`" (:name slot) "` is " (.getSimpleName pc) " but got " (.getSimpleName ac) (lit-note info))])
       ;; a reference type. How close the parameter type is to the class of the argument does not choose between
       ;; candidates: Kotlin's specificity rule does (`most-specific`), which compares the parameter types
-      (.isAssignableFrom pc ac) [:ok (if (= pc Object) 3 1)]
+      ;; A Clojure persistent collection implements the java.util interfaces, which are Kotlin's MUTABLE types, but it
+      ;; cannot be changed; so cannot the result of a kt call that Kotlin declares as a read-only List, Set, Map...
+      ;; Taking such a value at a `Mutable*` parameter is a conversion (`:conv`, as the function adapter below and the
+      ;; conversion of a number): `choose` uses that candidate only when no candidate takes the values as they are.
+      (.isAssignableFrom pc ac) (cond-> [:ok (if (= pc Object) 3 1)]
+                                  (and (mutable-kotlin? (:kotlin-type slot))
+                                       (or (:read-only info) (isa? ac clojure.lang.IPersistentCollection)))
+                                  (conj :conv :read-only))
       ;; a function goes to a function type or a `fun interface` through an adapter. For a value that is no function
       ;; itself (a vector, a map, a set, a keyword, a var: all IFn) the adapter is a CONVERSION, like the library's own
       ;; conversion of a number: `choose` uses a candidate that needs one only when no candidate takes the values as
@@ -1013,7 +1026,8 @@
   when the argument is a Clojure function at a function type or a `fun interface` (`function-shape`)."
   [b]
   (let [fit (fn [slot check entry]
-              (assoc slot :conv? (= :conv (nth check 2 nil)) :tier (when (= :ok (first check)) (second check))
+              (assoc slot :conv? (= :conv (nth check 2 nil)) :read-only-conv? (= :read-only (nth check 3 nil))
+                     :tier (when (= :ok (first check)) (second check))
                      :fn-shape (function-shape slot (:info entry))))]
     (loop [sl (slots (:decl b)) items (:items b) checks (:checks b) out {}]
       (if (empty? sl)
@@ -1088,12 +1102,59 @@
 
 (defn- generic? [b] (boolean (seq (:type-params (:decl b)))))
 
+;; What a collection HOLDS. The JVM erases type arguments, so a value does not show them: an ArrayList is an
+;; ArrayList, of numbers or of strings. A candidate whose parameter asks something of them - a type parameter with a
+;; declared bound in a type-argument position (`MutableList<T>` with `T : Number`), one type variable at two
+;; parameters of which one is an invariant position (`a: MutableList<T>, b: MutableList<T>`) - may not take this
+;; value at all, and nothing here can tell. So such a
+;; candidate is never put before one that asks less: two candidates are ordered only on what can be seen.
+
+(defn- unseen-constraints
+  "{written-argument idx -> what the parameter of the candidate `b` that takes it asks of the TYPE ARGUMENTS of the
+  value}, only for the parameters that ask something: a vector with, for each type argument of the parameter type,
+  nil (a type variable without a bound: any value fits; also a star and a concrete type) or [:bound texts] or [:linked].
+  The type parameters that `:<>` gives (`:targs` of the candidate) are known, not unseen. `concrete?`: a concrete type
+  argument counts too, as [:type text] (only where a read-only collection would go to a `Mutable*` parameter: `choose*`)."
+  [b concrete?]
+  (let [d (:decl b)
+        given (when (:targs b) (set (map :name (:type-params d))))
+        bounds (into {} (map (juxt :name :bounds)) (concat (:class-type-params d) (:type-params d)))
+        slots (for [[i s] (entry-slots b) :let [t (:kotlin-type s)] :when t] [i t])
+        positions (fn [t] (when-not (:fn-type t)
+                            (let [vs (when (:class t) (meta/class-variances (:class t)))]
+                              (map-indexed (fn [j a] [a (or (:variance a) (nth vs j :inv))]) (:args t)))))
+        ;; a variable that is at an invariant position and at one more place has to be ONE type at both
+        uses (frequencies (for [[_ t] slots n (concat (when (:type-param t) [(:type-param t)])
+                                                      (keep (comp :type-param first) (positions t)))]
+                            n))
+        invariant (set (for [[_ t] slots [a v] (positions t) :when (and (:type-param a) (= :inv v))] (:type-param a)))
+        ask (fn [[a v]]
+              (let [n (:type-param a)]
+                (cond (:star? a) nil
+                      (and n (contains? given n)) nil
+                      (and n (seq (bounds n))) [:bound (mapv meta/type-text (bounds n))]
+                      (and n (= :inv v) (invariant n) (> (uses n 0) 1)) [:linked]
+                      ;; A CONCRETE type argument (`Collection<Int>`) asks something too, but it is not counted here:
+                      ;; `gl(xs: List<T>)` / `gl(xs: Collection<Int>)` with `[1]` is `Collection<Int>` by an older rule
+                      ;; of this library ("the non-generic one wins"), which its tests assert (doc/limits.md, 18)
+                      (and concrete? (not (and (= "kotlin/Any" (:class a)) (:nullable? a)))) [:type (meta/type-text a)]
+                      :else nil)))]
+    (into {} (for [[i t] slots :let [c (mapv ask (positions t))] :when (some some? c)] [i c]))))
+
 (defn- type-argument-in-play?
   "Do the candidates differ only in a type argument of a parameter? The JVM erased it, so `Iterable<Double>.maxOrNull`
   and the generic `Iterable<T>.maxOrNull` cannot be told apart by a value, and the generic one may be the right one."
   [candidates]
   (boolean (and (erased-same? candidates)
                 (some (fn [b] (some #(seq (:args (:kotlin-type %))) (vals (entry-slots b)))) candidates))))
+
+(defn- may-order?
+  "May the candidates `x` and `y` be ordered at all? Only when, for every written argument, their parameters ask the
+  same of the type arguments of the value (`unseen-constraints`), or nothing. Where one asks more, the other can be the
+  only one that takes the value, or the one that Kotlin would not choose: there is no order, in either direction."
+  [x y]
+  (let [cx (unseen-constraints x false) cy (unseen-constraints y false)]
+    (every? #(= (get cx %) (get cy %)) (distinct (concat (keys cx) (keys cy))))))
 
 (defn- best-shape
   "Of candidates that are equally specific by their parameter types, the one that Kotlin prefers by its shape: one
@@ -1118,6 +1179,7 @@
        shape decides (`best-shape`: no `vararg`, fewer defaults used).
     2. If that chose nothing: the same again, with a function that has no type parameters taken as more specific than
        a generic one, whatever their parameter types (not when only an erased type argument tells them apart).
+  In 1 and 2 a candidate is never put before another one on what the JVM erased (`may-order?`).
     3. If that chose nothing: the same again among the candidates that take a function as a function type, when the
        others take it as a Kotlin `fun interface` (Kotlin: a candidate without SAM conversion is taken first).
   => [the candidate], or the candidates that the call is ambiguous between (those that no other candidate is strictly
@@ -1130,14 +1192,15 @@
       :else
       (let [top (fn [at-least?] (filter (fn [c] (every? #(or (identical? c %) (at-least? c %)) candidates)) candidates))
             choose (fn [at-least?] (let [t (top at-least?)] (if (= 1 (count t)) (first t) (best-shape t))))
-            non-generic-first (fn [x y] (if (= (generic? x) (generic? y)) (at-least-as-specific? x y) (generic? y)))
+            by-types (fn [x y] (and (may-order? x y) (at-least-as-specific? x y)))
+            non-generic-first (fn [x y] (if (= (generic? x) (generic? y)) (by-types x y) (and (generic? y) (may-order? x y))))
             plain (remove sam-conversion candidates)]
-        (if-let [c (or (choose at-least-as-specific?)
+        (if-let [c (or (choose by-types)
                        (when-not (type-argument-in-play? candidates) (choose non-generic-first))
                        (when (< 0 (count plain) (count candidates))
                          (let [r (most-specific plain)] (when (= 1 (count r)) (first r)))))]
           [c]
-          (vec (remove (fn [c] (some #(and (not (identical? c %)) (at-least-as-specific? % c) (not (at-least-as-specific? c %)))
+          (vec (remove (fn [c] (some #(and (not (identical? c %)) (by-types % c) (not (by-types c %)))
                                      candidates))
                        candidates)))))))
 
@@ -1174,7 +1237,7 @@
                                                "no public JVM method (it is `inline`): write it in Clojure")))))]
     (cond
       ;; every candidate needs the library's own conversion of a number (an integer for a Double or a Float...)
-      (every? (fn [b] (some #(and (= :ok (first %)) (= :conv (nth % 2 nil))) (:checks b))) best)
+      (every? (fn [b] (some #(and (= :ok (first %)) (= :conv (nth % 2 nil)) (nil? (nth % 3 nil))) (:checks b))) best)
       (str "\n  Why: every candidate needs a number that the argument is not: kt would have to convert it (an integer "
            "to a Double or a Float, a Long to an Int...), and it cannot choose the target. Kotlin refuses such a call too."
            "\n  Way out: write the number as the type you mean: a floating-point literal (`4.0`) or a conversion "
@@ -1195,7 +1258,14 @@
       (str "\n  Why: these declarations take the same JVM parameter types. They differ only in a type argument "
            "(`Iterable<Int>` or `Iterable<Long>`) or in the result type of a lambda, and the JVM erases both, so a Clojure "
            "value cannot choose between them. kt does not guess."
-           "\n  Way out: call the JVM method of the one you mean with Java interop:\n" (listing)))))
+           "\n  Way out: call the JVM method of the one you mean with Java interop:\n" (listing))
+
+      (some #(seq (unseen-constraints % false)) best)
+      (str "\n  Why: these declarations differ in what a collection holds (the bound of a type parameter such as "
+           "`T : Number` in `MutableList<T>`, or one `T` for two collections). The JVM erases that, so a value does "
+           "not show it, and kt cannot tell which declaration takes this value. kt does not guess."
+           "\n  Way out: give the type arguments with `:<>` when the declaration you mean has type parameters, e.g. `("
+           var-name " x :<> Int)`, or call its JVM method with Java interop:\n" (listing)))))
 
 ;; ---------------------------------------------------------------- choose
 
@@ -1308,6 +1378,20 @@
                             (every? #(or (identical? r %) (contains? (:overrides (:decl %)) id)) viable))))
                    viable))))
 
+(defn- targs-fit-bounds?
+  "Do the type arguments `targs` (resolved types of `:<>`) fit the declared bounds of the type parameters of `decl`, as
+  far as the JVM classes tell (`String` is no `Number`; a nullable type is not within a bound)? What the classes do not
+  tell (`Comparable<T>`) fits."
+  [decl targs]
+  (every? true?
+          (map (fn [tp t]
+                 (every? (fn [b]
+                           (let [^Class jb (some-> (types/jvm-class b) box-class) ^Class jt (some-> (types/jvm-class t) box-class)]
+                             (and (or (:nullable? b) (not (:nullable? t)))
+                                  (or (nil? jb) (nil? jt) (.isAssignableFrom jb jt)))))
+                         (:bounds tp)))
+               (:type-params decl) targs)))
+
 (defn- choose*
   "Pick exactly one declaration (rule 7).
   => {:decl d :items items :checks checks [:tform form]}      one candidate
@@ -1330,7 +1414,10 @@
         args (concat (map :arg (:positional parsed))
                      (mapcat (fn [[n e]] [(keyword n) (:arg e)]) (:named parsed))
                      (when tf [:<> tform]))
-        bound (for [d decls] (assoc (bind d parsed) :decl d))
+        ;; the type arguments that `:<>` gives are known: a declaration whose bound they do not fit is no candidate
+        targs (when tf (try (types/resolve-forms *ns* tform) (catch clojure.lang.ExceptionInfo _ nil)))
+        decls (if targs (let [fit (filter #(targs-fit-bounds? % targs) decls)] (if (seq fit) fit decls)) decls)
+        bound (for [d decls] (cond-> (assoc (bind d parsed) :decl d) targs (assoc :targs targs)))
         failed (filter :error bound)
         ok (filter :items bound)]
     (when (empty? ok)
@@ -1350,8 +1437,30 @@
               {:kt/candidates (map :signature decls) :kt/no-fit true}))
       (let [;; the library's own conversion of a number (an integer to a Double, a Long to an Int...) is the last
             ;; resort: Kotlin accepts no such value, so it counts only when no candidate takes the values as they are
-            conv? (fn [b] (some #(= :conv (nth % 2 nil)) (:checks b)))
-            viable (let [exact (remove conv? viable)] (if (seq exact) exact viable))
+            ;; (a conversion is also a function adapter for a value that is no function, and a `Mutable*` parameter for
+            ;; a read-only collection: `applicability*`.) Of those two kinds, a candidate that converts the arguments
+            ;; that another one converts AND more is dropped too: `removeAll(elements)` on a vector converts the receiver, `removeAll(predicate)`
+            ;; with a vector as the predicate converts the receiver and the argument
+            convs (fn [b] (let [es (entry-slots b)]
+                            {:any? (boolean (some #(= :conv (nth % 2 nil)) (:checks b)))
+                             ;; (not the conversions of numbers: among those the library does not choose)
+                             :idx (set (for [[i s] es :when (and (:conv? s) (or (:read-only-conv? s) (:fn-shape s)))] i))
+                             :read-only (set (for [[i s] es :when (:read-only-conv? s)] i))
+                             :asks (unseen-constraints b true)}))
+            viable (let [cs (mapv (fn [b] [b (convs b)]) viable)]
+                     (map first
+                          (remove (fn [[b cb]]
+                                    (some (fn [[o co]]
+                                            (and (not (identical? o b))
+                                                 (or (and (:any? cb) (not (:any? co)))
+                                                     (and (not= (:idx co) (:idx cb)) (every? (:idx cb) (:idx co))))
+                                                 ;; a read-only collection: the candidate with the `Mutable*` parameter
+                                                 ;; gives way only to one that asks the same of what the collection
+                                                 ;; holds (`MutableList<Int>` to `Iterable<Int>`, not to `Collection<String>`)
+                                                 (every? #(= (get (:asks cb) %) (get (:asks co) %))
+                                                         (remove (:idx co) (:read-only cb)))))
+                                          cs))
+                                  cs)))
             unknown? (fn [b] (some #(= :unknown (first %)) (:checks b)))
             weak? (fn [b] (some #(= [:unknown :upper] %) (:checks b)))
             doubt? (fn [b] (some #(not= :ok (first %)) (:checks b)))
