@@ -372,6 +372,22 @@
 (defn- sig-map [owner static? ^JvmMethodSignature s]
   (when s {:class owner :name (.getName s) :desc (.getDescriptor s) :static? static?}))
 
+(defn- with-access
+  "A JVM member map of a top-level declaration of a multi-file class part (`:class` is the part that really
+  declares the method, `facade` the public class that inherits it). Adds what the call needs to know:
+  `:public?` (the method is public) and, when it is public but the part is not (the usual case: a part is a
+  package-private class), `:call-class` - the facade, through which the public method is called directly (a static
+  method is inherited). A method that is not public (an `@InlineOnly` function is `private` in its part) has no
+  :call-class: the call goes through a bridge (`ckway.bridge`) that looks the method up in :class. A member that
+  the JVM class does not have is returned as it is."
+  [facade {:keys [class name desc] :as jvm}]
+  (if-let [^Method m (and jvm facade (some-> (load-class class) (declared-method name desc)))]
+    (let [pub? (Modifier/isPublic (.getModifiers m))
+          cls-pub? (Modifier/isPublic (.getModifiers (.getDeclaringClass m)))]
+      (cond-> (assoc jvm :public? pub?)
+        (and pub? (not cls-pub?)) (assoc :call-class facade)))
+    jvm))
+
 (defn- field-map [owner static? ^JvmFieldSignature s]
   (when s {:class owner :field (.getName s) :desc (.getDescriptor s) :static? static?}))
 
@@ -462,12 +478,12 @@
 (defn- function-decl
   "ctx = {:owner :tps :dispatch <receiver>|nil :jvm-extra {...}|nil :static? bool :instance-desc str
           :value-self bool}   ; value-self: the members of a value class (see `self-static`)"
-  [{:keys [owner tps dispatch jvm-extra static? instance-desc value-self class-tparams]} ^KmFunction f]
+  [{:keys [owner jvm-owner tps dispatch jvm-extra static? instance-desc value-self class-tparams]} ^KmFunction f]
   (let [tps (merge tps (tparams [(.getTypeParameters f)]))
         sig (JvmExtensionsKt/getSignature f)
         self? (self-static? value-self owner sig)
         static? (or static? self? (jvm-static? value-self owner sig))
-        jvm (some-> (sig-map owner static? sig) (merge jvm-extra))
+        jvm (some->> (some-> (sig-map (or jvm-owner owner) static? sig) (merge jvm-extra)) (with-access (when jvm-owner owner)))
         dtypes (when jvm (:params (desc-types (:desc jvm))))
         dispatch (cond-> dispatch (and self? dtypes) (assoc :jvm-type (first dtypes)))
         vps (.getValueParameters f)
@@ -482,7 +498,8 @@
         ret (km-type tps (.getReturnType f))
         tp (type-params-of tps (.getTypeParameters f))
         flags (cond-> (fn-flags f (:name jvm)) (not dispatch) (conj :static))
-        jvm (when jvm (cond-> jvm (some :default? params) (assoc :default (default-jvm jvm nvalue false instance-desc))))
+        jvm (when jvm (cond-> jvm (some :default? params)
+                              (assoc :default (with-access (when jvm-owner owner) (default-jvm jvm nvalue false instance-desc)))))
         name (.getName f)]
     (cond->
      {:kind :function :name name :var-name (if (seq rcvs) (str "." name) name)
@@ -494,16 +511,18 @@
       (seq class-tparams) (assoc :class-type-params class-tparams))))
 
 (defn- property-decl
-  [{:keys [owner tps dispatch static? field-owner value-self]} ^KmProperty p]
+  [{:keys [owner jvm-owner tps dispatch static? field-owner value-self]} ^KmProperty p]
   (let [tps (merge tps (tparams [(.getTypeParameters p)]))
+        jo (or jvm-owner owner)
+        facade (when jvm-owner owner)
         gsig (JvmExtensionsKt/getGetterSignature p)
         self? (self-static? value-self owner gsig)
-        getter (sig-map owner (or static? self? (jvm-static? value-self owner gsig)) gsig)
+        getter (with-access facade (sig-map jo (or static? self? (jvm-static? value-self owner gsig)) gsig))
         ssig (JvmExtensionsKt/getSetterSignature p)
-        setter (sig-map owner (or static? (jvm-static? value-self owner ssig)) ssig)
+        setter (with-access facade (sig-map jo (or static? (jvm-static? value-self owner ssig)) ssig))
         fsig (JvmExtensionsKt/getFieldSignature p)
-        field (field-map (or field-owner owner)
-                         (boolean (or static? field-owner (and fsig (static-field? owner (.getName fsig)))))
+        field (field-map (or field-owner jo)
+                         (boolean (or static? field-owner (and fsig (static-field? jo (.getName fsig)))))
                          fsig)
         const? (Attributes/isConst p)
         jvm (cond const? field getter getter :else field)
@@ -756,8 +775,11 @@
             own (remove #(contains? inherited-keys (member-key %)) (container-decls (member-ctx binary internal k) k))]
         (concat (class-var-decls ctx k) own inherited)))))
 
-(defn- package-decls [owner ^KmDeclarationContainer pkg]
-  (concat (container-decls {:owner owner :tps {} :dispatch nil :static? true} pkg)
+(defn- package-decls
+  "The declarations of a file facade or of a part of a multi-file class. `owner` is the Kotlin-visible class (for a
+  part: the facade); `jvm-owner` (parts only) is the class that really declares the JVM members."
+  [owner ^KmDeclarationContainer pkg & [jvm-owner]]
+  (concat (container-decls (cond-> {:owner owner :tps {} :dispatch nil :static? true} jvm-owner (assoc :jvm-owner jvm-owner)) pkg)
           (for [^KmTypeAlias a (.getTypeAliases pkg) :when (visible? (Attributes/getVisibility a))]
             (alias-decl owner a))))
 
@@ -769,7 +791,7 @@
         (instance? KotlinClassMetadata$FileFacade m) (package-decls binary (.getKmPackage ^KotlinClassMetadata$FileFacade m))
         (instance? KotlinClassMetadata$MultiFileClassPart m)
         (let [part ^KotlinClassMetadata$MultiFileClassPart m]
-          (package-decls (internal->binary (.getFacadeClassName part)) (.getKmPackage part)))
+          (package-decls (internal->binary (.getFacadeClassName part)) (.getKmPackage part) binary))
         :else []))))
 
 (defn class-members
@@ -838,11 +860,35 @@
   "Documented cache: package name -> index."
   (atom {}))
 
+(defn- same-function?
+  "Are `a` and `b` one Kotlin function (or property)? A function that sits in two parts of one multi-file facade
+  (kotlinx.coroutines 1.11: `runBlocking` in `BuildersKt__BuildersKt`, and its `@JvmName(\"runBlockingK\")` twin of
+  another source set) is two JVM methods but one declaration: same facade, same Kotlin signature."
+  [a b]
+  (and (#{:function :property} (:kind a)) (= (:kind a) (:kind b))
+       (:jvm a) (:jvm b)
+       (= (:owner a) (:owner b)) (= (:signature a) (:signature b))
+       (= (:flags a) (:flags b))
+       (not= (:class (:jvm a)) (:owner a))))
+
+(defn- add-decl
+  "`ds` with the declaration `d` added, unless it is already there or is the same Kotlin function as one that
+  is (see `same-function?`); then the one whose JVM name is the Kotlin name is kept."
+  [ds d]
+  (cond
+    (some #(= d %) ds) ds
+    :else
+    (if-let [i (first (keep-indexed #(when (same-function? d %2) %1) ds))]
+      (if (and (not= (:name (:jvm (nth ds i))) (:name d)) (= (:name d) (:name (:jvm d))))
+        (assoc ds i d)
+        ds)
+      (conj ds d))))
+
 (defn- build-index [pkg]
   (->> (class-names-in pkg)
        (mapcat class-file-decls)
        (mapcat (fn [d] (if (= :alias (:kind d)) (cons d (alias-target-decls d)) [d])))
-       (reduce (fn [m d] (update m (:var-name d) (fn [ds] (if (some #(= d %) ds) ds (conj (or ds []) d)))))
+       (reduce (fn [m d] (update m (:var-name d) #(add-decl (or % []) d)))
                (sorted-map))))
 
 (defn package-index

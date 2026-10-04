@@ -6,6 +6,9 @@
  {;; kotlinx-coroutines, for `suspend` functions. As a top-level dependency it wins over the older
   ;; coroutines that the alias :kotlinc brings.
   :coro {:extra-deps {org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.10.2"}}}
+  ;; the newest kotlinx-coroutines, whose `runBlocking` is in two parts of its multi-file facade (bin/test runs the
+  ;; coroutine tests again with it). Put it after :coro: override-deps wins over every other version.
+  :coro-next {:override-deps {org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.11.0"}}}
   :test {:extra-paths ["test" "target/fixtures"]
          :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :main-opts ["-m" "cognitect.test-runner"]}

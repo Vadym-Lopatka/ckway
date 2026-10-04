@@ -15,7 +15,7 @@
   (:require [ckway.co :as co]
             [ckway.resolve :as r])
   (:import [java.lang.reflect Method Constructor Field Array InvocationTargetException Proxy InvocationHandler]
-           [java.lang.invoke MethodType]
+           [java.lang.invoke MethodHandle MethodHandles MethodType]
            [java.util Arrays]
            [java.util.concurrent ConcurrentHashMap]))
 
@@ -418,6 +418,35 @@
         :fn (adapt-arg {:kind :fn :iface (str "kotlin.jvm.functions.Function" (fn-iface-arity td)) :td td} v)
         :fi (adapt-arg (r/fi-spec (:class td) (:class td)) v)
         (check-obj td v)))))
+
+;; ---------------------------------------------------------------- JVM members of a class that no bridge can name
+
+(def ^:private handle-cache
+  "Documented cache: [static? class name desc] -> MethodHandle."
+  (ConcurrentHashMap.))
+
+(defn jvm-handle
+  "The MethodHandle of the JVM method `cname`.`mname``desc`, found with a private lookup, so a non-public method and a
+  method of a package-private class (a part of a Kotlin multi-file class, `StringsKt__StringsJVMKt`) work. A bridge
+  class (`ckway.bridge`) cannot name such a class; emitted code calls this instead (`call-jvm`). Cached."
+  ^MethodHandle [static? ^String cname ^String mname ^String desc]
+  (let [^ConcurrentHashMap cache handle-cache
+        k [static? cname mname desc]]
+    (or (.get cache k)
+        (let [^Class c (r/jvm-class cname)
+              lk (MethodHandles/privateLookupIn c (MethodHandles/lookup))
+              mt (MethodType/fromMethodDescriptorString desc (clojure.lang.RT/baseLoader))
+              mh (if static? (.findStatic lk c mname mt) (.findVirtual lk c mname mt))
+              ;; a method with `Object...` is a variable-arity handle: invoked with Object arguments, it would
+              ;; wrap the array that the call already passes
+              mh (.asFixedArity mh)]
+          (.put cache k mh)
+          mh))))
+
+(defn call-jvm
+  "Call the MethodHandle `mh` (`jvm-handle`) with the vector `args` (the receiver first for a virtual method)."
+  [^MethodHandle mh args]
+  (.invokeWithArguments mh ^java.util.List args))
 
 ;; ---------------------------------------------------------------- reflection
 

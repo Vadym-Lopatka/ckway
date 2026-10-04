@@ -423,7 +423,7 @@
          :role (:role r)
          :class (or (value-class-of t)
                     (jvm-class (if (= :dispatch (:role r)) (:owner decl) (or (:jvm-type r) (kt-class-of t)))))
-         :nullable? (:nullable? t) :companion-of (:companion-of r)})
+         :nullable? (:nullable? t) :companion-of (:companion-of r) :kotlin-type t})
       (for [p (:params decl)
             :let [t (:type p)]]
         {:name (:name p) :class (or (value-class-of t) (jvm-class (:jvm-type p))) :nullable? (nullable-type? decl t)
@@ -675,6 +675,56 @@
   (when-let [feature (some #(when (= :adapter (first %)) (second %)) checks)]
     (not-supported feature decl)))
 
+;; ---------------------------------------------------------------- Kotlin specificity
+
+(defn- mutable-kotlin? [t] (boolean (some-> (:class t) (str/includes? "/Mutable"))))
+
+(defn- slot-subtype?
+  "Is a value of the parameter slot `sx` always accepted where `sy` is declared (Kotlin: `sx` is a subtype of `sy`)?
+  `T` is a subtype of `T?`; the JVM classes decide the rest, plus Kotlin's mapped types: `MutableList` is a subtype
+  of `List`, not the other way round, though both are java.util.List. A type that is no class (`T`) is `Any?`."
+  [sx sy]
+  (let [cx (or (some-> ^Class (:class sx) box-class) Object)
+        cy (or (some-> ^Class (:class sy) box-class) Object)
+        kx (:kotlin-type sx) ky (:kotlin-type sy)]
+    (boolean
+     (and (or (:nullable? sy) (not (:nullable? sx)))
+          (.isAssignableFrom cy cx)
+          ;; a read-only Kotlin collection is not a subtype of a mutable one
+          (not (and (mutable-kotlin? ky) (not (mutable-kotlin? kx)) (:class kx)))))))
+
+(defn- entry-slots
+  "{entry-idx slot} of the written arguments of the candidate `b` ({:decl :items}) that Kotlin compares when it
+  chooses the most specific candidate: the extension and context receivers and the parameters (the dispatch
+  receiver is the same object for every member and does not count). An element of a `vararg` has the slot of its
+  element type. A collection passed as a whole (`:vararg-coll`) is not compared."
+  [b]
+  (into {}
+        (mapcat (fn [slot item]
+                  (cond
+                    (= :dispatch (:role slot)) []
+                    (:vararg item) (map (fn [e] [(:idx e) (vararg-slot slot)]) (:vararg item))
+                    (or (:omitted item) (:vararg-coll item)) []
+                    :else [[(:idx item) slot]]))
+                (slots (:decl b)) (:items b))))
+
+(defn- at-least-as-specific?
+  "Kotlin: candidate `x` is at least as specific as `y` when each parameter of `x` that takes a written argument
+  has a type that is a subtype of the type of the parameter of `y` that takes the same argument."
+  [x y]
+  (let [sx (entry-slots x) sy (entry-slots y)]
+    (every? (fn [[i s]] (if-let [t (get sy i)] (slot-subtype? s t) true)) sx)))
+
+(defn most-specific
+  "Of the candidates (maps with :decl and :items) the one that is more specific than all others, in the sense of
+  Kotlin (see `at-least-as-specific?`): the candidates that are at least as specific as every other one; all of
+  them when none is."
+  [candidates]
+  (if (< (count candidates) 2)
+    candidates
+    (let [top (filter (fn [c] (every? #(or (identical? c %) (at-least-as-specific? c %)) candidates)) candidates)]
+      (if (seq top) (vec top) candidates))))
+
 ;; ---------------------------------------------------------------- choose
 
 (defn- reasons-text [var-name args rejected]
@@ -778,9 +828,19 @@
               {:kt/candidates (map :signature decls)}))
       (let [unknown? (fn [b] (some #(= :unknown (first %)) (:checks b)))
             weak? (fn [b] (some #(= [:unknown :upper] %) (:checks b)))
-            ;; a candidate that fits the compile-time types for sure beats one that only could fit
+            doubt? (fn [b] (some #(not= :ok (first %)) (:checks b)))
+            ;; Kotlin: an applicable member always wins over an extension. Only when a member fits for sure; a
+            ;; member that only could fit is left to the run time, which knows the classes.
+            viable (if (some #(and (member? (:decl %)) (not (doubt? %))) viable)
+                     (filter (comp member? :decl) viable)
+                     viable)
+            ;; a candidate that fits the compile-time types for sure beats one that only could fit (but not an
+            ;; extension over a member that could fit: that is the run time's to decide)
             viable (let [sure (remove unknown? viable)]
-                     (if (and (seq sure) (some weak? viable)) sure viable))
+                     (if (and (seq sure) (some weak? viable)
+                              (or (every? (comp member? :decl) sure) (not-any? (comp member? :decl) (filter weak? viable))))
+                       sure
+                       viable))
             result (fn [b] (cond-> (select-keys b [:decl :items :checks]) tf (assoc :tform tform)))]
         (if (= 1 (count viable))
           (result (first viable))
@@ -790,11 +850,19 @@
                   best (if (and (> (count best) 1) (some (comp member? :decl) best))
                          (filter (comp member? :decl) best)
                          best)
-                  ;; Kotlin: of two equally specific candidates, the one that needs no default value wins
-                  best (if (> (count best) 1)
-                         (let [no-defaults (remove (fn [b] (some :omitted (:items b))) best)]
-                           (if (seq no-defaults) no-defaults best))
-                         best)
+                  ;; Kotlin: the most specific candidate by parameter types
+                  best (most-specific best)
+                  ;; then, of equally specific candidates: no vararg, not generic, no default value needed
+                  prefer (fn [best keep?] (if (> (count best) 1)
+                                            (let [k (filter keep? best)] (if (seq k) k best))
+                                            best))
+                  best (prefer best (fn [b] (not-any? :vararg? (:params (:decl b)))))
+                  ;; (not when a type argument is in play: the JVM erased it, so `Iterable<Double>.maxOrNull` and
+                  ;; the generic `Iterable<T>.maxOrNull` cannot be told apart by a value, and the generic one may be right)
+                  best (if (some (fn [b] (some #(seq (:args (:kotlin-type %))) (vals (entry-slots b)))) best)
+                         best
+                         (prefer best (fn [b] (empty? (:type-params (:decl b))))))
+                  best (prefer best (fn [b] (not-any? :omitted (:items b))))
                   best (if (> (count best) 1) (drop-overridden best) best)]
               (if (= 1 (count best))
                 (result (first best))
@@ -874,6 +942,10 @@
         desc (if (= :property (:kind decl)) (:desc (:getter decl)) (:desc jvm))
         ret-vc (return-conv decl)]
     (cond-> (assoc p :desc desc :sig (:signature decl))
+      ;; a public method of a multi-file class part is called through the public facade that inherits it
+      (and (#{:static :virtual} (:op p))
+           (:call-class (if (= :property (:kind decl)) (:getter decl) jvm)))
+      (assoc :call-class (:call-class (if (= :property (:kind decl)) (:getter decl) jvm)))
       companion? (update :ignored (fnil conj []) disp-item)
       ;; a @JvmStatic member of an object is a static JVM method: its receiver is evaluated, not passed
       (and (not companion?) disp-item (= :static (:op p))
@@ -978,7 +1050,9 @@
       "double" [`(double ~(checked-form "java.lang.Number" form info site)) nil]
       "float" [`(float ~(checked-form "java.lang.Number" form info site)) nil]
       "char" [`(char ~(checked-form "java.lang.Character" form info site)) nil]
-      "boolean" [(checked-form "java.lang.Boolean" form info site) "java.lang.Boolean"]
+      ;; the primitive boolean, so that a (boolean) and a (Boolean) overload are told apart
+      "boolean" (let [b (with-meta (gensym "b") {:tag 'java.lang.Boolean})]
+                  [`(let [~b ~(checked-form "java.lang.Boolean" form info site)] (.booleanValue ~b)) nil])
       (cond
         (boxed-names jt) [`(ckway.rt/box ~jt ~form) jt]
         ;; a number literal or primitive local would stay primitive; box it so overloads resolve
@@ -988,7 +1062,7 @@
 (defn- zero-form [jt]
   (case jt
     "int" `(int 0) "long" `(long 0) "short" `(short 0) "byte" `(byte 0) "double" `(double 0)
-    "float" `(float 0) "char" `(char 0) "boolean" false nil))
+    "float" `(float 0) "char" `(char 0) "boolean" `(boolean false) nil))
 
 (defn- bridge-sym
   "Symbol of the bridge class for the JVM member `m` ({:class :name :desc :static?})."
@@ -1219,20 +1293,45 @@
         by-idx (cond-> (into {} (map (fn [[i s _]] [i s]) binds)) ksym (assoc ::k ksym))
         tgt (when target-ent (get by-idx (:idx target-ent)))
         ;; omitted reference parameters are typed nil locals, so same-arity overloads still resolve
-        holders (for [a (:args p)
-                      :let [jt (cond (and (:zero a) (not (contains? prim-classes (:zero a)))) (:zero a)
-                                     (:marker a) (when (= :new (:op p)) "kotlin.jvm.internal.DefaultConstructorMarker"))]
-                      :when (and jt (not= "java.lang.Object" jt))]
+        ;; The JVM parameter types, from the descriptor: the plan's arguments are its parameters, one for one. Every
+        ;; slot that is not a written argument (nil placeholder, marker, vararg array) gets a local with that exact
+        ;; type, so the Clojure compiler finds the one method (an exact match) and never falls back to reflection.
+        ptypes (when (and (#{:static :new} (:op p)) (:desc p))
+                 (let [ts (:params (meta/desc-types (:desc p)))] (when (= (count ts) (count (:args p))) ts)))
+        slot-type (fn [i a] (or (nth ptypes i nil)
+                                (cond (:zero a) (:zero a)
+                                      (:marker a) (when (= :new (:op p)) "kotlin.jvm.internal.DefaultConstructorMarker")
+                                      :else (:jvm-type a))))
+        holders (for [[i a] (map-indexed vector (:args p))
+                      :let [jt (when (or (:marker a) (and (:zero a) (not (contains? prim-classes (:zero a))))) (slot-type i a))]
+                      :when jt]
                   [a (tagged "z" jt)])
         holder-of (into {} holders)
-        args (map #(or (holder-of %) (arg-form by-idx %)) (:args p))
-        cls (sym (:class p))
+        ;; a vararg array is a local with the exact array type of the parameter
+        arrays (for [[i a] (map-indexed vector (:args p))
+                     :when (or (:vararg a) (:vararg-coll a))]
+                 [a (tagged "v" (slot-type i a)) (arg-form by-idx a)])
+        array-of (into {} (map (fn [[a s _]] [a s]) arrays))
+        args (map #(or (holder-of %) (array-of %) (arg-form by-idx %)) (:args p))
+        cls (sym (or (:call-class p) (:class p)))
         bridge-of (when (and (#{:static :virtual} (:op p))
-                             (bridge/needed? {:kind (:op p) :class (:class p) :name (:name p) :desc (:desc p)}))
+                             (if (:call-class p)
+                               (not (bridge/clojure-name? (:name p)))
+                               (bridge/needed? {:kind (:op p) :class (:class p) :name (:name p) :desc (:desc p)})))
                     (bridge-sym {:class (:class p) :name (:name p) :desc (:desc p) :static? (= :static (:op p))}))
+        ;; a class that is not public (a part of a multi-file class) cannot be named by a bridge class
+        hidden-class? (and (#{:static :virtual} (:op p)) (not (:call-class p))
+                           (let [c (jvm-class (:class p))] (and c (not (Modifier/isPublic (.getModifiers ^Class c))))))
+        handle (when hidden-class?
+                 `(ckway.rt/jvm-handle ~(= :static (:op p)) ~(:class p) ~(:name p) ~(:desc p)))
+        bridge-of (when-not hidden-class? bridge-of)
         call (case (:op p)
-               :static (if bridge-of `(. ~bridge-of (~'call ~@args)) `(. ~cls (~(sym (:name p)) ~@args)))
-               :virtual (if bridge-of `(. ~bridge-of (~'call ~tgt ~@args)) `(. ~tgt (~(sym (:name p)) ~@args)))
+               :static (cond handle `(ckway.rt/call-jvm ~handle [~@args])
+                             bridge-of `(. ~bridge-of (~'call ~@args))
+                             :else `(. ~cls (~(sym (:name p)) ~@args)))
+               :virtual (cond handle `(ckway.rt/call-jvm ~handle [~tgt ~@args])
+                              bridge-of `(. ~bridge-of (~'call ~tgt ~@args))
+                              :else `(. ~tgt (~(sym (:name p)) ~@args)))
                :new `(new ~cls ~@args)
                :get-static `(. ~cls ~(sym (str "-" (:field p))))
                :get-field `(. ~tgt ~(sym (str "-" (:field p))))
@@ -1244,8 +1343,9 @@
                (:unit? p) `(ckway.rt/unit->nil ~call)
                (:ret-td p) `(ckway.rt/<-kotlin ~(:ret-td p) ~call)
                :else call)]
-    (if (or (seq binds) (seq holders) ksym)
+    (if (or (seq binds) (seq holders) (seq arrays) ksym)
       `(let [~@(mapcat (fn [[_ s f]] [s f]) binds) ~@(mapcat (fn [[_ s]] [s nil]) holders)
+             ~@(mapcat (fn [[_ s f]] [s f]) arrays)
              ~@(when ksym [ksym `(ckway.co/continuation)])]
          ~call)
       call)))
