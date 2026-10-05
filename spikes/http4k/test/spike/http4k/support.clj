@@ -1,9 +1,9 @@
 (ns spike.http4k.support
   "Helpers for the tests: build a request, read a response, capture the log."
   (:require [ckway.core :as kt]
-            [clojure.data.json :as json]
-            [spike.http4k.api :as api])
-  (:import [org.http4k.core Method Request Response]))
+            [clojure.data.json :as json])
+  (:import [kotlin.jvm.functions Function1]
+           [org.http4k.core Method Request Response]))
 
 (set! *warn-on-reflection* true)
 
@@ -19,8 +19,8 @@
 (defn handle
   "Call the handler in memory, as http4k tests do. No socket. Returns a plain map."
   ([handler method uri] (handle handler method uri nil))
-  ([handler method uri body]
-   (let [^Response resp (api/call handler (if body (request method uri body) (request method uri)))
+  ([^Function1 handler method uri body]
+   (let [^Response resp (h/.invoke handler (if body (request method uri body) (request method uri)))
          text (h/.bodyString resp)]
      {:status (h/code (h/status resp))
       :body-text text

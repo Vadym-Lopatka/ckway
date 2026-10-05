@@ -60,11 +60,12 @@ The `:kotlinc` alias is there only for a `:<>` call. This spike has none, so it 
 | `routes(a, b, c)` | `(r/routes a b c)`; with one argument it is an "ambiguous" error, use `(r/routes :list [a])` |
 | `Path.int().of("id")` | `(l/.of (l/.int l/Path) "id")` |
 | `Query.optional("tag")` | `(l/.optional l/Query "tag")` |
-| `idLens(request)` | `(.invoke ^org.http4k.lens.LensExtractor id-lens request)` (Java interop; `l/.invoke` is ambiguous) |
+| `idLens(request)` | `(l/.invoke ^org.http4k.lens.LensExtractor id-lens request)` |
 | `Filter { next -> { req -> ... } }` | `(kt/reify h/Filter (.invoke [_ next] (fn [req] ...)))` |
 | `Filter.NoOp` | `(h/NoOp h/Filter)` |
 | `a.then(b)` (Filter, handler) | `(h/.then filter handler)` |
-| `handler(request)` | `(h/.invoke handler request)` (hint the local: `^kotlin.jvm.functions.Function1`) |
+| `handler(request)` | `(h/.invoke handler request)` (hint the local `^kotlin.jvm.functions.Function1`; a handler is not callable as `(handler request)`) |
+| `next(request)` inside `Filter` | `(next request)` (a Clojure fn) |
 | `handler.asServer(SunHttp(port))` | `(srv/.asServer handler (srv/SunHttp (int port)))` |
 | `server.start()` | `(srv/.start server)` |
 | `server.port()` | `(srv/.port server)` |

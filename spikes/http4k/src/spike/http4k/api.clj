@@ -15,14 +15,9 @@
 
 ;; ## Small helpers
 
-;; Kotlin: handler(request)
-;; An HttpHandler is a Kotlin function type, and a RoutingHttpHandler is a class that implements it, so `.invoke` is its call.
-(defn call ^Response [^Function1 handler ^Request request]
-  (h/.invoke handler request))
-
 ;; Kotlin: Filter { next -> { request -> next(request) } }
-;; Filter(fn) is an inline function and has no JVM method (FINDINGS 5). kt/reify of the interface works,
-;; and the member can return a plain Clojure fn.
+;; Filter(fn) is an inline function and has no JVM method (FINDINGS 5). kt/reify of the interface works.
+;; Inside it, `next` is a Clojure fn, and the member can return a plain Clojure fn.
 (defn- filter* ^org.http4k.core.Filter [wrap]
   (kt/reify h/Filter
     (.invoke [_ next] (wrap next))))
@@ -74,7 +69,7 @@
   "The id path parameter as a long. A bad number throws LensFailure."
   [^Request req]
   ;; Kotlin: id(request)
-  (long (.invoke ^org.http4k.lens.LensExtractor id-lens req)))
+  (long (l/.invoke ^org.http4k.lens.LensExtractor id-lens req)))
 
 ;; ## Handlers
 
@@ -83,7 +78,7 @@
 
 (defn- list-products [store]
   (fn [^Request req]
-    (let [tag (.invoke ^org.http4k.lens.LensExtractor tag-lens req)
+    (let [tag (l/.invoke ^org.http4k.lens.LensExtractor tag-lens req)
           items (domain/all-products store)]
       (response OK (if tag
                      (filterv #(some #{tag} (:tags %)) items)
@@ -138,7 +133,7 @@
    (fn [next]
      (fn [^Request req]
        (let [t0 (System/nanoTime)
-             resp (call next req)]
+             resp (next req)]
          (log-fn (format "%s %s -> %d (%d ms)"
                          (h/method req) (h/uri req) (status-code resp)
                          (quot (- (System/nanoTime) t0) 1000000)))
@@ -157,7 +152,7 @@
    (fn [next]
      (fn [req]
        (try
-         (call next req)
+         (next req)
          (catch LensFailure e
            (error-response BAD_REQUEST (str "invalid request: " (ex-message e))))
          (catch Throwable e
@@ -170,7 +165,7 @@
   (filter*
    (fn [next]
      (fn [req]
-       (let [resp (call next req)
+       (let [resp (next req)
              code (status-code resp)]
          (if (and (#{404 405} code) (empty? (h/.bodyString resp)))
            (with-json resp {:error (if (= 404 code) "not found" "method not allowed")})

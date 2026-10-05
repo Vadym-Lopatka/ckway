@@ -10,7 +10,8 @@
 (set! *warn-on-reflection* true)
 
 (kt/require '[org.http4k.core :as h]
-            '[org.http4k.routing :as r])
+            '[org.http4k.routing :as r]
+            '[org.http4k.lens :as l])
 
 (def ^:private OK (h/OK h/Status))
 
@@ -46,9 +47,9 @@
                    (catch Throwable e (ex-message (or (ex-cause e) e))))]
       (is (some? msg))
       (is (str/includes? msg "ambiguous"))
-      (is (str/includes? msg "(routes :list ...)") "the way out for the function")
+      (is (str/includes? msg "(r/routes :list ...)") "the way out for the function")
       (is (str/includes? msg "a function and a property are both named `routes`"))
-      (is (str/includes? msg "((kt/ref X routes) x)") "the way out for the property"))))
+      (is (str/includes? msg "((kt/ref r/RoutingHandler routes) x)") "the way out for the property"))))
 
 (deftest row-6-reify-returns-a-plain-fn
   (let [filter (kt/reify h/Filter
@@ -64,3 +65,26 @@
 (deftest row-8-literal-receiver-is-static
   ;; Compiling this file with *warn-on-reflection* shows no warning; here we check the value.
   (is (instance? RoutingHttpHandler (r/.to (r/.bind "/health" h/Method.GET) (fn [_] (h/Response OK))))))
+
+(deftest row-9-lens-invoke
+  ;; l/.invoke with the LensExtractor hint is static (no reflection warning when this file compiles).
+  ;; With a hint of the subclass BiDiPathLens, or no hint, it is the dynamic path (a warning, same result).
+  (let [lens (l/.of (l/.int l/Path) "id")
+        seen (atom nil)
+        ^RoutingHttpHandler handler
+        (r/.to (r/.bind "/q/{id}" h/Method.GET)
+               (fn [req]
+                 (reset! seen (l/.invoke ^org.http4k.lens.LensExtractor lens req))
+                 (h/Response OK)))]
+    (h/.invoke handler (h/Request h/Method.GET "/q/12"))
+    (is (= 12 @seen))
+    (is (instance? Integer @seen))
+    (is (thrown? org.http4k.lens.LensFailure
+                 (h/.invoke handler (h/Request h/Method.GET "/q/abc"))))))
+
+(deftest nil-from-a-variable-is-a-kt-error
+  (let [^String v (identity nil)
+        msg (try (h/Request h/Method.GET v) nil
+                 (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+    (is (some? msg))
+    (is (str/includes? msg "nil where Kotlin expects a non-null String (the argument `uri` (String))"))))
