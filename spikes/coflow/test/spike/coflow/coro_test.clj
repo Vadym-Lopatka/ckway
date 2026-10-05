@@ -7,7 +7,8 @@
             [spike.coflow.arms :as arms]
             [spike.coflow.chan :as cc]
             [spike.coflow.flow :as flow]
-            [spike.coflow.impl :as impl])
+            [spike.coflow.impl :as impl]
+            [spike.coflow.ext :as ext])
   (:import [java.lang.management ManagementFactory]
            [java.util.concurrent.atomic AtomicInteger]))
 
@@ -41,6 +42,7 @@
     ;; the pump of the report chan is a coroutine of the scope too: take something from it
     (flow/ping g)
     (is (true? (flow/stop g)))
+    (is (true? (ext/await-stopped g 10000)) "the reaper is done")
     (is (co/isCompleted job) "the Job of the scope is completed: no coroutine is active")
     (is (not (co/isActive job)))
     (is (nil? (impl/flow-scope g)) "no scope when not running")
@@ -51,6 +53,7 @@
             taker (future (a/<!! report-chan))]
         (flow/stop g)
         (is (nil? (deref taker 3000 :hang)) "the take of a closed channel returns nil")
+        (is (true? (ext/await-stopped g 10000)))
         (is (co/isCompleted job))))))
 
 (deftest failed-start-leaves-no-coroutine
@@ -65,15 +68,18 @@
     (is (thrown-with-msg? Exception #"flow not running" (flow/pause g)))))
 
 (deftest start-stop-50-flows-no-thread-growth
-  (let [cycle (fn [] (let [g (pipeline)]
+  (let [gs (atom [])
+        cycle (fn [] (let [g (pipeline)]
                        (flow/start g) (flow/resume g)
                        @(flow/inject g [:a :in] [1 2 3])
                        (flow/ping g :timeout-ms 2000)
-                       (flow/stop g)))
+                       (flow/stop g)
+                       (swap! gs conj g)))
         _ (dotimes [_ 5] (cycle))                         ;; warm up: pools, class loading
         before (platform-threads)
         active-before (Thread/activeCount)
         _ (dotimes [_ 50] (cycle))
+        _ (is (every? #(ext/await-stopped % 10000) @gs) "every reaper ends")
         after (platform-threads)
         active-after (Thread/activeCount)]
     (println "[threads] 50 start/stop cycles: platform threads" before "->" after
@@ -100,7 +106,9 @@
     (is (< (- during before) 40) "1000 idle procs do not hold 1000 platform threads")
     (let [t3 (System/nanoTime)]
       (is (true? (flow/stop g)))
-      (println (format "[1000 idle procs] stop %d ms" (long (/ (- (System/nanoTime) t3) 1e6)))))
+      (println (format "[1000 idle procs] stop returned after %d ms" (long (/ (- (System/nanoTime) t3) 1e6))))
+      (is (true? (ext/await-stopped g 20000)))
+      (println (format "[1000 idle procs] cleanup (reaper) done after %d ms" (long (/ (- (System/nanoTime) t3) 1e6)))))
     (is (co/isCompleted job))
     (is (nil? (rd error-chan 50)))))
 
@@ -155,8 +163,8 @@
         g (flow/create-flow {:procs {:p {:proc (flow/process step)}} :conns []})]
     (flow/start g) (flow/resume g)
     (flow/stop g)
-    (is (realized? stopped) "the stop transition ran before stop returned")
-    (is (true? @stopped) "and it ran on a virtual thread (the body of a coroutine)")))
+    (is (true? (deref stopped 5000 :never)) "the stop transition ran, on a virtual thread (the body of a coroutine)")
+    (is (true? (ext/await-stopped g 5000)))))
 
 (deftest stop-with-a-step-fn-that-never-returns-cancels-after-the-grace-time
   (System/setProperty "coflow.stop.grace.ms" "300")
@@ -174,8 +182,10 @@
         (let [t0 (System/nanoTime)]
           (is (true? (flow/stop g)))
           (let [ms (long (/ (- (System/nanoTime) t0) 1e6))]
-            (println (format "[stop] a stuck step fn: stop returned after %d ms (grace 300 ms, then cancel)" ms))
-            (is (< ms 4000)))
+            (is (< ms 200) "stop returns at once")
+            (is (true? (ext/await-stopped g 5000)))
+            (println (format "[stop] a stuck step fn: stop returned after %d ms; the reaper cancelled it after the grace time of 300 ms (cleanup done after %d ms)"
+                             ms (long (/ (- (System/nanoTime) t0) 1e6)))))
           (is (co/isCompleted job)))))
     (finally (System/clearProperty "coflow.stop.grace.ms"))))
 

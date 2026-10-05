@@ -73,25 +73,28 @@
             (is (true? v)) (is (identical? p port))
             (is (= "put-by-alts" (a/<!! p)))))))))
 
-(deftest no-value-is-lost-when-alts-takes-another-branch
+(deftest no-value-is-lost-or-doubled-when-alts-takes-another-branch
   ;; the hard case of the port: a take that waits on two channels. Whatever branch wins, a value that arrives
-  ;; at the other one must stay in it. 4 consumers use alts!! on [port other]; 1 producer fills both; everything arrives once.
+  ;; at the other one must stay in it, and a value goes to one taker only. 4 consumers use alts!! on [port other];
+  ;; 1 producer fills both; everything arrives exactly once. Repeated: a double delivery (found once in three
+  ;; suite runs, fixed in deliver!) showed up in about one round of two.
   (with-scope
     (fn [scope]
-      (let [p (cc/port scope 4) o (a/chan 4) n 4000 got (atom [])
-            done (promise)
-            consumers (mapv (fn [_] (future (loop []
-                                              (let [[v port] (a/alts!! [p o (a/timeout 1500)])]
-                                                (when (some? v)
-                                                  (swap! got conj v)
-                                                  (when (= n (count @got)) (deliver done true))
-                                                  (recur))))))
-                            (range 4))
-            producer (future (dotimes [i n] (if (even? i) (a/>!! p i) (a/>!! o i))))]
-        @producer
-        (is (true? (deref done 20000 false)))
-        (run! deref consumers)
-        (is (= (range n) (sort @got)) "every value once")))))
+      (dotimes [round 12]
+        (let [p (cc/port scope 4) o (a/chan 4) n 4000 got (atom [])
+              done (promise)
+              consumers (mapv (fn [_] (future (loop []
+                                                (let [[v port] (a/alts!! [p o (a/timeout 1500)])]
+                                                  (when (some? v)
+                                                    (swap! got conj v)
+                                                    (when (= n (count @got)) (deliver done true))
+                                                    (recur))))))
+                              (range 4))
+              producer (future (dotimes [i n] (if (even? i) (a/>!! p i) (a/>!! o i))))]
+          @producer
+          (is (true? (deref done 20000 false)))
+          (run! deref consumers)
+          (is (= (range n) (sort @got)) (str "every value once, round " round)))))))
 
 (deftest sliding-and-dropping-buffers
   (with-scope

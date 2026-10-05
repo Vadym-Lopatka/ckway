@@ -106,7 +106,7 @@
 ;; ---------------------------------------------------------------------------------------------------------------
 ;; the port
 
-(declare ensure-pump! ensure-put-pump! xf-close! try-put-now)
+(declare ensure-pump! ensure-put-pump! xf-close! try-put-now received!)
 
 (deftype KPort [^Channel ch                        ;; the Kotlin channel
                 spec                               ;; buffer-spec
@@ -125,7 +125,8 @@
                 ;; putters (core.async side)
                 ^ConcurrentLinkedQueue putters
                 ^AtomicBoolean putting
-                ^AtomicReference put-job]
+                ^AtomicReference put-job
+                ^Channel put-wake]                 ;; conflated: room may exist now (a receive happened), or the port closed
   impl/ReadPort
   (take! [p handler]
     (let [^Lock h handler]
@@ -136,7 +137,6 @@
             st
             (when (commit-now h)
               (.set stash nil)
-              (.decrementAndGet cnt)
               ;; Kotlin: wake.trySend(Unit)
               (kch/.trySend wake true)
               (box (nth st 0)))
@@ -159,7 +159,7 @@
                             ;; Kotlin: ch.tryReceive()
                             (let [r (kch/.tryReceive ch)]
                               (cond
-                                (kch/isSuccess r) (do (impl/commit h) (.decrementAndGet cnt) (box (kch/.getOrNull r)))
+                                (kch/isSuccess r) (do (impl/commit h) (received! p) (box (kch/.getOrNull r)))
                                 (kch/isClosed r) (do (impl/commit h) (box nil))
                                 :else ::empty)))
                           (finally (.unlock h)))]
@@ -204,9 +204,14 @@
        :take-count (.size takers)
        :closed? (kch/isClosedForSend ch)
        :buffer {:type (:type spec)
-                :count (long (max 0 (min (.get cnt) (:capacity spec))))
+                :count (long (max 0 (min (+ (.get cnt) (if (some? (.get stash)) 1 0)) (:capacity spec))))
                 :capacity (:capacity spec)}}
       {::datafy/obj this})))
+
+(defmacro ^:private with-plock [p & body]
+  `(let [^ReentrantLock l# (.-plock ~(with-meta p {:tag 'spike.coflow.chan.KPort}))]
+     (.lock l#)
+     (try ~@body (finally (.unlock l#)))))
 
 (defn kotlin-channel
   "The raw kotlinx.coroutines Channel behind a port."
@@ -239,7 +244,9 @@
              ;; Kotlin: Channel<Unit>(Channel.CONFLATED)
              (kch/Channel (kch/CONFLATED kch/Channel))
              (AtomicReference. nil)
-             (ConcurrentLinkedQueue.) (AtomicBoolean. false) (AtomicReference. nil)))))
+             (ConcurrentLinkedQueue.) (AtomicBoolean. false) (AtomicReference. nil)
+             ;; Kotlin: Channel<Unit>(Channel.CONFLATED)
+             (kch/Channel (kch/CONFLATED kch/Channel))))))
 
 ;; --- writing from Clojure (internal use of the flow, and helpers) -------------------------------------------
 
@@ -259,15 +266,48 @@
         (finally (.unlock l))))
     [[v] false]))
 
+(defn- drop-mode? [^KPort p] (contains? #{:drop-oldest :drop-latest} (:overflow (.-spec p))))
+
+(defn raw-try-send!
+  "Sends one value to the Kotlin channel if there is room now. Returns :ok, :full or :closed.
+  `cnt` counts the items of the Kotlin channel (never more than the capacity for the dropping modes).
+  The value that a pump holds for a taker that gave up (the stash) counts as one slot of the capacity: when the
+  buffer plus the stash is full, a sliding port drops the stash (the oldest item) and a dropping port drops the new item.
+  So the port never holds more than its capacity, as a core.async channel does."
+  [^KPort p v]
+  (with-plock p
+    (let [{:keys [capacity overflow]} (.-spec p)
+          ^AtomicLong cnt (.-cnt p)
+          ^AtomicReference stash (.-stash p)]
+      (if (and (contains? #{:drop-oldest :drop-latest} overflow)
+               (some? (.get stash))
+               (>= (.get cnt) (dec capacity)))
+        (if (= overflow :drop-oldest)
+          (do (.set stash nil) ;; the oldest item goes
+              (if (kch/isClosedForSend (.-ch p)) :closed (do (kch/.trySend (.-ch p) v) (.incrementAndGet cnt) :ok)))
+          :ok) ;; drop-latest: the new item is dropped
+        ;; Kotlin: ch.trySend(v)
+        (let [r (kch/.trySend (.-ch p) v)]
+          (cond
+            (kch/isSuccess r) (do (if (contains? #{:drop-oldest :drop-latest} overflow)
+                                    (loop [] (let [n (.get cnt)]
+                                               (when-not (.compareAndSet cnt n (min capacity (inc n))) (recur))))
+                                    (.incrementAndGet cnt))
+                                  :ok)
+            (kch/isClosed r) :closed
+            :else :full))))))
+
 (defn send1!
   "Sends one value to the Kotlin channel, waiting for room. Returns true, or false when the channel is closed."
   [^KPort p v]
-  (try
-    ;; Kotlin: ch.send(v)
-    (kch/.send (.-ch p) v)
-    (.incrementAndGet ^AtomicLong (.-cnt p))
-    true
-    (catch ClosedSendChannelException _ false)))
+  (if (drop-mode? p)
+    (not= :closed (raw-try-send! p v))
+    (try
+      ;; Kotlin: ch.send(v)
+      (kch/.send (.-ch p) v)
+      (.incrementAndGet ^AtomicLong (.-cnt p))
+      true
+      (catch ClosedSendChannelException _ false))))
 
 (defn sent!
   "Tells the port that one item entered its buffer through a select (for datafy)."
@@ -275,19 +315,16 @@
   (.incrementAndGet ^AtomicLong (.-cnt p)))
 
 (defn received!
-  "Tells the port that one item left its buffer (for datafy)."
+  "Tells the port that one item left its buffer. Also wakes the pump of the pending puts: there may be room now."
   [^KPort p]
-  (.decrementAndGet ^AtomicLong (.-cnt p)))
+  (.decrementAndGet ^AtomicLong (.-cnt p))
+  (when (.get ^AtomicBoolean (.-putting p))
+    (kch/.trySend (.-put-wake p) true)))
 
 (defn try-send1!
   "Sends one value to the Kotlin channel if there is room now. Returns :ok, :full or :closed."
   [^KPort p v]
-  ;; Kotlin: ch.trySend(v)
-  (let [r (kch/.trySend (.-ch p) v)]
-    (cond
-      (kch/isSuccess r) (do (.incrementAndGet ^AtomicLong (.-cnt p)) :ok)
-      (kch/isClosed r) :closed
-      :else :full)))
+  (raw-try-send! p v))
 
 (defn send!
   "Blocking put of a value (all items of its transducer). Returns true, or false if the port is closed."
@@ -311,6 +348,7 @@
   (kch/.close (.-ch p))
   ;; a pump that waits for a taker looks at the closed channel again
   (kch/.trySend (.-wake p) true)
+  (kch/.trySend (.-put-wake p) true)
   nil)
 
 ;; --- the pump: serves the takers of a port ------------------------------------------------------------------
@@ -328,7 +366,7 @@
   Returns the value, or `:spike.coflow.chan/closed` when the port is closed and empty."
   [^KPort p]
   (let [v (recv-or-closed (.-ch p))]
-    (when-not (identical? v ::closed) (.decrementAndGet ^AtomicLong (.-cnt p)))
+    (when-not (identical? v ::closed) (received! p))
     v))
 
 (defn- next-taker-cb
@@ -340,24 +378,34 @@
 (defn- call-cb [cb v]
   (try (cb v) (catch Throwable t (.printStackTrace t))))
 
-(defmacro ^:private with-plock [p & body]
-  `(let [^ReentrantLock l# (.-plock ~(with-meta p {:tag 'spike.coflow.chan.KPort}))]
-     (.lock l#)
-     (try ~@body (finally (.unlock l#)))))
-
-(defn- deliver! [^KPort p v]
-  (loop []
-    (let [cb (with-plock p
-               (if-let [cb (next-taker-cb (.-takers p))]
-                 (do (.set ^AtomicReference (.-stash p) nil) cb)
-                 (do (.set ^AtomicReference (.-stash p) [v]) nil)))]
-      (if cb
-        (call-cb cb v)
-        (do
-          ;; Kotlin: wake.receive()
-          (kch/.receive (.-wake p))
-          (when (with-plock p (some? (.get ^AtomicReference (.-stash p))))
-            (recur)))))))
+(defn- deliver!
+  "Gives the value that the pump received to the first active taker. The value goes through the stash, and every
+  decision is made on the stash under plock, so a take! that takes the stash in the meantime can not make the value
+  go out twice. If nobody waits, the value stays in the stash (it counts as one slot of the capacity, see raw-try-send!)
+  and the pump waits for a taker."
+  [^KPort p v]
+  (loop [first? true]
+    (let [r (with-plock p
+              (if first?
+                ;; the value is in our hand: a waiting taker gets it, else it becomes the stash. One lock, so
+                ;; raw-try-send! never sees a stash that is only on its way to a taker.
+                (if-let [cb (next-taker-cb (.-takers p))]
+                  [cb v]
+                  (do (.set ^AtomicReference (.-stash p) [v]) :wait))
+                (let [st (.get ^AtomicReference (.-stash p))]
+                  (if (nil? st)
+                    :done
+                    (if-let [cb (next-taker-cb (.-takers p))]
+                      (do (.set ^AtomicReference (.-stash p) nil) [cb (nth st 0)])
+                      :wait)))))]
+      (cond
+        (identical? r :done) nil
+        (identical? r :wait) (do
+                               ;; Kotlin: wake.receive()
+                               (kch/.receive (.-wake p))
+                               ;; a closed port that holds a value for nobody: leave it in the stash, a later take! gets it
+                               (when-not (kch/isClosedForSend (.-ch p)) (recur false)))
+        :else (call-cb (nth r 0) (nth r 1))))))
 
 (defn- pump-recv
   "The receive of the pump: the next value, ::closed, or ::wake (a taker gave up or came: look again)."
@@ -408,7 +456,7 @@
                               (if-let [cb (next-taker-cb (.-takers p))] (recur (conj acc cb)) acc)))]
                   (doseq [cb cbs] (call-cb cb nil)))
                 :else
-                (do (.decrementAndGet ^AtomicLong (.-cnt p))
+                (do (received! p)
                     (deliver! p v)
                     (recur))))))))
 
@@ -421,40 +469,40 @@
 (defn try-put-now
   "Tries to put without waiting, for a core.async handler: under its lock, if it is still active and the Kotlin
   channel has room (or is closed), commits it. Returns [box callback] (box holds true/false), ::full, or nil
-  (handler not active)."
+  (handler not active). Lock order: plock, then the handler (as in take! and put!)."
   [^KPort p ^Lock h v]
-  (.lock h)
-  (try
-    (when (impl/active? h)
-      ;; Kotlin: ch.trySend(v)
-      (let [r (kch/.trySend (.-ch p) v)]
-        (cond
-          (kch/isSuccess r) (let [cb (impl/commit h)] (.incrementAndGet ^AtomicLong (.-cnt p)) [(box true) cb])
-          (kch/isClosed r) (let [cb (impl/commit h)] [(box false) cb])
-          :else ::full)))
-    (finally (.unlock h))))
+  (with-plock p
+    (.lock h)
+    (try
+      (when (impl/active? h)
+        (let [r (raw-try-send! p v)]
+          (case r
+            :ok (let [cb (impl/commit h)] [(box true) cb])
+            :closed (let [cb (impl/commit h)] [(box false) cb])
+            ::full)))
+      (finally (.unlock h)))))
 
 (defn- put-pump-loop
-  "Serves the puts that did not fit. A put counts as done only when its value is in the channel, so a handler that
-  gave up (a timeout, an alts that took another branch) loses nothing: the pump polls with a growing delay."
+  "Serves the puts of a core.async user that did not fit. The put counts as done only when its value is in the
+  channel, so a handler that gave up (a timeout, an alts that took another branch) loses nothing.
+  It waits on `put-wake` (a suspend receive): a receive of the port, or a close, wakes it. No polling: an idle port uses no CPU."
   [^KPort p]
   (loop []
-    (let [[h v :as x] (with-plock p
-                        (let [x (.peek ^ConcurrentLinkedQueue (.-putters p))]
-                          (when-not x (.set ^AtomicBoolean (.-putting p) false))
-                          x))]
+    (let [x (with-plock p
+              (loop []
+                (let [x (.peek ^ConcurrentLinkedQueue (.-putters p))]
+                  (cond
+                    (nil? x) (do (.set ^AtomicBoolean (.-putting p) false) nil)
+                    (not (impl/active? (nth x 0))) (do (.poll ^ConcurrentLinkedQueue (.-putters p)) (recur))
+                    :else x))))]
       (when x
-        (let [done (loop [wait 1]
-                     (let [r (try-put-now p h v)]
-                       (cond
-                         (nil? r) true
-                         (identical? r ::full) (do (co/delay (long wait)) (recur (min 20 (* 2 wait))))
-                         :else r)))]
-          (with-plock p (.poll ^ConcurrentLinkedQueue (.-putters p)))
-          ;; the callback of a put that was queued
-          (when (vector? done)
-            (call-cb (nth done 1) @(nth done 0))))
-        (recur)))))
+        (let [r (try-put-now p (nth x 0) (nth x 1))]
+          (if (identical? r ::full)
+            ;; Kotlin: putWake.receive()
+            (do (kch/.receive (.-put-wake p)) (recur))
+            (do (with-plock p (.poll ^ConcurrentLinkedQueue (.-putters p)))
+                (when (vector? r) (call-cb (nth r 1) @(nth r 0)))
+                (recur))))))))
 
 (defn- ensure-put-pump! [^KPort p]
   (when (.compareAndSet ^AtomicBoolean (.-putting p) false true)
@@ -549,3 +597,30 @@
   [^KPort p]
   ;; Kotlin: ch.receiveAsFlow()
   (kflow/.receiveAsFlow (.-ch p)))
+
+;; --- demand-driven access to a core.async port that is not ours (the user's ::flow/in-ports and ::flow/out-ports) ---
+
+(defn poll-state
+  "A take that never waits, on any core.async ReadPort. Returns nil when nothing is ready, [v] when a message was
+  taken, or [nil] when the port is closed."
+  [port]
+  (let [[h _] (handler (fn [_] nil) false)]
+    (when-let [b (impl/take! port h)] [@b])))
+
+(defn try-put-state
+  "A put that never waits, on any core.async WritePort. Returns nil when it did not fit, [true] when it was put,
+  [false] when the port is closed."
+  [port v]
+  (let [[h _] (handler (fn [_] nil) false)]
+    (when-let [b (impl/put! port v h)] [@b])))
+
+(defn take-with!
+  "Registers `h` (see `handler`) as a take of the port. Returns a box when a value was taken at once (h is then
+  committed), or nil when the take is pending."
+  [port h]
+  (impl/take! port h))
+
+(defn put-with!
+  "Registers `h` (see `handler`) as a put of v. Returns a box when it was done at once, or nil when it is pending."
+  [port v h]
+  (impl/put! port v h))
