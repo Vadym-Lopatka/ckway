@@ -108,10 +108,10 @@
   "A Koin property, or `default`, or nil."
   ([system key]
    ;; Kotlin: koin.getProperty(key)
-   (k/.getProperty (koin system) ^String key))
+   (k/.getProperty (koin system) key))
   ([system key default]
    ;; Kotlin: koin.getProperty(key, default)
-   (k/.getProperty (koin system) ^String key default)))
+   (k/.getProperty (koin system) key default)))
 
 (defn new-store
   "A new store made from `seed`, by the factory with a definition parameter."

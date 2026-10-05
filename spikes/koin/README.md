@@ -125,3 +125,5 @@ clojure -M:test:aot:kotlinc -n spike.koin.forms-test    # `with-aot-the-protocol
 ```
 
 Without `target/classes` on the class path, that test does nothing. `bin/test` does not use AOT.
+
+A `nil` that only the run time knows, at a non-null parameter or receiver, is a `kt:` error that names the parameter: `nil where Kotlin expects a non-null String (the argument `key` (String))`.

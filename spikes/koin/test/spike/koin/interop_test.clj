@@ -114,3 +114,22 @@
     (let [{:keys [value err]} (eval-in-ns '(q/named df/Kind.Singleton))]
       (is (some? value))
       (is (not (re-find #"Reflection warning|resolved statically" err)) err))))
+
+;; Batch D: a nil that only the run time knows, at any non-null parameter or receiver
+
+(deftest nil-from-a-variable-at-a-non-null-parameter
+  (let [app (dsl/koinApplication (fn [_] nil))
+        koin (k/koin app)
+        nilv (identity nil)
+        msg #(try (%) nil (catch clojure.lang.ExceptionInfo e (ex-message e)))]
+    (try
+      ;; Kotlin: koin.getProperty(null)   -- does not compile in Kotlin
+      (is (str/includes? (msg #(k/.getProperty koin nilv))
+                         "nil where Kotlin expects a non-null String (the argument `key` (String))"))
+      ;; Kotlin: named(null)
+      (is (str/includes? (msg #(q/named ^String nilv))
+                         "nil where Kotlin expects a non-null String (the argument `name` (String))"))
+      ;; Kotlin: (null as Koin).getProperty("x")
+      (is (str/includes? (msg #(k/.getProperty ^org.koin.core.Koin nilv "x"))
+                         "nil where Kotlin expects a non-null org.koin.core.Koin (the receiver)"))
+      (finally (k/.close app)))))
