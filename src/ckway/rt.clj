@@ -243,14 +243,21 @@
                    (when receiver? (same-name-hint site (class v))))
               {:kt/wrong-class (.getName (class v))}))))
 
+(defn nn-fail
+  "The kt error for a nil where Kotlin takes no nil. `site` = {:call :sig :what :bound}: `:bound` is the text of the non-null
+  bound of a type parameter (`T : Any`), or absent for a parameter of a plain non-null type, which `:type` names. The static
+  path calls it from a plain `nil` check in the expansion, for a nil that it could not see at compile time."
+  [site]
+  (r/fail (str "kt: " (when (:call site) (str (:call site) ": "))
+               (if (:bound site)
+                 (str "nil where Kotlin expects a non-null value of the type parameter `" (:bound site) "`")
+                 (str "nil where Kotlin expects a non-null " (:type site)))
+               " (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site))))))
+
 (defn nn-arg
-  "`v`, or a kt error when it is nil: the parameter is a type parameter with a non-null bound (`T : Any`), so Kotlin
-  takes no nil. `site` = {:call :sig :what :bound}; the static path calls it for a nil that it could not see at compile time."
+  "`v`, or a kt error when it is nil (`nn-fail`)."
   [site v]
-  (if (nil? v)
-    (r/fail (str "kt: " (when (:call site) (str (:call site) ": ")) "nil where Kotlin expects a non-null value of the type parameter `"
-                 (:bound site) "` (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site)))))
-    v))
+  (if (nil? v) (nn-fail site) v))
 
 (defn check-obj
   "`v` if it fits the object descriptor `td` ({:k :obj :cls :text :nullable?}), else a kt error that names the
@@ -576,14 +583,17 @@
         (when (some? x) (.invoke m x no-args))))))
 
 (defn- boxer
-  "Function that gives the value-class object for the underlying value (conversion `{:vc :nullable?}`)."
-  [{:keys [vc nullable?]}]
+  "Function that gives the value-class object for the underlying value (conversion `{:vc :nullable?}`). The result of
+  a suspend call (`:suspend?`) is the object already, or the underlying value: the object stays."
+  [{:keys [vc nullable? suspend?]}]
   (let [prim? (.isPrimitive ^Class (r/jvm-class (:jvm-underlying vc)))
+        c (r/jvm-class (:class vc))
         ^Method m (find-member (:class vc) (:name (:box vc)) (:desc (:box vc)))]
     (fn [raw]
-      (if (and nullable? (nil? raw) (not prim?))
-        nil
-        (.invoke m nil (object-array [raw]))))))
+      (cond
+        (and nullable? (nil? raw) (not prim?)) nil
+        (and suspend? (.isInstance ^Class c raw)) raw
+        :else (.invoke m nil (object-array [raw]))))))
 
 (defn- zero [^String jt]
   (case jt

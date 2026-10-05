@@ -410,3 +410,158 @@ fun hofIntNn9(): (Int, String) -> String = { a, b -> "hofIntNn9:" + a + ":" + b 
 fun hofAny9(): (Any?) -> String = { a -> "hofAny9:" + a }
 fun <T> hofT9(): (T) -> String = { a -> "hofT9:" + a }
 fun hofTNn9(): (List<String>?) -> String = { a -> "hofTNn9:" + a }
+
+// ================================================================ Batch D
+
+// ---- D1: a class that declares its own `invoke` and also implements a function type (http4k `LensExtractor`)
+// The declared `invoke` overrides the one of the function type: one member, with its own names and types.
+interface ExtD9<in IN, out OUT> : (IN) -> OUT {
+    override operator fun invoke(target: IN): OUT
+    fun meta9(): String = "ext-meta"
+}
+abstract class ExtBaseD9<IN, OUT>(val tag: String) : ExtD9<IN, OUT>              // an abstract class in between: no invoke
+open class ExtPath9<OUT>(private val f: (String) -> OUT) : ExtBaseD9<String, OUT>("path") {
+    override fun invoke(target: String): OUT = f(target)                      // a more specific JVM signature, and the bridge
+}
+class ExtBi9<OUT>(private val f: (String) -> OUT) : ExtPath9<OUT>(f) {
+    operator fun <R : CharSequence> invoke(value: OUT, into: R): String = "inject:$value:$into"   // another arity
+}
+fun extPath9(): ExtPath9<String> = ExtPath9 { s -> "path:$s" }
+fun extBi9(): ExtBi9<String> = ExtBi9 { s -> "bi:$s" }
+fun extD9(): ExtD9<String, Int> = object : ExtD9<String, Int> { override fun invoke(target: String): Int = target.length }
+
+// the override is in a subclass only; the interface has the function type's own `invoke`
+interface PlainD9 : (String) -> String
+class SubOnly9 : PlainD9 { override operator fun invoke(name: String): String = "sub-only:$name" }
+class SubNone9 : PlainD9 { override fun invoke(p1: String): String = "sub-none:$p1" }
+fun subOnly9(): SubOnly9 = SubOnly9()
+fun subNone9(): PlainD9 = SubNone9()
+
+// a generic class that has the type parameters in the function type
+abstract class GenD9<IN, OUT> : (IN) -> OUT
+class GenOwn9<IN, OUT>(private val f: (IN) -> OUT) : GenD9<IN, OUT>() {
+    override operator fun invoke(value: IN): OUT = f(value)
+}
+fun genOwn9(): GenOwn9<String, String> = GenOwn9 { n -> "gen-own:$n" }
+fun genNone9(): GenD9<String, String> = object : GenD9<String, String>() { override fun invoke(p1: String): String = "gen-none:$p1" }
+
+// a fun interface that extends a function type and declares the member
+fun interface FiOwn9 : (String) -> Int { override operator fun invoke(text: String): Int }
+fun fiOwn9(): FiOwn9 = FiOwn9 { t -> t.length * 10 }
+fun runFiOwn9(f: FiOwn9, s: String): Int = f(s)
+
+// a suspend function type with its own override
+interface SExt9<in IN, out OUT> : suspend (IN) -> OUT { override suspend operator fun invoke(target: IN): OUT }
+fun sExt9(): SExt9<String, String> = object : SExt9<String, String> { override suspend fun invoke(target: String): String = "s-ext:$target" }
+
+// reify: a function-typed parameter of an inherited member
+interface Mw9 : (Handler9) -> Handler9
+fun runMw9(m: Mw9, s: String): String = m.invoke { x -> "core:$x" }(s)
+
+// ---- D2: a suspend function that returns a value class (kotlinx.coroutines `receiveCatching(): ChannelResult<E>`)
+@JvmInline value class SvInt9(val v: Int)
+@JvmInline value class SvDbl9(val d: Double)
+@JvmInline value class SvStr9(val s: String)
+@JvmInline value class SvAny9(val a: Any?)           // like ChannelResult: the underlying type is Any?
+@JvmInline value class SvNn9(val a: Any)
+class SvHost9(val base: Int) {
+    suspend fun int9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base + n) }
+    suspend fun intNow9(n: Int): SvInt9 = SvInt9(base + n)                     // no suspension
+    suspend fun dbl9(): SvDbl9 { kotlinx.coroutines.delay(1); return SvDbl9(base + 0.5) }
+    suspend fun str9(): SvStr9 = SvStr9("host$base")
+    suspend fun any9(x: Any?): SvAny9 { kotlinx.coroutines.delay(1); return SvAny9(x) }
+    suspend fun nn9(x: Any): SvNn9 = SvNn9(x)
+    suspend fun nIntOrNull9(yes: Boolean): SvInt9? { kotlinx.coroutines.delay(1); return if (yes) SvInt9(base) else null }
+    suspend fun nStrOrNull9(yes: Boolean): SvStr9? = if (yes) SvStr9("s") else null
+    suspend fun nAnyOrNull9(yes: Boolean): SvAny9? = if (yes) SvAny9(null) else null
+    suspend fun withDef9(n: Int = 5): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base * n) }
+}
+suspend fun SvHost9.ext9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base * 100 + n) }
+suspend fun SvHost9.extAny9(x: Any?): SvAny9 = SvAny9(x)
+suspend fun top9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(n) }
+suspend fun topAny9(x: Any?): SvAny9 { kotlinx.coroutines.delay(1); return SvAny9(x) }
+suspend fun topNull9(): SvAny9? = null
+fun SvInt9.plain9(): Int = v + 1000
+fun SvAny9.plain9(): String = "any:" + a
+fun SvStr9.plain9(): String = "str:" + s
+fun SvInt9.plusOne9(): SvInt9 = SvInt9(v + 1)
+fun anyOf9(a: SvAny9): Any? = a.a
+fun intOf9(a: SvInt9): Int = a.v
+// generic result: the call site decides the type argument; the object is boxed once
+suspend fun <T> sId9(x: T): T { kotlinx.coroutines.delay(1); return x }
+suspend fun <T> sIdNow9(x: T): T = x
+suspend fun <T : Any> sIdNn9(x: T): T = x
+suspend fun <T> sFirst9(xs: List<T>): T? = xs.firstOrNull()
+// kotlin.Result and kotlin.time.Duration (value classes of the standard library) from a suspend function
+suspend fun sResult9(ok: Boolean): Result<Int> { kotlinx.coroutines.delay(1); return if (ok) Result.success(7) else Result.failure(IllegalStateException("res-boom")) }
+suspend fun sResultStr9(): Result<String> = Result.success("fine")
+suspend fun sResultN9(ok: Boolean): Result<Int>? = if (ok) Result.success(1) else null
+suspend fun sDur9(): kotlin.time.Duration { kotlinx.coroutines.delay(1); return kotlin.time.Duration.parse("2s") }
+suspend fun sDurN9(yes: Boolean): kotlin.time.Duration? = if (yes) kotlin.time.Duration.parse("3s") else null
+fun resultOk9(r: Result<Int>): Boolean = r.isSuccess
+// a suspend lambda: a Clojure function returns the underlying value or the object, Kotlin wants the object
+fun runSvInt9(f: suspend (Int) -> SvInt9): Int = kotlinx.coroutines.runBlocking { f(4).v }
+fun runSvAny9(f: suspend (Int) -> SvAny9): String = kotlinx.coroutines.runBlocking { "got:" + f(4).a }
+fun runSvIntN9(f: suspend (Int) -> SvInt9?): String = kotlinx.coroutines.runBlocking { "got:" + f(4)?.v }
+fun runSvRes9(f: suspend () -> Result<Int>): String = kotlinx.coroutines.runBlocking { f().fold({ "ok:$it" }, { "fail:${it.message}" }) }
+fun runSvDur9(f: suspend () -> kotlin.time.Duration): Long = kotlinx.coroutines.runBlocking { f().inWholeMilliseconds }
+fun runBlock9(block: suspend () -> Any?): Any? = kotlinx.coroutines.runBlocking { block() }
+// a suspend member of an interface, written by kt/reify, that returns a value class
+interface SvIface9 { suspend fun give9(n: Int): SvAny9; suspend fun giveN9(n: Int): SvInt9? }
+fun useSvIface9(i: SvIface9): String = kotlinx.coroutines.runBlocking { "give:" + i.give9(3).a + ":" + i.giveN9(1)?.v + ":" + i.giveN9(0)?.v }
+
+// ---- D3: nil that only the run time knows, at a parameter or receiver that is plainly not nullable
+fun welcome9(name: String): String = "welcome:$name"
+fun twoNn9(a: String, b: String?, c: Any): String = "twoNn9:$a:$b:$c"
+fun lenOfNn9(xs: List<String>): Int = xs.size
+fun String.shoutNn9(): String = "shoutNn9:" + uppercase()
+fun String?.shoutN9(): String = "shoutN9:" + this
+fun Any.tagOfNn9(): String = "tagOfNn9:$this"
+fun <T> T.idRecv9(): String = "idRecv9:$this"
+class Nn3Box9(val label: String) {
+    fun hi9(who: String): String = "$label hi $who"
+    fun maybe9(who: String?): String = "$label maybe $who"
+    companion object { fun make9(label: String): Nn3Box9 = Nn3Box9(label) }
+}
+interface Sink9 { fun put9(s: String): String }
+fun useSink9(s: Sink9, x: String): String = s.put9(x)
+fun primNn9(n: Int, d: Double, b: Boolean): String = "primNn9:$n:$d:$b"
+fun fnNn9(f: (String) -> String): String = f("in")
+fun ovNn9(x: String): String = "ovNn9-String"
+fun ovNn9(x: Int): String = "ovNn9-Int"
+fun varStrNn9(vararg xs: String): String = "varStrNn9:" + xs.size
+fun defNn9(a: String = "d", b: String): String = "defNn9:$a:$b"
+fun sNn9(): String = "sNn9"
+
+// ---- D5: positional arguments with no static type, and a trailing lambda (Ktor `embeddedServer`)
+class Env9(val name: String)
+fun serve9(factory: String, port: Int = 80, host: String = "0.0.0.0", watch: List<String> = emptyList(), module: () -> String): String =
+    "serve9-port:$factory:$port:$host:${module()}"
+fun serve9(factory: String, env: Env9 = Env9("default"), configure: () -> String = { "cfg" }, module: () -> String = { "mod" }): String =
+    "serve9-env:$factory:${env.name}:${configure()}:${module()}"
+// two overloads that both fit the usual binding: only the values choose
+fun pickU9(a: String, b: Int): String = "pickU9-String"
+fun pickU9(a: Env9, b: Int): String = "pickU9-Env"
+
+// ---- D6: a type parameter that another argument fixes gives the type of a lambda parameter (Ktor `install(plugin, configure)`)
+class AppHost6
+class Inst6
+interface Plug6<in P, out B : Any, F : Any> { fun make6(): B }
+interface AppPlug6<out C : Any> : Plug6<AppHost6, C, Inst6>
+class CfgA6 {
+    fun on6(h: (Call9) -> String): String = "on6-call:" + h(Call9())
+    @JvmName("on6Ctx")
+    fun on6(h: (Ctx9) -> String): String = "on6-ctx:" + h(Ctx9())
+}
+class CfgB6 { fun other6(): String = "other6" }
+fun appPlug6(): AppPlug6<CfgA6> = object : AppPlug6<CfgA6> { override fun make6() = CfgA6() }
+fun appPlugB6(): AppPlug6<CfgB6> = object : AppPlug6<CfgB6> { override fun make6() = CfgB6() }
+fun starPlug6(): Plug6<AppHost6, *, Inst6> = appPlug6()
+fun <P : Any, B : Any, F : Any> P.install6(plugin: Plug6<P, B, F>, configure: B.() -> String = { "none" }): String =
+    "install6:" + plugin.make6().configure()
+fun <B : Any> both6(a: Plug6<AppHost6, B, Inst6>, b: Plug6<AppHost6, B, Inst6>, configure: B.() -> String): String =
+    "both6:" + a.make6().configure()
+// the type parameter is fixed in the class of the receiver and in a nested position, not as a plain argument
+fun <B : Any> list6(plugins: List<Plug6<AppHost6, B, Inst6>>, configure: B.() -> String): String = "list6:" + plugins.first().make6().configure()
+fun <B : Any> unfixed6(configure: B.() -> String, make: () -> B): String = "unfixed6:" + make().configure()
+fun makeHost6(): AppHost6 = AppHost6()

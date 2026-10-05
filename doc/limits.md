@@ -95,6 +95,13 @@ only keeps its text).
 
 A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtual thread (JDK 21+ needed).
 
+* The result of a `suspend` call that is a value class is the object, as for a call that is not `suspend` (`(kch/.getOrNull
+  (kch/.receiveCatching ch))`, `ChannelResult` is a value class over `Any?`). The JVM gives `Object`: the object when the call
+  suspended and was resumed, the underlying value when it returned at once (a class over a reference type). `kt` boxes the
+  second. `kotlin.Result` and `Duration` are the same, `nil` of a nullable result stays `nil`, and a generic result (`T`) is
+  left as it is. One case is not told apart: a class over `Any?` whose value is an object of that same class and that
+  returned at once.
+
 * A plain `ThreadLocal` is not visible in the body. A `ThreadContextElement` of the coroutine context is.
   `(.set tl "x") (f/runIt (fn [_] (.get tl)))` gives `nil`.
 * `set!` on a var that was bound OUTSIDE the body fails: `Can't set!: *v* from non-binding thread`. Reading it works,
@@ -258,6 +265,14 @@ A constructor parameter counts as a property when the class has a public propert
   a function type: nothing checks the types of the arguments (a position of a type parameter, see 1: a Clojure integer for an
   `Int` is a `Long` there, say `(int 1)`), and a result of a function type is not a Clojure function. A package with no class
   that implements a function type, and no `operator fun invoke`, has no `.invoke` var.
+* A class that declares its own `invoke` with the arity of the function type (http4k `interface LensExtractor<in IN, out OUT> :
+  (IN) -> OUT { override operator fun invoke(target: IN): OUT }`) has no synthesized `invoke`: the declared one OVERRIDES the one of
+  the function type, they are one member, and it keeps its own parameter names and types (`(l/.invoke lens req)`, before: "ambiguous").
+  It holds when the class that declares it is a supertype (an abstract class in between, `Lens`, `BiDiLens`, `PathLens`), also for a
+  `suspend` function type and a generic class. A subclass that declares `invoke` takes the place of the synthesized `invoke` of the
+  supertype for its objects. Another `invoke` of another arity is another member. A `fun interface` that extends a function type
+  and redeclares `invoke` with narrower types cannot take a Clojure function yet (the adapter is not written for the two JVM
+  methods).
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
 * A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
@@ -558,6 +573,17 @@ in the call has hints (not `#(...)`, not a function value), and only the static 
 receiver of unknown class the call is selected at run time, where the lambda has no hints. When the receiver has a type for
 the compiler (a hint, a local, a parameter of a `fn` at a function type) the ambiguity is a compile error, not a run-time one:
 all candidates are members of the same class, so no subclass can change the answer.
+
+The parameter of a `fn` literal at a function type has the type of the function type as an upper bound. When that type is a
+type parameter of the function that another argument fixes (`fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure:
+B.() -> Unit)` with `(sp/StatusPages)` of the declared type `ApplicationPlugin<StatusPagesConfig>`, a subtype of `Plugin<Application,
+StatusPagesConfig, PluginInstance>`), `kt` reads `B` from the declared Kotlin type of that argument, through its supertypes, and
+`cfg` of `(fn [cfg] ...)` has the type `StatusPagesConfig`: the inner `(sp/.status cfg code (fn [^ApplicationCall call st] ...))` is a
+static call, and its hint chooses. This works for an argument that is a call of a `kt` var (a function or a property); the
+argument must have a type with type arguments that are known (no `*`, no type parameter). A local that holds the plugin has only
+its class, so `cfg` has no type there: write `(fn [^StatusPagesConfig cfg] ...)`. Two arguments that fix `B` to different types
+give no type, and a type parameter that only occurs inside another type (`List<Plugin<P, B, F>>`) is not read. The receiver
+is not needed when the call has one declaration; when it has several, the call is a static one only if the receiver and the arguments choose one.
 
 Type arguments count in the choice only where they can be seen. When two candidates are different Kotlin types, the type
 arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;

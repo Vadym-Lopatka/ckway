@@ -77,8 +77,8 @@
 (deftest a1-the-message-names-the-ways-out
   (let [m (:error (dynamic #'d/routes9 [route]))]
     (is (str/includes? m "(routes9 :list ...)") "the function: name its parameter")
-    (is (str/includes? m "((kt/ref X routes9) x)") "the property: kt/ref")
-    (is (str/includes? m "`fx.r9.Route9`") "the class var that X stands for"))
+    ;; (D4) the class var as written: no alias of the package in the namespace that runs the test, so the full name
+    (is (str/includes? m "((kt/ref fx.r9.Route9 routes9) x)") "the property: kt/ref"))
   (testing "a function without parameters and a property without receiver: no kt form names the property alone"
     (let [m (:error (dynamic #'d/zero9 []))]
       (is (str/includes? m "Java interop") m)
@@ -1150,3 +1150,485 @@
     (is (= "hofAny9:null" ((d/hofAny9) nil)))
     (is (= "hofTNn9:null" ((d/hofTNn9) nil)))
     (is (= "hofT9:null" ((d/hofT9) nil)))))
+
+;; ================================================================ Batch D: one regression of B2, and findings of the second round of spikes
+
+;; ---------------------------------------------------------------- D1
+
+;; http4k: `interface LensExtractor<in IN, out OUT> : (IN) -> OUT { override operator fun invoke(target: IN): OUT }`. The
+;; declared `invoke` OVERRIDES the one of the function type: one member, with its own parameter names and types. B2 gave
+;; both, and `(l/.invoke lens req)` was "ambiguous". A class with no `invoke` of its own keeps the synthesized one.
+
+(def ^:private ext-path (d/extPath9))
+(def ^:private ext-bi (d/extBi9))
+(def ^:private ext-int (d/extD9))
+(def ^:private sub-only (d/subOnly9))
+(def ^:private sub-none (d/subNone9))
+(def ^:private gen-own (d/genOwn9))
+(def ^:private gen-none (d/genNone9))
+(def ^:private fi-own (d/fiOwn9))
+(def ^:private ext-far (b9/extFar9))
+
+(defn- sigs-of [v owner]
+  (->> (:kt/decls (meta v)) (filter #(= owner (:owner %))) (filter #(= "invoke" (:name %))) (map :signature)))
+
+(deftest d1-declared-override-in-the-same-interface
+  (testing "the object of an anonymous class: the dynamic path"
+    (is (= 3 (d/.invoke ext-int "abc")))
+    (is (= 3 (dynamic #'d/.invoke [ext-int "abc"])))
+    (is (= 3 (as-value #'d/.invoke ext-int "abc"))))
+  (testing "a hint on the interface: the static path"
+    (is (= 3 (eval-here '(d/.invoke ^fx.r9.ExtD9 (d/extD9) "abc"))))
+    (is (= 3 (eval-here '(let [e (d/extD9)] (d/.invoke e "abc")))))
+    (is (not (str/includes? (reflection-warnings '(let [e (d/extD9)] (d/.invoke e "abc"))) "Reflection warning"))))
+  (testing "one declaration of `invoke` for the interface: the declared one, with its own parameter name"
+    (let [s (sigs-of #'d/.invoke "fx.r9.ExtD9")]
+      (is (= 1 (count s)) (pr-str s))
+      (is (str/includes? (first s) "invoke(target: IN): OUT") (pr-str s))
+      (is (not-any? #(str/includes? % "[from") s)))))
+
+(deftest d1-override-in-a-subclass-and-through-the-hierarchy
+  (testing "abstract class in between, an override with a more specific JVM signature (and its bridge)"
+    (is (= "path:x" (d/.invoke ext-path "x") (dynamic #'d/.invoke [ext-path "x"])))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtPath9 (d/extPath9) "x"))))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtBaseD9 (d/extPath9) "x"))))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtD9 (d/extPath9) "x")))))
+  (testing "a subclass that adds another `invoke` of another arity (http4k BiDiLens)"
+    (is (= "bi:x" (d/.invoke ext-bi "x") (eval-here '(d/.invoke ^fx.r9.ExtBi9 (d/extBi9) "x"))))
+    (is (= "inject:v:t" (d/.invoke ext-bi "v" "t") (eval-here '(d/.invoke ^fx.r9.ExtBi9 (d/extBi9) "v" "t")))))
+  (testing "the plain interface keeps the invoke of its function type, a subclass with its own `invoke` has that one"
+    (is (= "sub-none:a" (d/.invoke sub-none "a") (eval-here '(d/.invoke ^fx.r9.PlainD9 (d/subNone9) "a"))))
+    (is (= "sub-only:a" (d/.invoke sub-only "a") (dynamic #'d/.invoke [sub-only "a"])
+           (eval-here '(d/.invoke ^fx.r9.SubOnly9 (d/subOnly9) "a"))))
+    (is (= "sub-only:a" (eval-here '(d/.invoke ^fx.r9.PlainD9 (d/subOnly9) "a"))))
+    (is (some #(str/includes? % "PlainD9.invoke(p1: String): String  [from (String) -> String]") (sigs-of #'d/.invoke "fx.r9.PlainD9")))
+    (let [s (sigs-of #'d/.invoke "fx.r9.SubOnly9")]
+      (is (= 1 (count s)) (pr-str s))
+      (is (str/includes? (first s) "invoke(name: String): String") (pr-str s)))))
+
+(deftest d1-generic-class-and-fun-interface
+  (testing "type parameters in the function type: an own invoke, none"
+    (is (= "gen-own:5" (d/.invoke gen-own "5") (dynamic #'d/.invoke [gen-own "5"])))
+    (is (= "gen-own:5" (eval-here '(d/.invoke ^fx.r9.GenOwn9 (d/genOwn9) "5"))))
+    (is (= "gen-own:5" (eval-here '(d/.invoke ^fx.r9.GenD9 (d/genOwn9) "5"))))
+    (is (= "gen-none:6" (d/.invoke gen-none "6") (eval-here '(d/.invoke ^fx.r9.GenD9 (d/genNone9) "6")))))
+  (testing "the declaration of the abstract class that declares none keeps the function type's invoke"
+    (is (some #(str/includes? % "fx.r9.GenD9.invoke(p1: Any?): Any?  [from (IN) -> OUT]") (sigs-of #'d/.invoke "fx.r9.GenD9"))
+        (pr-str (sigs-of #'d/.invoke "fx.r9.GenD9")))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.GenOwn9")))))
+  (testing "a fun interface that extends a function type and declares the member"
+    (is (= 30 (d/.invoke fi-own "abc") (dynamic #'d/.invoke [fi-own "abc"]) (eval-here '(d/.invoke ^fx.r9.FiOwn9 (d/fiOwn9) "abc"))))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.FiOwn9"))))
+    (is (str/includes? (first (sigs-of #'d/.invoke "fx.r9.FiOwn9")) "invoke(text: String): Int"))))
+
+(deftest d1-suspend-function-type-with-an-own-override
+  (let [s (d/sExt9)]
+    (is (= "s-ext:q" (d/.invoke s "q") (dynamic #'d/.invoke [s "q"]) (eval-here '(d/.invoke ^fx.r9.SExt9 (d/sExt9) "q"))))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.SExt9"))))
+    (is (str/includes? (first (sigs-of #'d/.invoke "fx.r9.SExt9")) "suspend operator fun fx.r9.SExt9<IN, OUT>.invoke(target: IN): OUT"))))
+
+(deftest d1-another-package
+  (testing "the package of the class has the declared member"
+    (is (= "ext-far:x" (b9/.invoke ext-far "x") (eval-here '(b9/.invoke ^fx.r9b.ExtFarImpl9 (b9/extFar9) "x")))))
+  (testing "a package that does not know the class: the generic `Function1.invoke`, as in B2"
+    (is (= "ext-far:x" (d/.invoke ext-far "x") (dynamic #'d/.invoke [ext-far "x"])))))
+
+(deftest d1-nothing-else-changed
+  (testing "a class with no own invoke: the synthesized member and the generic one, as in B2"
+    (is (= "routed:x:r" (d/.invoke router "x")))
+    (is (= 42 (d/.invoke calc 6 7)))
+    (is (error-has? (dynamic #'d/.invoke [router 1.5]) "`p1` is String but got Double")))
+  (testing "the checks of the declared member: the declared parameter type"
+    (is (error-has? (dynamic #'d/.invoke [sub-only 1.5]) "`name` is String but got Double"))))
+
+(deftest d1-kt-reify-member-with-a-function-parameter
+  ;; Rule 6: a Kotlin function value that Clojure gets is a Clojure function. The parameter `nxt` of a `kt/reify` member is
+  ;; a Clojure function (also when the member is inherited from a function type): `(nxt x)` works.
+  (let [seen (atom nil)
+        m (kt/reify d/Mw9 (.invoke [_ nxt] (reset! seen nxt) (fn [s] (str "mw:" (nxt s)))))]
+    (is (= "mw:core:q" (d/runMw9 m "q")))
+    (is (fn? @seen))
+    (is (instance? clojure.lang.IFn @seen))
+    (is (= "core:z" (@seen "z")))
+    (is (= "mw:core:q" (d/runMw9 (kt/reify d/Mw9 (.invoke [_ nxt] (fn [s] (str "mw:" (d/.invoke nxt s))))) "q"))
+        "`.invoke` of the parameter: the dynamic path (a function type has no class for the static path)")))
+
+;; ---------------------------------------------------------------- D2
+
+;; kotlinx.coroutines: `suspend fun receiveCatching(): ChannelResult<E>` (`ChannelResult` is a value class over `Any?`). The
+;; JVM result is `Object`: the object when the call suspended and was resumed, the underlying value when it returned at once
+;; (a class over a reference type). The result of a suspend call is the value-class object, as for a non-suspend call.
+
+(def ^:private host (d/SvHost9 3))
+
+(defn- sv-cls [x] (some-> x class .getName))
+
+(deftest d2-a-suspend-member-gives-the-value-class-object
+  (testing "over a primitive, a reference type and Any?; suspended and not; the dynamic path"
+    (is (= ["fx.r9.SvInt9" 5] [(sv-cls (d/.int9 host 2)) (d/intOf9 (d/.int9 host 2))]))
+    (is (= "fx.r9.SvInt9" (sv-cls (d/.intNow9 host 2))))
+    (is (= "fx.r9.SvDbl9" (sv-cls (d/.dbl9 host))))
+    (is (= "fx.r9.SvStr9" (sv-cls (d/.str9 host))))
+    (is (= "str:host3" (d/.plain9 (d/.str9 host))))
+    (is (= "fx.r9.SvAny9" (sv-cls (d/.any9 host "a"))))
+    (is (= "a" (d/anyOf9 (d/.any9 host "a"))))
+    (is (nil? (d/anyOf9 (d/.any9 host nil))))
+    (is (= "fx.r9.SvNn9" (sv-cls (d/.nn9 host "z"))))
+    (is (= 15 (d/intOf9 (d/.withDef9 host))) "a default value (the `$default` synthetic)")
+    (is (= 6 (d/intOf9 (d/.withDef9 host 2))))))
+
+(deftest d2-the-static-path
+  (testing "a hint on the receiver: a direct call, the result has its static type"
+    (is (= 1005 (eval-here '(d/.plain9 (d/.int9 ^fx.r9.SvHost9 ckway.round9-test/sv-host 2)))))
+    (is (= "str:host3" (eval-here '(d/.plain9 (d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host)))))
+    (is (= "any:q" (eval-here '(d/.plain9 (d/.extAny9 ^fx.r9.SvHost9 ckway.round9-test/sv-host "q")))))
+    (is (= "any:x" (eval-here '(d/.plain9 (d/topAny9 "x")))))
+    (is (= 1004 (eval-here '(d/.plain9 (d/top9 4)))))
+    (is (= "fx.r9.SvStr9" (sv-cls (eval-here '(d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host)))))
+    (is (not (str/includes? (reflection-warnings '(d/.plain9 (d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host))) "Reflection warning")))))
+
+(def sv-host host)
+
+(deftest d2-an-extension-and-a-top-level-function
+  (is (= 301 (d/intOf9 (d/.ext9 host 1))))
+  (is (= "fx.r9.SvAny9" (sv-cls (d/.extAny9 host "q"))))
+  (is (= "q" (d/anyOf9 (d/.extAny9 host "q"))))
+  (is (= 4 (d/intOf9 (d/top9 4))))
+  (is (= "x" (d/anyOf9 (d/topAny9 "x"))))
+  (is (= 4 (d/intOf9 (dynamic #'d/top9 [4]))))
+  (is (= "x" (d/anyOf9 (dynamic #'d/topAny9 ["x"]))))
+  (is (= "fx.r9.SvStr9" (sv-cls (as-value #'d/.str9 host)))))
+
+(deftest d2-nullable-results
+  (is (nil? (d/.nIntOrNull9 host false)))
+  (is (= 3 (d/intOf9 (d/.nIntOrNull9 host true))))
+  (is (nil? (d/.nStrOrNull9 host false)))
+  (is (= "fx.r9.SvStr9" (sv-cls (d/.nStrOrNull9 host true))))
+  (is (nil? (d/.nAnyOrNull9 host false)))
+  (testing "a box over a null is not nil"
+    (let [r (d/.nAnyOrNull9 host true)]
+      (is (some? r))
+      (is (nil? (d/anyOf9 r)))))
+  (is (nil? (d/topNull9)))
+  (is (nil? (eval-here '(d/.nStrOrNull9 ^fx.r9.SvHost9 ckway.round9-test/sv-host false))))
+  (is (= "fx.r9.SvStr9" (sv-cls (eval-here '(d/.nStrOrNull9 ^fx.r9.SvHost9 ckway.round9-test/sv-host true))))))
+
+(deftest d2-a-generic-result-is-not-boxed-twice
+  (testing "a type parameter in the result: the object that went in comes out, nothing is added"
+    (let [v (d/SvInt9 1)]
+      (is (identical? v (d/sId9 v)))
+      (is (= 1 (d/intOf9 (d/sId9 v)))))
+    (let [v (d/SvAny9 "w")]
+      (is (identical? v (d/sIdNow9 v)))
+      (is (= "w" (d/anyOf9 (d/sIdNow9 v)))))
+    (is (= 5 (d/sId9 5)))
+    (is (= "s" (d/sIdNow9 "s")))
+    (is (= 1 (d/sFirst9 [1 2])))
+    (is (= "fx.r9.SvStr9" (sv-cls (d/sIdNow9 (d/SvStr9 "q")))))
+    (is (= "fx.r9.SvInt9" (sv-cls (eval-here '(d/sIdNow9 (d/SvInt9 2) :<> fx.r9.SvInt9)))))))
+
+(deftest d2-kotlin-result-and-duration
+  (is (true? (d/resultOk9 (d/sResult9 true))))
+  (is (false? (d/resultOk9 (d/sResult9 false))))
+  (is (= "kotlin.Result" (sv-cls (d/sResult9 false))))
+  (is (= "kotlin.Result" (sv-cls (d/sResultStr9))) "a Success that returned at once is unboxed on the JVM")
+  (is (= "kotlin.Result" (sv-cls (d/sResultN9 true))))
+  (is (nil? (d/sResultN9 false)))
+  (is (= "kotlin.time.Duration" (sv-cls (d/sDur9))))
+  (is (= "kotlin.time.Duration" (sv-cls (d/sDurN9 true))))
+  (is (nil? (d/sDurN9 false)))
+  (is (= "kotlin.Result" (sv-cls (dynamic #'d/sResult9 [true])))))
+
+(deftest d2-the-other-way-a-suspend-lambda-written-in-clojure
+  (testing "the lambda returns the object: the call that runs it unboxes as Kotlin expects"
+    (is (= 4 (d/runSvInt9 (fn [n] (d/SvInt9 n)))))
+    (is (= "got:4" (d/runSvAny9 (fn [n] (d/SvAny9 n)))))
+    (is (= "got:null" (d/runSvAny9 (fn [n] (d/SvAny9 nil)))))
+    (is (= "got:4" (d/runSvIntN9 (fn [n] (d/SvInt9 n)))))
+    (is (= "got:null" (d/runSvIntN9 (fn [n] nil))))
+    (is (= 2000 (d/runSvDur9 (fn [] (d/sDur9)))))
+    (is (= "ok:7" (d/runSvRes9 (fn [] (d/sResult9 true)))))
+    (is (= "fail:res-boom" (d/runSvRes9 (fn [] (d/sResult9 false))))))
+  (testing "a value that is the underlying value is a kt error"
+    (is (error-has? (top-error #(d/runSvInt9 (fn [n] n))) "fx.r9.SvInt9" "A value class is always the object"))
+    (is (error-has? (top-error #(d/runSvAny9 (fn [n] n))) "fx.r9.SvAny9" "A value class is always the object"))
+    (is (error-has? (top-error #(d/runSvInt9 (fn [n] nil))) "nil where Kotlin expects a non-null fx.r9.SvInt9")))
+  (testing "a suspend function value of Kotlin, called from Clojure and passed back"
+    (is (= 6 (d/runSvInt9 (fn [n] (d/top9 (+ n 2))))))))
+
+(deftest d2-a-kt-reify-member-that-returns-a-value-class
+  (let [i (kt/reify d/SvIface9
+            (.give9 [_ n] (d/SvAny9 (* n 2)))
+            (.giveN9 [_ n] (when (pos? n) (d/SvInt9 n))))]
+    (is (= "give:6:1:null" (d/useSvIface9 i)))))
+
+(deftest d2-nothing-else-changed
+  (testing "a non-suspend call that returns a value class: boxed as before"
+    (is (= "fx.r9.SvInt9" (sv-cls (d/SvInt9 1))))
+    (is (= 2 (d/intOf9 (d/.plusOne9 (d/SvInt9 1)))))
+    (is (= 1001 (d/.plain9 (d/SvInt9 1)))))
+  (testing "a suspend function that returns no value class"
+    (is (= 11 (d/sId9 11)))))
+
+;; ---------------------------------------------------------------- D3
+
+;; `fun welcome(name: String)` and `(let [v (identity nil)] (s/welcome v))`: Kotlin's own check threw
+;; `NullPointerException: Parameter specified as non-null is null`. A nil LITERAL was a compile error. A nil that only the
+;; run time knows is a `kt:` error too, for every parameter and receiver that is not nullable (a plain `nil?` test in the
+;; expansion). A nullable parameter, a nullable receiver and a value that cannot be nil have no check.
+
+(defmacro ^:private expansion-of
+  "The expansion of the kt calls in `form`, as a string; the locals of the surrounding code are known to it."
+  [form]
+  (let [v (resolve (first form))]
+    (pr-str (clojure.walk/macroexpand-all (apply (:inline (meta v)) (rest form))))))
+
+(deftest d3-nil-from-a-variable-at-a-non-null-parameter
+  (testing "a String parameter"
+    (let [r (static '(let [v (identity nil)] (d/welcome9 v)))]
+      (is (error-has? r "kt: (d/welcome9 v): nil where Kotlin expects a non-null String (the argument `name` (String))"
+                      "Kotlin: fun welcome9(name: String): String") r)))
+  (testing "not a NullPointerException, and a value that is not nil still works"
+    (is (= "welcome:w" (static '(let [v (identity "w")] (d/welcome9 v)))))
+    (is (= "welcome:w" (static '(let [^String v (identity "w")] (d/welcome9 v))))))
+  (testing "a hinted nil is still nil"
+    (is (error-has? (static '(let [^String v (identity nil)] (d/welcome9 v))) "nil where Kotlin expects a non-null String (the argument `name`")))
+  (testing "the second and the third parameter: the one that is nullable takes nil"
+    (is (error-has? (static '(let [v (identity nil)] (d/twoNn9 "a" nil v))) "nil where Kotlin expects a non-null Any (the argument `c` (Any))"))
+    (is (error-has? (static '(let [v (identity nil)] (d/twoNn9 v nil "c"))) "non-null String (the argument `a` (String))"))
+    (is (= "twoNn9:a:null:c" (static '(let [v (identity nil)] (d/twoNn9 "a" v "c"))))))
+  (testing "a collection and a function parameter"
+    (is (error-has? (static '(let [v (identity nil)] (d/lenOfNn9 v))) "nil where Kotlin expects a non-null" "(the argument `xs`"))
+    (is (error-has? (static '(let [v (identity nil)] (d/fnNn9 v))) "nil where Kotlin expects a non-null (String) -> String (the argument `f`")))
+  (testing "a parameter that has a default value, named and positional"
+    (is (error-has? (static '(let [v (identity nil)] (d/defNn9 :b v))) "non-null String (the argument `b` (String))"))
+    (is (= "defNn9:d:x" (static '(let [v (identity "x")] (d/defNn9 :b v))))))
+  (testing "an overloaded function, when the other overload takes an Int the call is still a choice by the types"
+    (is (= "ovNn9-String" (static '(let [^String v (identity "s")] (d/ovNn9 v)))))
+    (is (error-has? (static '(let [^String v (identity nil)] (d/ovNn9 v))) "nil where Kotlin expects a non-null String")))
+  (testing "a primitive parameter: the message it always had"
+    (is (error-has? (static '(let [v (identity nil)] (d/primNn9 v 1.0 true))) "nil where Kotlin expects a non-null Int"))))
+
+(deftest d3-nil-receiver
+  (testing "an extension, a member and an extension on Any"
+    (is (error-has? (static '(let [v (identity nil)] (d/.shoutNn9 ^String v))) "kt: (d/.shoutNn9 v): nil where Kotlin expects a non-null String (the receiver)"))
+    (is (error-has? (static '(let [v (identity nil)] (d/.hi9 ^fx.r9.Nn3Box9 v "x"))) "nil where Kotlin expects a non-null fx.r9.Nn3Box9 (the receiver)"))
+    (is (error-has? (static '(let [v (identity nil)] (d/.tagOfNn9 ^Object v))) "non-null Any (the receiver)")))
+  (testing "a receiver that is nullable takes nil"
+    (is (= "shoutN9:null" (static '(let [v (identity nil)] (d/.shoutN9 ^String v)))))
+    (is (= "shoutN9:x" (static '(let [v (identity "x")] (d/.shoutN9 ^String v)))))
+    (is (= "idRecv9:null" (static '(let [v (identity nil)] (d/.idRecv9 ^Object v))))))
+  (testing "a value that is not nil"
+    (is (= "shoutNn9:X" (static '(let [^String v (identity "x")] (d/.shoutNn9 v)))))
+    (is (= "b hi y" (static '(let [^fx.r9.Nn3Box9 b (d/Nn3Box9 "b") y (identity "y")] (d/.hi9 b y)))))))
+
+(deftest d3-the-dynamic-path-and-reify-have-the-same-answer
+  (is (error-has? (dynamic #'d/welcome9 [nil]) "nil"))
+  (testing "a kt/reify member has no check of its own: the call through Kotlin that takes the interface is guarded by the caller"
+    (let [s (kt/reify d/Sink9 (.put9 [_ x] (str "put:" x)))]
+      (is (= "put:q" (d/useSink9 s "q")))
+      (is (error-has? (static '(let [s (kt/reify d/Sink9 (.put9 [_ x] "no-check")) v (identity nil)] (d/useSink9 s v)))
+                      "nil where Kotlin expects a non-null String (the argument `x` (String))"))
+      (is (error-has? (static '(let [^fx.r9.Sink9 s (kt/reify d/Sink9 (.put9 [_ x] "no-check")) v (identity nil)] (d/.put9 s v)))
+                      "nil where Kotlin expects a non-null String (the argument `s` (String))")))))
+
+(deftest d3-the-expansion-has-a-plain-nil-check-where-nil-is-possible
+  (testing "a local of unknown value: a check, with the error call only in the failing branch"
+    (let [e (let [v (identity "x")] (expansion-of (d/welcome9 v)))]
+      (is (str/includes? e "(if (clojure.core/nil? ") e)
+      (is (str/includes? e "ckway.rt/nn-fail") e)
+      (is (not (str/includes? e "ckway.rt/nn-arg")) "no call of a library function on the way of a value that is not nil")))
+  (testing "no check for a literal, a number, a call of Kotlin with a non-null result, a constructor and a fn literal"
+    (is (not (str/includes? (expansion-of (d/welcome9 "x")) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/welcome9 (d/sNn9))) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/.hi9 (d/Nn3Box9 "b") "y")) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/fnNn9 (fn [s] s))) "nn-fail")))
+    (is (not (str/includes? (let [n (int 4)] (expansion-of (d/primNn9 n 1.0 true))) "nn-fail"))))
+  (testing "a nullable parameter and a nullable receiver have no check"
+    (is (not (str/includes? (let [v (identity nil)] (expansion-of (d/twoNn9 "a" v "c"))) "nn-fail")))
+    (is (not (str/includes? (let [v (identity nil)] (expansion-of (d/.shoutN9 ^String v))) "nn-fail")))))
+
+(deftest d3-nothing-else-changed
+  (testing "a nil literal is a compile error as before"
+    (is (error-has? {:error (compile-error '(d/welcome9 nil))} "no Kotlin declaration of `welcome9` fits"))
+    (is (error-has? {:error (compile-error '(d/welcome9 nil))} "welcome9")))
+  (testing "the type parameter with a bound keeps its text"
+    (is (error-has? (static '(let [v (identity nil)] (d/ovNil9b v))) "nil where Kotlin expects a non-null value of the type parameter `T : Any`")))
+  (testing "a Clojure value of a wrong class is still the old error"
+    (is (error-has? (static '(let [v (identity 5.5)] (d/welcome9 v))) "`name`" "String"))))
+
+;; ---------------------------------------------------------------- D4
+
+;; The way out for "a function and a property" named `X` for the class: `((kt/ref X routes) x)`. Nobody can type `X`: it is the
+;; class var, as the caller writes it (`r/RoutingHandler`: the alias that the calling namespace uses for the package), else the
+;; full name. The function way out has the alias of the var too.
+
+(defn- in-scratch-ns
+  "Run `f` with `*ns*` a namespace that has the aliases `aliases` ({alias package}) for packages that `kt/require` made."
+  [aliases f]
+  (let [n (create-ns (gensym "ckway.d4-scratch"))]
+    (try
+      (doseq [[a pkg] aliases] (.addAlias n a (the-ns (symbol (str "ckway.pkg." pkg)))))
+      (binding [*ns* n] (f))
+      (finally (remove-ns (ns-name n))))))
+
+(deftest d4-the-class-var-is-written-as-the-caller-writes-it
+  (testing "the class is in the package of the var, the caller has an alias: `d/Route9`"
+    (let [m (:error (in-scratch-ns {'q "fx.r9"} #(dynamic #'d/routes9 [route])))]
+      (is (str/includes? m "((kt/ref q/Route9 routes9) x)") m)
+      (is (str/includes? m "(q/routes9 :list ...)") m)))
+  (testing "the compile error of the static path: the alias of the namespace being compiled"
+    (let [m (compile-error '(d/routes9 ^fx.r9.Route9 (identity nil)))]
+      (is (str/includes? (str m) "((kt/ref d/Route9 routes9) x)") m)
+      (is (str/includes? (str m) "(d/routes9 :list ...)") m)))
+  (testing "no alias for the package: the full name"
+    (let [m (:error (in-scratch-ns {} #(dynamic #'d/routes9 [route])))]
+      (is (str/includes? m "((kt/ref fx.r9.Route9 routes9) x)") m)
+      (is (str/includes? m "(routes9 :list ...)") m)))
+  (testing "a member property of a class and a function: the same"
+    (let [m (compile-error '(d/items9 ^fx.r9.Box9 (identity nil)))]
+      (is (str/includes? (str m) "((kt/ref d/Box9 items9) x)") m)))
+  (testing "no X in the text"
+    (is (not (str/includes? (str (compile-error '(d/routes9 ^fx.r9.Route9 (identity nil)))) " X ")))))
+
+(deftest d4-the-class-is-in-another-package-than-the-var
+  (let [call (fn [] (:error (dynamic #'b9/ambo9 [route])))]
+    (testing "the caller requires both packages"
+      (let [m (in-scratch-ns {'q "fx.r9b" 'p "fx.r9"} call)]
+        (is (str/includes? m "((kt/ref p/Route9 ambo9) x)") m)
+        (is (str/includes? m "(q/ambo9 :list ...)") m)))
+    (testing "the caller has no alias for the package of the class: the full name"
+      (let [m (in-scratch-ns {'q "fx.r9b"} call)]
+        (is (str/includes? m "((kt/ref fx.r9.Route9 ambo9) x)") m)
+        (is (str/includes? m "(q/ambo9 :list ...)") m)))))
+
+(deftest d4-the-ways-out-work
+  (is (= "ambo-fun:1" (b9/ambo9 :list [route])))
+  (is (= ["ambo-prop:x"] ((kt/ref d/Route9 ambo9) route)) "the property, as the message writes it")
+  (is (= ["routes-prop:x"] ((kt/ref d/Route9 routes9) route))))
+
+(deftest d4-nothing-else-changed
+  (testing "a function without parameters and a property without receiver: still no kt form for the property"
+    (let [m (:error (dynamic #'d/zero9 []))]
+      (is (str/includes? m "Java interop") m)
+      (is (not (str/includes? m "kt/ref")) m)))
+  (testing "the first line and the candidates"
+    (let [m (:error (dynamic #'d/routes9 [route]))]
+      (is (str/includes? m "is ambiguous. Candidates:"))
+      (is (str/includes? m "val fx.r9.Route9.routes9")))))
+
+;; ---------------------------------------------------------------- D5
+
+;; Ktor `embeddedServer(factory, port = 80, host = ..., watchPaths = ..., module)` and `embeddedServer(factory, environment = ...,
+;; configure = ..., module = ...)`. `(serve9 "f" (:port m) (:host m) (fn ...))`: the types of `(:port m)` are unknown. The
+;; second declaration fits by the usual binding (its parameters would take the three values), the first only with a trailing
+;; lambda. The static path took the second: a `kt:` error at run time. When the types do not decide, the VALUES do.
+
+(def ^:private m5 {:port 8 :host "h" :env (d/Env9 "e")})
+
+(deftest d5-unknown-types-the-values-choose-the-trailing-lambda-too
+  (testing "port and host from a map, the module last: the first declaration, by the trailing lambda"
+    (is (= "serve9-port:f:8:h:m" (static '(let [m {:port 8 :host "h"}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))))
+    (is (= "serve9-port:f:8:h:m" (dynamic #'d/serve9 ["f" 8 "h" (fn [] "m")]))))
+  (testing "an environment from a map: the second declaration, by the usual binding"
+    (is (= "serve9-env:f:e:cfg:m"
+           (static '(let [m {:env (ckway.round9-test/env5)}] (d/serve9 "f" (:env m) (fn [] "cfg") (fn [] "m"))))))
+    (is (= "serve9-env:f:e:cfg:mod" (static '(let [m {:env (ckway.round9-test/env5)}] (d/serve9 "f" (:env m) (fn [] "cfg")))))))
+  (testing "the literals and the typed arguments: as before"
+    (is (= "serve9-port:f:0:h:m" (static '(d/serve9 "f" 0 "h" (fn [] "m")))))
+    (is (= "serve9-port:f:8:h:m" (static '(let [m {:port 8 :host "h"}] (d/serve9 "f" (long (:port m)) ^String (:host m) (fn [] "m"))))))
+    (is (= "serve9-env:f:e:cfg:m" (static '(d/serve9 "f" (d/Env9 "e") (fn [] "cfg") (fn [] "m"))))))
+  (testing "the reflection warning says that the call is dynamic, and the typed calls have none"
+    (is (str/includes? (reflection-warnings '(let [m {:port 8 :host "h"}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))
+                       "can't be resolved statically"))
+    (is (not (str/includes? (reflection-warnings '(let [m {:port 8 :host "h"}] (d/serve9 "f" (long (:port m)) ^String (:host m) (fn [] "m"))))
+                            "Reflection warning")))
+    (is (not (str/includes? (reflection-warnings '(d/serve9 "f" 0 "h" (fn [] "m"))) "Reflection warning")))))
+
+(defn env5 [] (d/Env9 "e"))
+
+(deftest d5-the-error-of-the-run-time-selection
+  (testing "values that fit no declaration: the usual no-fit error"
+    (is (error-has? (static '(let [m {:port "x" :host 1}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))
+                    "no Kotlin declaration of `serve9` fits"))))
+
+(deftest d5-nothing-else-changed
+  (testing "two overloads that both fit the usual binding: the values choose (the dynamic path, as before)"
+    (is (= "pickU9-String" (static '(let [m {:a "s"}] (d/pickU9 (:a m) 1)))))
+    (is (= "pickU9-Env" (static '(let [m {:a (ckway.round9-test/env5)}] (d/pickU9 (:a m) 1)))))
+    (is (= "pickU9-Env" (static '(d/pickU9 (d/Env9 "e") 1)))))
+  (testing "a trailing lambda with known types: the same as in A2"
+    (is (= "serve9-port:f:80:0.0.0.0:m" (static '(d/serve9 "f" (fn [] "m")))))))
+
+;; ---------------------------------------------------------------- D6
+
+;; Ktor: `fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure: B.() -> Unit)` and `(sp/StatusPages)` of the type
+;; `ApplicationPlugin<StatusPagesConfig>`, a subtype of `Plugin<Application, StatusPagesConfig, PluginInstance>`: Kotlin knows
+;; that `B` is `StatusPagesConfig`, so `cfg` of `(fn [cfg] ...)` has that type. In kt it had none, the inner call went the
+;; dynamic path, and the hints of its lambda (A4) were not seen. The type that the other arguments fix is the upper bound of the
+;; parameter now. It is read from the declared Kotlin type of an argument that is a call of a kt var (also a property).
+
+(deftest d6-the-lambda-parameter-has-the-type-that-another-argument-fixes
+  (testing "the receiver of the inner call is typed: the ambiguity is a compile error, and a hint on the inner lambda chooses"
+    (is (str/includes? (str (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/appPlug6)
+                                                         (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "is ambiguous"))
+    (is (= "install6:on6-call:x" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                          (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (is (= "install6:on6-ctx:y" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                         (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "y"))))))))
+  (testing "no reflection warning for the inner call"
+    (is (not (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h]
+                                                    (d/.install6 h (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x"))))))
+                            "Reflection warning"))))
+  (testing "a receiver of unknown type does not matter when one declaration is left: the call is static"
+    (is (str/includes? (str (compile-error '(fn [h] (d/.install6 h (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))) "is ambiguous"))))
+
+(deftest d6-the-class-of-the-parameter-is-an-upper-bound-only
+  (testing "a hint that the user wrote on the parameter wins"
+    (is (= "install6:on6-call:x" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                          (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (is (str/includes? (str (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/appPlug6)
+                                                         (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "is ambiguous")))
+  (testing "the value of the parameter is the object that the plugin made"
+    (is (= "install6:other6" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6)
+                                                      (fn [cfg] (d/.other6 cfg))))))
+    (is (nil? (compile-error '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6) (fn [cfg] (d/.other6 cfg)))))))
+  (testing "the configure parameter is typed with another plugin: the type of that plugin"
+    (is (= "install6:other6" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6) (fn [^fx.r9.CfgB6 cfg] (d/.other6 cfg))))))))
+
+(deftest d6-no-type-where-the-arguments-do-not-fix-one
+  (testing "two arguments that give different types: none (Kotlin takes the common supertype)"
+    (let [m (compile-error '(d/both6 (d/appPlug6) (d/appPlugB6) (fn [cfg] (d/.on6 cfg (fn [c] "x")))))]
+      (is (nil? m) m)))
+  (testing "a star projection: none"
+    (is (nil? (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x")))))))
+    (is (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h] (d/.install6 h (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "can't be resolved statically")))
+  (testing "a local: only the class is known, so no type argument"
+    (is (nil? (compile-error '(let [p (d/appPlug6)] (d/.install6 ^fx.r9.AppHost6 (identity nil) p (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))))
+    (is (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h] (let [p (d/appPlug6)] (d/.install6 h p (fn [cfg] (d/.on6 cfg (fn [c] "x")))))))
+                       "can't be resolved statically")))
+  (testing "a type parameter that no argument fixes, and one in a nested position"
+    (is (nil? (compile-error '(d/unfixed6 (fn [cfg] (d/.on6 cfg (fn [c] "x"))) (fn [] (identity nil))))))
+    (is (nil? (compile-error '(d/list6 [(d/appPlug6)] (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))))
+  (testing "the calls run, the run time decides where the compiler did not"
+    (is (= "both6:on6-call:x" (eval-here '(d/both6 (d/appPlug6) (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (testing "the hints of the inner lambda are not seen on the dynamic path (cfg has no type): ambiguous at run time"
+      (is (error-has? (static '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "z")))))
+                      "is ambiguous"))
+      (is (= "install6:on6-ctx:z" (static '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/starPlug6) (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "z"))))))
+          "a hint on the parameter helps")))
+  (testing "no configure lambda: the default"
+    (is (= "install6:none" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)))))))
+
+(deftest d6-nothing-else-changed
+  (testing "a fn literal at a function type whose parameter is a plain class: as before"
+    (is (= "on9-call:x" (d/on9 (fn [^fx.r9.Call9 c] "x"))))
+    (is (str/includes? (str (compile-error '(d/withHost9 (fn [host] (d/.at9 host (fn [c] "x")))))) "is ambiguous")))
+  (testing "supertype-args"
+    (is (= ["fx/r9/AppHost6" "fx/r9/CfgA6" "fx/r9/Inst6"]
+           (mapv :class (ckway.meta/supertype-args "fx/r9/AppPlug6" [{:class "fx/r9/CfgA6" :args [] :nullable? false}] "fx/r9/Plug6"))))
+    (is (nil? (ckway.meta/supertype-args "fx/r9/AppPlug6" [{:class "fx/r9/CfgA6" :args []}] "fx/r9/Cfg9")))
+    (is (nil? (ckway.meta/supertype-args "fx/r9/AppPlug6" [] "fx/r9/Plug6")) "a wrong number of arguments")))
