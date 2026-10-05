@@ -406,7 +406,7 @@
     (testing "the same inherited declaration in two namespaces is the same call"
       (is (= (:kt/decls (meta #'f/.hello)) (:kt/decls (meta #'o/.hello))))
       (is (= (:kt/decls (meta #'f/.shared)) (:kt/decls (meta #'o/.shared))))
-      (let [norm (fn [x] (-> (pr-str x) (str/replace #"\(quote \{:ns [^}]*\}\)" "SITE") (str/replace #"\d+" "N")))]
+      (let [norm (fn [x] (-> (pr-str x) (str/replace #"\(quote \{:(?:ns|call) [^}]*\}\)" "SITE") (str/replace #"\d+" "N")))]
         (is (= (norm (inline-expansion '(f/.hello x))) (norm (inline-expansion '(o/.hello x)))))))))
 
 (deftest companion-receiver-is-checked

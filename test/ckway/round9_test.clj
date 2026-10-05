@@ -1369,3 +1369,91 @@
     (is (= 1001 (d/.plain9 (d/SvInt9 1)))))
   (testing "a suspend function that returns no value class"
     (is (= 11 (d/sId9 11)))))
+
+;; ---------------------------------------------------------------- D3
+
+;; `fun welcome(name: String)` and `(let [v (identity nil)] (s/welcome v))`: Kotlin's own check threw
+;; `NullPointerException: Parameter specified as non-null is null`. A nil LITERAL was a compile error. A nil that only the
+;; run time knows is a `kt:` error too, for every parameter and receiver that is not nullable (a plain `nil?` test in the
+;; expansion). A nullable parameter, a nullable receiver and a value that cannot be nil have no check.
+
+(defmacro ^:private expansion-of
+  "The expansion of the kt calls in `form`, as a string; the locals of the surrounding code are known to it."
+  [form]
+  (let [v (resolve (first form))]
+    (pr-str (clojure.walk/macroexpand-all (apply (:inline (meta v)) (rest form))))))
+
+(deftest d3-nil-from-a-variable-at-a-non-null-parameter
+  (testing "a String parameter"
+    (let [r (static '(let [v (identity nil)] (d/welcome9 v)))]
+      (is (error-has? r "kt: (d/welcome9 v): nil where Kotlin expects a non-null String (the argument `name` (String))"
+                      "Kotlin: fun welcome9(name: String): String") r)))
+  (testing "not a NullPointerException, and a value that is not nil still works"
+    (is (= "welcome:w" (static '(let [v (identity "w")] (d/welcome9 v)))))
+    (is (= "welcome:w" (static '(let [^String v (identity "w")] (d/welcome9 v))))))
+  (testing "a hinted nil is still nil"
+    (is (error-has? (static '(let [^String v (identity nil)] (d/welcome9 v))) "nil where Kotlin expects a non-null String (the argument `name`")))
+  (testing "the second and the third parameter: the one that is nullable takes nil"
+    (is (error-has? (static '(let [v (identity nil)] (d/twoNn9 "a" nil v))) "nil where Kotlin expects a non-null Any (the argument `c` (Any))"))
+    (is (error-has? (static '(let [v (identity nil)] (d/twoNn9 v nil "c"))) "non-null String (the argument `a` (String))"))
+    (is (= "twoNn9:a:null:c" (static '(let [v (identity nil)] (d/twoNn9 "a" v "c"))))))
+  (testing "a collection and a function parameter"
+    (is (error-has? (static '(let [v (identity nil)] (d/lenOfNn9 v))) "nil where Kotlin expects a non-null" "(the argument `xs`"))
+    (is (error-has? (static '(let [v (identity nil)] (d/fnNn9 v))) "nil where Kotlin expects a non-null (String) -> String (the argument `f`")))
+  (testing "a parameter that has a default value, named and positional"
+    (is (error-has? (static '(let [v (identity nil)] (d/defNn9 :b v))) "non-null String (the argument `b` (String))"))
+    (is (= "defNn9:d:x" (static '(let [v (identity "x")] (d/defNn9 :b v))))))
+  (testing "an overloaded function, when the other overload takes an Int the call is still a choice by the types"
+    (is (= "ovNn9-String" (static '(let [^String v (identity "s")] (d/ovNn9 v)))))
+    (is (error-has? (static '(let [^String v (identity nil)] (d/ovNn9 v))) "nil where Kotlin expects a non-null String")))
+  (testing "a primitive parameter: the message it always had"
+    (is (error-has? (static '(let [v (identity nil)] (d/primNn9 v 1.0 true))) "nil where Kotlin expects a non-null Int"))))
+
+(deftest d3-nil-receiver
+  (testing "an extension, a member and an extension on Any"
+    (is (error-has? (static '(let [v (identity nil)] (d/.shoutNn9 ^String v))) "kt: (d/.shoutNn9 v): nil where Kotlin expects a non-null String (the receiver)"))
+    (is (error-has? (static '(let [v (identity nil)] (d/.hi9 ^fx.r9.Nn3Box9 v "x"))) "nil where Kotlin expects a non-null fx.r9.Nn3Box9 (the receiver)"))
+    (is (error-has? (static '(let [v (identity nil)] (d/.tagOfNn9 ^Object v))) "non-null Any (the receiver)")))
+  (testing "a receiver that is nullable takes nil"
+    (is (= "shoutN9:null" (static '(let [v (identity nil)] (d/.shoutN9 ^String v)))))
+    (is (= "shoutN9:x" (static '(let [v (identity "x")] (d/.shoutN9 ^String v)))))
+    (is (= "idRecv9:null" (static '(let [v (identity nil)] (d/.idRecv9 ^Object v))))))
+  (testing "a value that is not nil"
+    (is (= "shoutNn9:X" (static '(let [^String v (identity "x")] (d/.shoutNn9 v)))))
+    (is (= "b hi y" (static '(let [^fx.r9.Nn3Box9 b (d/Nn3Box9 "b") y (identity "y")] (d/.hi9 b y)))))))
+
+(deftest d3-the-dynamic-path-and-reify-have-the-same-answer
+  (is (error-has? (dynamic #'d/welcome9 [nil]) "nil"))
+  (testing "a kt/reify member has no check of its own: the call through Kotlin that takes the interface is guarded by the caller"
+    (let [s (kt/reify d/Sink9 (.put9 [_ x] (str "put:" x)))]
+      (is (= "put:q" (d/useSink9 s "q")))
+      (is (error-has? (static '(let [s (kt/reify d/Sink9 (.put9 [_ x] "no-check")) v (identity nil)] (d/useSink9 s v)))
+                      "nil where Kotlin expects a non-null String (the argument `x` (String))"))
+      (is (error-has? (static '(let [^fx.r9.Sink9 s (kt/reify d/Sink9 (.put9 [_ x] "no-check")) v (identity nil)] (d/.put9 s v)))
+                      "nil where Kotlin expects a non-null String (the argument `s` (String))")))))
+
+(deftest d3-the-expansion-has-a-plain-nil-check-where-nil-is-possible
+  (testing "a local of unknown value: a check, with the error call only in the failing branch"
+    (let [e (let [v (identity "x")] (expansion-of (d/welcome9 v)))]
+      (is (str/includes? e "(if (clojure.core/nil? ") e)
+      (is (str/includes? e "ckway.rt/nn-fail") e)
+      (is (not (str/includes? e "ckway.rt/nn-arg")) "no call of a library function on the way of a value that is not nil")))
+  (testing "no check for a literal, a number, a call of Kotlin with a non-null result, a constructor and a fn literal"
+    (is (not (str/includes? (expansion-of (d/welcome9 "x")) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/welcome9 (d/sNn9))) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/.hi9 (d/Nn3Box9 "b") "y")) "nn-fail")))
+    (is (not (str/includes? (expansion-of (d/fnNn9 (fn [s] s))) "nn-fail")))
+    (is (not (str/includes? (let [n (int 4)] (expansion-of (d/primNn9 n 1.0 true))) "nn-fail"))))
+  (testing "a nullable parameter and a nullable receiver have no check"
+    (is (not (str/includes? (let [v (identity nil)] (expansion-of (d/twoNn9 "a" v "c"))) "nn-fail")))
+    (is (not (str/includes? (let [v (identity nil)] (expansion-of (d/.shoutN9 ^String v))) "nn-fail")))))
+
+(deftest d3-nothing-else-changed
+  (testing "a nil literal is a compile error as before"
+    (is (error-has? {:error (compile-error '(d/welcome9 nil))} "no Kotlin declaration of `welcome9` fits"))
+    (is (error-has? {:error (compile-error '(d/welcome9 nil))} "welcome9")))
+  (testing "the type parameter with a bound keeps its text"
+    (is (error-has? (static '(let [v (identity nil)] (d/ovNil9b v))) "nil where Kotlin expects a non-null value of the type parameter `T : Any`")))
+  (testing "a Clojure value of a wrong class is still the old error"
+    (is (error-has? (static '(let [v (identity 5.5)] (d/welcome9 v))) "`name`" "String"))))
+

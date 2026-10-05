@@ -243,14 +243,21 @@
                    (when receiver? (same-name-hint site (class v))))
               {:kt/wrong-class (.getName (class v))}))))
 
+(defn nn-fail
+  "The kt error for a nil where Kotlin takes no nil. `site` = {:call :sig :what :bound}: `:bound` is the text of the non-null
+  bound of a type parameter (`T : Any`), or absent for a parameter of a plain non-null type, which `:type` names. The static
+  path calls it from a plain `nil` check in the expansion, for a nil that it could not see at compile time."
+  [site]
+  (r/fail (str "kt: " (when (:call site) (str (:call site) ": "))
+               (if (:bound site)
+                 (str "nil where Kotlin expects a non-null value of the type parameter `" (:bound site) "`")
+                 (str "nil where Kotlin expects a non-null " (:type site)))
+               " (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site))))))
+
 (defn nn-arg
-  "`v`, or a kt error when it is nil: the parameter is a type parameter with a non-null bound (`T : Any`), so Kotlin
-  takes no nil. `site` = {:call :sig :what :bound}; the static path calls it for a nil that it could not see at compile time."
+  "`v`, or a kt error when it is nil (`nn-fail`)."
   [site v]
-  (if (nil? v)
-    (r/fail (str "kt: " (when (:call site) (str (:call site) ": ")) "nil where Kotlin expects a non-null value of the type parameter `"
-                 (:bound site) "` (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site)))))
-    v))
+  (if (nil? v) (nn-fail site) v))
 
 (defn check-obj
   "`v` if it fits the object descriptor `td` ({:k :obj :cls :text :nullable?}), else a kt error that names the

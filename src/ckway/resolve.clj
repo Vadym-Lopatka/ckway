@@ -195,6 +195,16 @@
   #{"kotlin/collections/Iterable" "kotlin/collections/Collection" "kotlin/collections/List" "kotlin/collections/Set"
     "kotlin/collections/Map"})
 
+(defn- non-nil-result?
+  "Is the result of a call of `decl` sure not to be nil? Its Kotlin type is not nullable (a type parameter whose bounds are
+  nullable can be), and is no `Unit` or `Nothing` (`Unit` is nil here). A property read is a call too."
+  [decl]
+  (let [t (:return decl)]
+    (boolean (or (and (= :class (:kind decl)) (not (:no-constructor (:flags decl))))   ; a constructor
+                 (and t (#{:function :property} (:kind decl))
+                      (not (:nullable? t)) (not (:type-param t)) (not (:star? t))
+                      (not (#{"kotlin/Unit" "kotlin/Nothing"} (:class t))))))))
+
 (defn- nested-call-info
   "Info for a form that is itself a call of a kt var: when exactly one declaration fits, its
   Kotlin return type. Errors are left for the expansion of that inner call."
@@ -214,7 +224,9 @@
                                        (typed-return-class (:decl r) (types/resolve-forms *ns* (:tform r)))
                                        (return-class (:decl r)))))
               ;; Kotlin declares the result as a read-only collection (see `applicability*`)
-              (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)))
+              (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)
+              ;; Kotlin declares the result as a type that is not nullable: the value is not nil
+              (and (:decl r) (not (contains? r :tform)) (non-nil-result? (:decl r))) (assoc :non-nil true)))
           (catch clojure.lang.ExceptionInfo e
             (if (:kt/error (ex-data e)) {} (throw e))))))))
 
@@ -530,6 +542,16 @@
     (let [tp (type-param-of decl t)
           b (first (remove #(nullable-type? decl %) (:bounds tp)))]
       (str (:type-param t) " : " (if b (meta/type-text b) "Any")))))
+
+(defn- plain-nn
+  "{:type text} for a parameter or receiver of the plain non-null Kotlin type `t` (not a type parameter: `nonnull-tparam`)
+  whose JVM slot `jt` holds a reference: a nil for it is a `kt:` error. nil for a nullable type, a primitive, `Unit`/`Nothing`,
+  a value class (`vc-arg` checks it) and a type parameter."
+  [decl t jt]
+  (when (and t jt (not (:type-param t)) (not (:star? t)) (not (:value-class? t)) (not (:value-class t))
+             (not (nullable-type? decl t)) (not (contains? prim-classes jt))
+             (not (#{"kotlin/Unit" "kotlin/Nothing"} (:class t))))
+    {:type (meta/type-text t)}))
 
 (defn slots
   "One slot per receiver, then per parameter: {:name :class :nullable? :companion-of :adapt :kotlin-type}.
@@ -1855,10 +1877,12 @@
         other (for [[r it] (map vector recvs ritems) :when (not= :dispatch (:role r))]
                 (cond-> {:entry (comp-entry r it) :jvm-type (:jvm-type r)}
                   (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver"))
-                  (assoc :vc (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver")))))
+                  (assoc :vc (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver")))
+                  (and (not (:companion-of r)) (plain-nn decl (:type r) (:jvm-type r))) (assoc :nn (plain-nn decl (:type r) (:jvm-type r)))))
         self (when-let [jt (:jvm-type disp-recv)]
                (cond-> {:entry disp-item :jvm-type jt}
-                 (arg-conv (:type disp-recv) jt "this") (assoc :vc (arg-conv (:type disp-recv) jt "this"))))
+                 (arg-conv (:type disp-recv) jt "this") (assoc :vc (arg-conv (:type disp-recv) jt "this"))
+                 (and (not (:companion-of disp-recv)) (plain-nn decl (:type disp-recv) jt)) (assoc :nn (plain-nn decl (:type disp-recv) jt))))
         params (:params decl)
         omitted (set (keep-indexed #(when (:omitted %2) %1) pitems))
         defaults? (seq omitted)
@@ -1879,7 +1903,8 @@
                               vc (arg-conv (:type p) (:jvm-type p) (:name p))]
                           (cond-> {:entry it :jvm-type (:jvm-type p) :pname (:name p) :ptext (meta/type-text (:type p))}
                             ad (assoc :adapt ad) vc (assoc :vc vc)
-                            (nonnull-tparam decl (:type p)) (assoc :nn (nonnull-tparam decl (:type p)))))))
+                            (nonnull-tparam decl (:type p)) (assoc :nn (nonnull-tparam decl (:type p)))
+                            (and (not vc) (plain-nn decl (:type p) (:jvm-type p))) (assoc :nn (plain-nn decl (:type p) (:jvm-type p)))))))
         nmask (max 1 (quot (+ (count params) 31) 32))
         masks (for [m (range nmask)]
                 {:mask (unchecked-int (reduce (fn [acc i] (bit-or acc (bit-shift-left 1 (- i (* 32 m)))))
@@ -1906,6 +1931,9 @@
            (not-any? #(and (:entry %) (= (:idx (:entry %)) (:idx disp-item))) (:args p)))
       (update :ignored (fnil conj []) disp-item)
       (:suspend (:flags decl)) (assoc :suspend? true)
+      ;; the dispatch receiver of a member takes no nil
+      (and disp-recv (not companion?) (not (:companion-of disp-recv)) (plain-nn decl (:type disp-recv) "java.lang.Object"))
+      (assoc :target-nn (plain-nn decl (:type disp-recv) "java.lang.Object"))
       ret-vc (assoc :ret-vc ret-vc)
       (:fn-type (:return decl)) (assoc :ret-td (type-descriptor (:return decl))))))
 
@@ -2122,7 +2150,7 @@
                                       (:vararg a))
                      (:vararg-coll a) [[(:vararg-coll a) nil]]))
         target (:target p)]
-    (concat (when target [[(companion-entry target) (:class p) nil nil "the receiver"]])
+    (concat (when target [[(companion-entry target) (:class p) nil nil "the receiver" (:target-nn p)]])
             (mapcat from-arg (:args p))
             (map (fn [e] [e nil]) (:ignored p)))))
 
@@ -2276,16 +2304,24 @@
   "Is the argument sure not to be nil? A literal, a number cast or a trusted entry is; a hint, a class that Clojure
   inferred and a call are not."
   [info]
-  (boolean (or (:trusted info)
+  (boolean (or (:trusted info) (:non-nil info)
+               (some-> ^Class (:class info) .isPrimitive)
                (and (:class info) (not (:upper info)) (not (:static info))))))
 
 (defn- nn-guard
-  "The entry `e`, whose argument form is wrapped in a check for nil when the parameter is a type parameter with the
-  non-null bound `nn` (`T : Any`) and the argument may be nil: a nil that is only known at run time is a `kt:` error,
-  as the nil that is known at compile time is, not the NullPointerException of Kotlin."
+  "The entry `e`, whose argument form is wrapped in a check for nil when the parameter takes no nil and the argument may
+  be nil: `nn` is the text of the non-null bound of a type parameter (`T : Any`), or {:type text} for a parameter of a plain
+  non-null type. A nil that is only known at run time is a `kt:` error, as the nil that is known at compile time is, not
+  the NullPointerException of Kotlin. The check is a plain `nil?` test in the expansion: the error call is only in the branch
+  that fails (no var lookup and no allocation on the way of a value that is not nil)."
   [e nn what p]
-  (if (and nn (not (known-non-nil? (:info e))))
-    (update e :arg (fn [f] `(ckway.rt/nn-arg '~{:call (:call-text p) :sig (:sig p) :what (or what "a vararg element") :bound nn} ~f)))
+  (if (and nn (not (known-non-nil? (:info e)))
+           ;; the var of an object whose initialiser failed throws its own error (`guard-failed-objects`)
+           (not (and (seq? (:arg e)) (= `ckway.rt/live (first (:arg e))))))
+    (let [v (gensym "v")
+          site (merge {:call (:call-text p) :sig (:sig p) :what (or what "a vararg element")}
+                      (if (map? nn) nn {:bound nn}))]
+      (update e :arg (fn [f] `(let* [~v ~f] (if (nil? ~v) (ckway.rt/nn-fail '~site) ~v)))))
     e))
 
 (defn emit

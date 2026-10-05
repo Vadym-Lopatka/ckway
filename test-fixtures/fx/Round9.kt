@@ -509,3 +509,26 @@ fun runBlock9(block: suspend () -> Any?): Any? = kotlinx.coroutines.runBlocking 
 // a suspend member of an interface, written by kt/reify, that returns a value class
 interface SvIface9 { suspend fun give9(n: Int): SvAny9; suspend fun giveN9(n: Int): SvInt9? }
 fun useSvIface9(i: SvIface9): String = kotlinx.coroutines.runBlocking { "give:" + i.give9(3).a + ":" + i.giveN9(1)?.v + ":" + i.giveN9(0)?.v }
+
+// ---- D3: nil that only the run time knows, at a parameter or receiver that is plainly not nullable
+fun welcome9(name: String): String = "welcome:$name"
+fun twoNn9(a: String, b: String?, c: Any): String = "twoNn9:$a:$b:$c"
+fun lenOfNn9(xs: List<String>): Int = xs.size
+fun String.shoutNn9(): String = "shoutNn9:" + uppercase()
+fun String?.shoutN9(): String = "shoutN9:" + this
+fun Any.tagOfNn9(): String = "tagOfNn9:$this"
+fun <T> T.idRecv9(): String = "idRecv9:$this"
+class Nn3Box9(val label: String) {
+    fun hi9(who: String): String = "$label hi $who"
+    fun maybe9(who: String?): String = "$label maybe $who"
+    companion object { fun make9(label: String): Nn3Box9 = Nn3Box9(label) }
+}
+interface Sink9 { fun put9(s: String): String }
+fun useSink9(s: Sink9, x: String): String = s.put9(x)
+fun primNn9(n: Int, d: Double, b: Boolean): String = "primNn9:$n:$d:$b"
+fun fnNn9(f: (String) -> String): String = f("in")
+fun ovNn9(x: String): String = "ovNn9-String"
+fun ovNn9(x: Int): String = "ovNn9-Int"
+fun varStrNn9(vararg xs: String): String = "varStrNn9:" + xs.size
+fun defNn9(a: String = "d", b: String): String = "defNn9:$a:$b"
+fun sNn9(): String = "sNn9"
