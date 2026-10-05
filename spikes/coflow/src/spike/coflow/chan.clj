@@ -624,3 +624,58 @@
   "Registers `h` (see `handler`) as a put of v. Returns a box when it was done at once, or nil when it is pending."
   [port v h]
   (impl/put! port v h))
+
+;; --- one arbitration for a proc with user ports: core.async's own commit protocol, as `alts` does it ---------------
+
+(def ^:private lock-ids (AtomicLong. 0))
+
+(defn alts-ops
+  "Waits for exactly one of `ops`, in priority order (the first op has the highest priority), with core.async's commit
+  protocol (`impl/Handler`: active?, commit, lock-id, blockable?) and ONE shared flag and lock for all ops, as `alts!`
+  does. An op is [:take port id] or [:put port msg id]; a port is anything that implements ReadPort / WritePort of
+  clojure.core.async.impl.protocols: a port of ours (Kotlin Channel) or a core.async channel of the user. Returns [value id]:
+  for a take the message (nil: closed), for a put true (false: closed).
+  Why: a channel commits a take or a put of a handler only if the shared flag is still free (under the lock), and
+  the commit makes the flag busy. So exactly one op wins, and nothing is taken from a channel that is not delivered
+  to the caller. A value that a pump of one of OUR ports took for a handler that is no longer free stays in that port
+  (the stash), in its place and counted in its capacity (see raw-try-send!)."
+  [ops]
+  (let [flag (atom true)
+        lock (ReentrantLock.)
+        lid (.incrementAndGet ^AtomicLong lock-ids)
+        res (promise)
+        mk (fn [id]
+             (reify
+               Lock
+               (lock [_] (.lock lock))
+               (unlock [_] (.unlock lock))
+               impl/Handler
+               (active? [_] @flag)
+               (blockable? [_] true)
+               (lock-id [_] lid)
+               (commit [_] (reset! flag false) (fn [v] (deliver res [v id])))))]
+    (loop [ops (seq ops)]
+      (if ops
+        (let [[kind port x y] (first ops)
+              id (if (= kind :take) x y)
+              b (if (= kind :take)
+                  (impl/take! port (mk id))
+                  (impl/put! port x (mk id)))]
+          (if b
+            [@b id]
+            (recur (next ops))))
+        (try
+          (deref res)
+          (catch InterruptedException e
+            ;; the wait is cancelled (a forced cancel of the proc): no op may commit after this
+            (.lock lock)
+            (try (reset! flag false) (finally (.unlock lock)))
+            (throw e)))))))
+
+(defn close-quiet!
+  "Closes a port of ours without flushing a transducer (used when a flow is cleaned up: nobody reads any more)."
+  [^KPort p]
+  (kch/.close (.-ch p))
+  (kch/.trySend (.-wake p) true)
+  (kch/.trySend (.-put-wake p) true)
+  nil)

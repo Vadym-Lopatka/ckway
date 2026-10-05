@@ -112,6 +112,7 @@
 (defprotocol Coroutines
   (flow-scope [r] "the CoroutineScope that owns the coroutines of the flow")
   (reaper-jobs [g] "the reaper Jobs of the runs that were stopped (a vector; see spike.coflow.ext/await-stopped)")
+  (set-grace! [g ms] "the grace time (ms) after which the next stop cancels the run by force; nil: never (the default)")
   (get-dispatcher [r context] "the CoroutineDispatcher for :mixed, :io or :compute"))
 
 ;; ---------------------------------------------------------------------------------------------------------------
@@ -163,20 +164,36 @@
   ;; Kotlin: job.children
   (iterator-seq (.iterator (co/children job))))
 
+(defn- grace-ms
+  "The grace time after which a stopped run is cancelled by force: the option of `ext/stop-with-grace`, or the system
+  property coflow.stop.grace.ms. Default: none. The original never interrupts user code after stop, so the default is no
+  forced cancel."
+  [opt]
+  (or opt (Long/getLong "coflow.stop.grace.ms")))
+
 (defn- start-reaper
   "The cleanup of a stopped run. It runs in a coroutine that is NOT a child of the flow's scope (it is launched in
-  GlobalScope, and it ends by itself): it waits until every coroutine of the scope is done (the procs take the stop
-  command and run their transition fn; transforms and injects finish) for at most the grace time (system property
-  coflow.stop.grace.ms, default 5000), then cancels and joins the scope. So stop does not wait, and no coroutine
-  outlives the stop for longer than the grace time. Returns the Job of the reaper."
-  ^Job [^CoroutineScope scope]
+  GlobalScope, and it ends by itself). It waits until every proc has taken the stop command and ended (their transition
+  fn runs), then closes the internal channels (so the pumps, mults and blocked injects of the run end), then waits until
+  every other coroutine of the scope (a running transform, an inject) is done. No time limit, as in the original
+  (user code is never interrupted). Only if a grace time is set (option or property) is the scope cancelled after it.
+  So `stop` does not wait. Returns the Job of the reaper."
+  ^Job [^CoroutineScope scope proc-jobs internals opt-grace]
   (let [job (scope-job scope)
-        grace (Long/getLong "coflow.stop.grace.ms" 5000)]
-    ;; Kotlin: GlobalScope.launch(Dispatchers.Default) { withTimeoutOrNull(grace) { job.children.forEach { it.join() } }; job.cancelAndJoin() }
+        grace (grace-ms opt-grace)
+        run-all (fn []
+                  (doseq [^Job j proc-jobs] (co/.join j))
+                  (doseq [p internals] (chan/close-quiet! p))
+                  (doseq [^Job j (children-of job)] (co/.join j))
+                  true)]
+    ;; Kotlin: GlobalScope.launch(Dispatchers.Default) { withTimeoutOrNull(grace) { ... join ... }; close; job.cancelAndJoin() }
     (co/.launch co/GlobalScope :context (co/Default co/Dispatchers)
                 :block (fn [_]
-                         (co/withTimeoutOrNull grace (fn [_] (doseq [^Job j (children-of job)] (co/.join j)) true))
-                         (co/.cancelAndJoin job)))))
+                         (if grace
+                           (do (co/withTimeoutOrNull (long grace) (fn [_] (run-all)))
+                               (doseq [p internals] (chan/close-quiet! p))
+                               (co/.cancelAndJoin job))
+                           (run-all))))))
 
 (defn create-flow
   "see lib ns for docs"
@@ -184,6 +201,7 @@
   (let [lock (ReentrantLock.)
         chans (atom nil)
         reapers (atom [])
+        grace (atom nil)
         execs {:mixed mixed-exec :io io-exec :compute compute-exec}
         _ (assert (every? #(or (nil? %) (instance? Executor %)) (vals execs))
                   "mixed-exe, io-exec and compute-exec must be Executors")
@@ -240,6 +258,7 @@
             {:report-chan report :error-chan error :already-running true}
             (let [scope (new-scope)
                   jobs (atom [])
+                  taps (atom [])
                   control-chan (chan/port scope 10)
                   control-taps (mult scope control-chan)
                   report-chan (chan/port scope (chan/sliding 100))
@@ -302,6 +321,7 @@
                       (let [chan-map (fn [ks coll] (zipmap (keys ks) (map #(coll [pid %]) (keys ks))))
                             control-tap (chan/port scope 10)]
                         (tap! control-taps control-tap)
+                        (swap! taps conj control-tap)
                         (let [job (spi/start proc {:pid pid :args (assoc args ::flow/pid pid)
                                                    :resolver resolver :cast cast
                                                    :ins (assoc (chan-map ins in-chans)
@@ -323,13 +343,15 @@
               (reset! chans {:control control-chan :resolver resolver :cast cast
                              :report report-chan, :error error-chan
                              :ins in-chans, :outs out-chans
-                             :scope scope :jobs jobs})
+                             :scope scope :jobs jobs
+                             :internals #(vec (distinct (concat @taps (map :chan (vals castees)) (vals in-chans)
+                                                                (filter some? (vals out-chans)))))})
               {:report-chan report-chan :error-chan error-chan}))
           (finally (.unlock lock))))
       (stop [_]
         (.lock lock)
         (try
-          (when-let [{:keys [report error scope control]} @chans]
+          (when-let [{:keys [report error scope control jobs internals]} @chans]
             (send-command ::flow/stop ::flow/all)
             ;; the control channel is internal: closing it ends its mult coroutine (the buffered stop is still delivered)
             (chan/close! control)
@@ -338,7 +360,7 @@
             (reset! chans nil)
             ;; Same as the original: stop returns at once. Structured cleanup runs in a reaper coroutine that is not
             ;; part of the flow's scope.
-            (swap! reapers #(conj (filterv (fn [^Job j] (.isActive j)) %) (start-reaper scope)))
+            (swap! reapers #(conj (filterv (fn [^Job j] (.isActive j)) %) (start-reaper scope @jobs (internals) @grace)))
             true)
           (finally (.unlock lock))))
       (pause [_] (send-command ::flow/pause ::flow/all))
@@ -362,6 +384,7 @@
       Coroutines
       (flow-scope [_] (:scope @chans))
       (reaper-jobs [_] @reapers)
+      (set-grace! [_ ms] (reset! grace ms))
       (get-dispatcher [_ context] (dispatcher-for (or (execs context) context))))))
 
 (defn handle-command
@@ -393,44 +416,16 @@
       (kch/isClosed r) [nil]
       :else nil)))
 
-(defn- write-foreign
-  "The write to a core.async port that is not ours (a user's ::flow/out-ports), as `alts!! [control [outc msg]]`
-  does it: control first; the message is put straight into the user's channel (no hop, no extra buffer), and it is
-  put only when the proc really writes: the put is registered while the proc waits, with a handler that can be
-  cancelled. Returns [:control cmd sent?] or [:sent ok]; sent? is true when the put had already happened when the
-  control message won (then the loop must not write the message again)."
-  [control outc msg]
-  (if-let [[cmd] (try-receive control)]
-    [:control cmd false]
-    (if-let [[ok] (chan/try-put-state outc msg)]
-      [:sent ok]
-      ;; Kotlin: val done = Channel<Boolean>(1)
-      (let [done (kch/Channel 1)
-            [h cancel!] (chan/handler (fn [ok] (kch/.trySend done ok)) true)]
-        (try
-          (if-let [b (chan/put-with! outc msg h)]
-            [:sent @b]
-            ;; Kotlin: select { control.onReceiveCatching { ... }; done.onReceive { ... } }   -- biased: control first
-            (let [r (sel/select
-                     (fn [sb]
-                       (sel/.invoke sb (kch/onReceiveCatching (chan/->kotlin control))
-                                    (fn [r] [:control (kch/.getOrNull r)]))
-                       (sel/.invoke sb (kch/onReceive done) (fn [ok] [:sent ok]))))]
-              (if (= (nth r 0) :control)
-                (do (when (some? (nth r 1)) (chan/received! control))
-                    (if (cancel!)
-                      [:control (nth r 1) false]
-                      ;; the put was committed in the same moment: it happens, wait for the end of it
-                      (do (kch/.receive done) [:control (nth r 1) true])))
-                r)))
-          (finally (cancel!)))))))
-
 (defn- write-or-control
   "Writes msg to the port `outc`, but a control message has priority and is returned instead.
-  Returns [:control cmd sent?] or [:sent ok]."
-  [control outc msg]
-  (if-not (chan/port? outc)
-    (write-foreign control outc msg)
+  Returns [:control cmd] or [:sent ok].
+  alts? (a proc with ports of the user): ONE arbitration for control and the put, with core.async's commit protocol
+  (`chan/alts-ops`), so the message goes into the user's channel only if control did not win. Otherwise (all ports are
+  ours): a Kotlin select, control first."
+  [control outc msg alts?]
+  (if alts?
+    (let [[r id] (chan/alts-ops [[:take control ::control] [:put outc msg ::put]])]
+      (if (= id ::control) [:control r false] [:sent r]))
     ;; fast path, the same choice as the biased select below, without suspending: control first, then the send
     (if-let [[cmd] (try-receive control)]
       [:control cmd false]
@@ -447,7 +442,7 @@
                           (fn [_] (chan/sent! outc) [:sent true]))))
           (catch ClosedSendChannelException _ [:sent false]))))))
 
-(defn send-outputs [status state outputs outs resolver control handle-command transition cast]
+(defn send-outputs [status state outputs outs resolver control handle-command transition cast alts?]
   (loop [nstatus status, nstate state, outputs (seq outputs)]
     (if (or (nil? outputs) (= nstatus :exit))
       [nstatus nstate]
@@ -470,11 +465,11 @@
                             (loop [nstatus nstatus, nstate nstate, items (seq items)]
                               (if (or (nil? items) (= nstatus :exit))
                                 [nstatus nstate]
-                                (let [[kind v sent?] (write-or-control control outc (first items))]
+                                (let [[kind v] (write-or-control control outc (first items) alts?)]
                                   (if (= kind :control)
                                     (let [nnstatus (handle-command nstatus v)
                                           nnstate (handle-transition transition nstatus nnstatus nstate)]
-                                      (recur nnstatus nnstate (if sent? (next items) items)))
+                                      (recur nnstatus nnstate items))
                                     (recur nstatus nstate (next items))))))]
                         (when done? (chan/close! outc))
                         (recur nnstatus nnstate (next msgs)))))]
@@ -487,76 +482,34 @@
   (or (instance? CancellationException ex)
       (not (co/isActive scope))))
 
-(defn- slow-select
-  "The waiting part of select-input, when no port has a message now. `ids` is the read set in priority order.
-  Ports of ours go into one Kotlin select. A core.async port that is not ours gets a take that is registered only
-  now, while the proc waits (the proc does not read ahead), with a handler that can be cancelled. The winner is
-  one source. If a user's channel committed a message in the same moment as another source won, that message is
-  kept in `held` and the proc reads it next (see README, \"the one race\")."
-  [ids held]
-  (let [;; Kotlin: val inbox = Channel<Pair<Id, Msg>>(UNLIMITED)
-        inbox (kch/Channel (kch/UNLIMITED kch/Channel))
-        regs (volatile! [])
-        immediate (volatile! nil)]
-    (try
-      (doseq [[id c] ids
-              :while (nil? @immediate)
-              :when (not (chan/port? c))]
-        (let [[h cancel!] (chan/handler (fn [v] (kch/.trySend inbox [id [v]])) true)
-              b (chan/take-with! c h)]
-          (vswap! regs conj [id cancel!])
-          (when b (vreset! immediate [@b id]))))
-      (let [winner
-            (or @immediate
-                (sel/select
-                 (fn [sb]
-                   ;; Kotlin: select { control.onReceiveCatching{..}; casts...; ins...; inbox.onReceive{..} }
-                   (doseq [[id c] ids :when (chan/port? c)]
-                     (sel/.invoke sb (kch/onReceiveCatching (chan/->kotlin c))
-                                  (fn [r] (let [v (kch/.getOrNull r)] (when (some? v) (chan/received! c)) [v id]))))
-                   (sel/.invoke sb (kch/onReceive inbox)
-                                (fn [[id [v]]] [v id :inbox])))))
-            won-id (when (= (nth winner 2 nil) :inbox) (nth winner 1))
-            ;; every registration that is not the winner is cancelled; one that committed anyway holds a message
-            ;; that is on its way into the inbox: collect it
-            late (reduce (fn [acc [id cancel!]]
-                           (if (and (= id (nth winner 1)) (or (= won-id id) @immediate))
-                             acc
-                             (if (cancel!) acc (conj acc id))))
-                         [] @regs)
-            held' (reduce (fn [h _]
-                            (let [[id [v]] (kch/.receive inbox)]
-                              (assoc h id [v])))
-                          held late)]
-        [(nth winner 0) (nth winner 1) held'])
-      (finally
-        (doseq [[_ cancel!] @regs] (cancel!))))))
-
 (defn- select-input
-  "Waits for the next message on the control port, the casts port or one of the read-ins (in this order: the
-  select is biased, so control wins), as `alts!! ... :priority true` does. Returns [msg id held] where id is
-  ::control, ::casts or the cid of the input, and held is the map of messages that were taken from a user's channel
-  by a race and wait for the proc (normally empty). A closed input gives [nil cid]."
-  [control casts read-ins ipred held]
+  "Waits for the next message on the control port, the casts port or one of the read-ins (in this order: control wins),
+  as `alts!! ... :priority true` does. Returns [msg id] where id is ::control, ::casts or the cid of the input.
+  A closed input gives [nil cid].
+  alts? (a proc with ports of the user): ONE arbitration over all of them with core.async's commit protocol
+  (`chan/alts-ops`): a channel gives a message only if nothing else has won, so a user's channel loses no message. Otherwise
+  (all ports are ours): tryReceive in priority order, then one Kotlin `select`."
+  [control casts read-ins ipred alts?]
   (let [ids (cond-> [[::control control]]
               casts (conj [::casts casts])
-              true (into (comp (filter (fn [[cid _]] (ipred cid))) (map (fn [[cid c]] [cid c]))) read-ins))
-        ;; fast path: the first port (in this order) that has something now, without suspending. A user's channel
-        ;; is only polled: nothing is taken unless the proc reads it.
-        hit (some (fn [[id c]]
-                    (cond
-                      (contains? held id) [(first (get held id)) id]
-                      (chan/port? c) (when-let [[v] (try-receive c)] [v id])
-                      :else (when-let [[v] (chan/poll-state c)] [v id])))
-                  ids)]
-    (if hit
-      [(nth hit 0) (nth hit 1) (dissoc held (nth hit 1))]
-      (slow-select ids held))))
+              true (into (comp (filter (fn [[cid _]] (ipred cid))) (map (fn [[cid c]] [cid c]))) read-ins))]
+    (if alts?
+      (chan/alts-ops (mapv (fn [[id c]] [:take c id]) ids))
+      (or (some (fn [[id c]] (when-let [[v] (try-receive c)] [v id])) ids)
+          (sel/select
+           (fn [sb]
+             ;; Kotlin: select { control.onReceiveCatching { ... }; casts.onReceiveCatching { ... }; ins.forEach { ... } }
+             (doseq [[id c] ids]
+               (sel/.invoke sb (kch/onReceiveCatching (chan/->kotlin c))
+                            (fn [r] (let [v (kch/.getOrNull r)] (when (some? v) (chan/received! c)) [v id]))))))))))
 
 (defn- wait-control
-  "paused: only the control port is read. Returns the message, or ::closed."
-  [control]
-  (chan/recv! control))
+  "paused: only the control port is read. Returns the message, or ::chan/closed."
+  [control alts?]
+  (if alts?
+    (let [[v _] (chan/alts-ops [[:take control ::control]])]
+      (if (nil? v) ::chan/closed v))
+    (chan/recv! control)))
 
 (defn- compute-transform
   "workload :compute. Each call of the step fn runs as a coroutine on Dispatchers.Default; the loop waits at most
@@ -593,12 +546,16 @@
               outs (into (or outs {}) (::flow/out-ports state))
               control (::flow/control ins)
               casts (::flow/casts ins)
-              ;; the user's own channels (core.async) stay as they are: they are read and written by the loop itself
+              ;; the user's own channels (core.async) stay as they are: the loop reads and writes them itself
               read-ins (dissoc ins ::flow/control ::flow/casts)
               wouts outs
+              ;; a proc that has a port of the user waits on ONE arbitration (core.async's commit protocol); a proc that
+              ;; has only ports of ours uses the Kotlin select
+              alts? (boolean (or (some #(and (some? %) (not (chan/port? %))) (vals read-ins))
+                                 (some #(and (some? %) (not (chan/port? %))) (vals wouts))))
               run
               (fn [^CoroutineScope loop-scope]
-                (loop [status :paused, state state, count 0, read-ins read-ins, held {}]
+                (loop [status :paused, state state, count 0, read-ins read-ins]
                   (let [pong (fn [c]
                                (let [pins (dissoc ins ::flow/control ::flow/casts)
                                      pouts (dissoc outs ::flow/error ::flow/report)]
@@ -608,43 +565,42 @@
                                                                              :ins pins :outs pouts})
                                                       ::flow/state (ping-map-fn state)))))
                         handle-command (partial handle-command pid pong)
-                        [nstatus nstate count read-ins held]
+                        [nstatus nstate count read-ins]
                         (try
                           (if (= status :paused)
-                            (let [msg (wait-control control)
+                            (let [msg (wait-control control alts?)
                                   nstatus (if (identical? msg ::chan/closed) :exit (handle-command status msg))
                                   nstate (handle-transition step status nstatus state)]
-                              [nstatus nstate count read-ins held])
+                              [nstatus nstate count read-ins])
                             ;;:running
                             (let [ipred (or (::flow/input-filter state) identity)
-                                  [msg cid held] (select-input control casts read-ins ipred held)]
+                                  [msg cid] (select-input control casts read-ins ipred alts?)]
                               (if (= cid ::control)
                                 (let [nstatus (handle-command status msg)
                                       nstate (handle-transition step status nstatus state)]
-                                  [nstatus nstate count read-ins held])
+                                  [nstatus nstate count read-ins])
                                 (try
                                   (let [[nstate outputs]
                                         (if (= cid ::casts) ;;[sigid msg]
                                           (transform state (first msg) (second msg))
                                           (transform state cid msg))
                                         [nstatus nstate]
-                                        (send-outputs status nstate outputs wouts resolver control handle-command step cast)]
+                                        (send-outputs status nstate outputs wouts resolver control handle-command step cast alts?)]
                                     [nstatus nstate (inc count) (if (some? msg)
                                                                   read-ins
-                                                                  (dissoc read-ins cid))
-                                     held])
+                                                                  (dissoc read-ins cid))])
                                   (catch Throwable ex
                                     (when (cancelled? loop-scope ex) (throw ex))
                                     (chan/send! (wouts ::flow/error)
                                                 #::flow{:pid pid, :status status, :state state,
                                                         :count (inc count), :cid cid, :msg msg :op :step, :ex ex})
-                                    [status state count read-ins held])))))
+                                    [status state count read-ins])))))
                           (catch Throwable ex
                             (when (cancelled? loop-scope ex) (throw ex))
                             (chan/send! (wouts ::flow/error)
                                         #::flow{:pid pid, :status status, :state state, :count (inc count), :ex ex})
-                            [status state count read-ins held]))]
+                            [status state count read-ins]))]
                     (when-not (= nstatus :exit) ;;fall out
-                      (recur nstatus nstate (long count) read-ins held)))))]
+                      (recur nstatus nstate (long count) read-ins)))))]
           ;; Kotlin: scope.launch(dispatcher) { run() }
           (co/.launch scope :context exs :block run))))))

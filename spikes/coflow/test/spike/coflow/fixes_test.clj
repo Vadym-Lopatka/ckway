@@ -73,17 +73,15 @@
   (scenario-in-all-arms :outports-backpressure-3 {:accepted-before-block 5 :first :zero :buffered-after-first 3 :in-order true})
   (scenario-in-all-arms :outports-control-priority {:ping :running :ping2 :running :msgs [7 7] :nothing-more :timeout}))
 
-(deftest item-2-in-ports-race-bound
-  ;; Where the port can differ: a user's channel commits a message in the same moment as a control message wins the
-  ;; select. The message is then held by the proc (not lost) and read next. It is lost only if a stop comes before
-  ;; that read: at most one message per in-port. The oracle loses none (alts!! is atomic).
-  (let [rs (each-arm #(arms/call % 'inports-race-stress 400 25))]
-    (doseq [[arm r] rs]
-      (is (every? :increasing r) (str arm " order is kept, no duplicates"))
-      (let [m (apply max (map :lost r))]
-        (println (format "[in-ports race] %-8s 25 rounds, stop in the middle of pause/resume floods: max messages lost in a round = %d"
-                         (name arm) m))
-        (is (<= m (if (and (= arm :orig) (not (dropin?))) 0 1)) (str arm " lost at most one message per in-port"))))))
+(deftest item-2-in-ports-lose-nothing-with-stops-in-the-flood
+  ;; One arbitration for a proc with user ports (spike.coflow.chan/alts-ops, core.async's commit protocol): nothing is
+  ;; taken from a user's channel unless the proc consumes it. The oracle loses none, and so does the port: 0 in every arm.
+  (doseq [[arm r] (each-arm #(arms/call % 'inports-race-stress 400 25))]
+    (is (every? :increasing r) (str arm " order is kept, no duplicates"))
+    (let [m (apply max (map :lost r))]
+      (println (format "[in-ports flood] %-8s 25 rounds, stop in the middle of pause/resume floods: max messages lost in a round = %d"
+                       (name arm) m))
+      (is (zero? m) (str arm " lost no message")))))
 
 (deftest item-2-in-ports-nothing-lost-while-the-flow-runs
   (doseq [[arm r] (each-arm #(arms/call % 'inports-race-no-loss-while-running 3000))]

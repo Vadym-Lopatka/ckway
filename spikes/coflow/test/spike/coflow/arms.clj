@@ -31,7 +31,7 @@
                   (refer-clojure)
                   (alias 'flow (flow-ns arm))
                   (alias 'fk 'clojure.core.async.flow)
-                  (doseq [f ["scenarios.clj" "scenarios_inv.clj" "scenarios_ext.clj"]]
+                  (doseq [f ["scenarios.clj" "scenarios_inv.clj" "scenarios_ext.clj" "scenarios_exact.clj"]]
                     (with-open [r (io/reader (io/resource (str "spike/coflow/" f)))]
                       (clojure.lang.Compiler/load r (str "spike/coflow/" f) f))))
                 n))))))
