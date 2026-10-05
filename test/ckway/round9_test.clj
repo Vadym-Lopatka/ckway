@@ -588,3 +588,147 @@
   (testing "nil is no receiver of an extension on a Companion"
     (is (error-has? (static '(d/.build9 nil 1)) "`nil` passed to non-nullable `receiver`"))))
 
+;; ---------------------------------------------------------------- B4
+
+;; The value that a `kt/reify` member returns is adapted to the declared Kotlin return type, as an argument is adapted to a
+;; parameter type; a value that cannot be that type is a `kt:` error that names the member, at the point of return.
+
+(defmacro ^:private gen
+  "A `fx.r9.Gen9` with the members that are written."
+  [& members]
+  `(kt/reify d/Gen9 ~@members))
+
+(deftest b4-a-function-that-a-member-returns
+  (testing "function types: no parameter, one, two, nullable (nil is a value), a curried one"
+    (is (= 5 (d/callFn1 (gen (.fn1 [_] (fn [x] (inc x)))) 4)))
+    (is (= "zero" (d/callFn0 (gen (.fn0 [_] (fn [] "zero"))))))
+    (is (= 7 (d/callFn2 (gen (.fn2 [_] (fn [a b] (+ a b)))) 3 4)))
+    (is (= "6" (d/callNullable (gen (.fnNullable [_] (fn [x] (* 2 x)))))))
+    (is (= "null" (d/callNullable (gen (.fnNullable [_] nil)))))
+    (is (= 7 (d/callCurried (gen (.curried [_] (fn [a] (fn [b] (+ a b))))) 3 4))))
+  (testing "a function type with a receiver, a suspend function type"
+    (is (= "a1" (d/callFnRecv (gen (.fnRecv [_] (fn [s x] (str s x)))) "a" 1)))
+    (is (= 105 (d/callFnSusp (gen (.fnSusp [_] (fn [x] (+ x 100)))) 5))))
+  (testing "a fun interface, a Java single-method interface (a Kotlin one and a Java one)"
+    (is (= "sam7" (d/callSam (gen (.sam [_] (fn [x] (str "sam" x)))) 7)))
+    (is (= "j!" (d/callJavaSam (gen (.javaSam [_] (fn [s] (str s "!")))) "j")))
+    (let [sb (StringBuilder.)]
+      (is (= "ran" (d/callRunnable (gen (.runnable [_] (fn [] (.append sb "ran")))) sb)))))
+  (testing "a property getter"
+    (is (= 12 (d/callProp (gen (prop [_] (fn [x] (* x 3)))) 4)))
+    (is (= "sp4" (d/callSprop (gen (sprop [_] (fn [x] (str "sp" x)))) 4))))
+  (testing "the same calls through the dynamic path"
+    (is (= 5 (dynamic #'d/callFn1 [(gen (.fn1 [_] (fn [x] (inc x)))) 4])))
+    (is (= "sam7" (dynamic #'d/callSam [(gen (.sam [_] (fn [x] (str "sam" x)))) 7])))))
+
+(deftest b4-the-declared-type-decides-the-other-adaptations
+  (testing "number width and Unit (as for an argument)"
+    (is (= "5" (d/callNum (gen (.num [_] 5)))))
+    (is (= "5" (d/callShort (gen (.short9 [_] 5)))))
+    (is (= "5.0" (d/callDouble (gen (.double9 [_] 5)))))
+    (is (= "kotlin.Unit" (d/callUnit (gen (.unit [_] 5)))))
+    (is (= "kotlin.Unit" (d/callUnit (gen (.unit [_] nil)))))
+    (is (= "9" (d/callNprop (gen (nprop [_] 9))))))
+  (testing "a value class is the object, and Any and String pass unchanged"
+    (is (= 5 (d/callId (gen (.id [_] (d/idOf9 5))))))
+    (is (= "[1 2]" (d/callAny (gen (.any [_] [1 2])))))
+    (is (= "s" (d/callStr (gen (.str [_] "s")))))))
+
+(deftest b4-a-value-that-is-already-right-passes-unchanged
+  (testing "a Kotlin function object, a fun interface object, a Java object: the same object (no wrapper)"
+    (let [f (reify kotlin.jvm.functions.Function1 (invoke [_ x] (inc x)))
+          s (kt/reify d/Sam9 (.go9 [_ x] "s"))
+          r (reify Runnable (run [_]))]
+      (is (identical? f (.fn1 ^fx.r9.Gen9 (gen (.fn1 [_] f)))))
+      (is (identical? s (.sam ^fx.r9.Gen9 (gen (.sam [_] s)))))
+      (is (identical? r (.runnable ^fx.r9.Gen9 (gen (.runnable [_] r)))))
+      (is (= 2 (d/callFn1 (gen (.fn1 [_] f)) 1))))
+    (let [id (d/idOf9 3)]
+      (is (= id (d/callIdObj (gen (.id [_] id)))) "a value class object (the JVM returns its underlying value: Kotlin boxes it again)")))
+  (testing "a Kotlin function that a call returned (a Clojure function that wraps it) goes back as the original"
+    (let [g (d/adder9 10)]
+      (is (fn? g))
+      (is (identical? (rt/own g) (.fn1 ^fx.r9.Gen9 (gen (.fn1 [_] g)))))
+      (is (= 11 (d/callFn1 (gen (.fn1 [_] g)) 1)))))
+  (testing "nil for a nullable function type stays nil"
+    (is (nil? (.fnNullable ^fx.r9.Gen9 (gen (.fnNullable [_] nil)))))))
+
+(deftest b4-the-error-names-the-member
+  (testing "not a function where a function type is declared"
+    (let [r (top-error #(d/callFn1 (gen (.fn1 [_] "notfn")) 4))]
+      (is (error-has? r "kt: the result of the kt/reify member `Gen9.fn1` ((Int) -> Int) is wrong:" "expected a function") r))
+    (let [r (top-error #(d/callSam (gen (.sam [_] 5)) 4))]
+      (is (error-has? r "the kt/reify member `Gen9.sam`" "expected a function" "fx.r9.Sam9" "Long") r))
+    (let [r (top-error #(.run ^Runnable (.runnable ^fx.r9.Gen9 (gen (.runnable [_] "x")))))]
+      (is (error-has? r "the kt/reify member `Gen9.runnable`" "expected a function") r)))
+  (testing "nil where the type is not nullable"
+    (let [r (top-error #(d/callFn1 (gen (.fn1 [_] nil)) 4))]
+      (is (error-has? r "the kt/reify member `Gen9.fn1`" "got nil" "the Kotlin type is not nullable") r)))
+  (testing "a property getter"
+    (let [r (top-error #(d/callProp (gen (prop [_] 5)) 4))]
+      (is (error-has? r "the kt/reify member `Gen9.prop`" "expected a function") r)))
+  (testing "a number of another width class, a value that is no value class, no String"
+    (is (error-has? (top-error #(d/callNum (gen (.num [_] 5.5)))) "the kt/reify member `Gen9.num` (Int)" "got java.lang.Double 5.5"))
+    (is (error-has? (top-error #(d/callId (gen (.id [_] 5)))) "the kt/reify member `Gen9.id`" "expected fx.r9.Id9"))
+    (is (error-has? (top-error #(d/callStr (gen (.str [_] 5)))) "the kt/reify member `Gen9.str` (String)" "expected String")))
+  (testing "a Java member"
+    (let [r (top-error #(.run ^Runnable (.task ^pj.JRet9 (kt/reify pj.JRet9 (task [_] "x")))))]
+      (is (error-has? r "the kt/reify member `JRet9.task`" "expected a function" "java.lang.Runnable") r))
+    (is (error-has? (top-error #(.number ^pj.JRet9 (kt/reify pj.JRet9 (number [_] 5.5)))) "the kt/reify member `JRet9.number`")))
+  (testing "an error in the body of the member is not changed"
+    (let [r (top-error #(d/callFn1 (gen (.fn1 [_] (throw (ex-info "kt: body" {:kt/error true})))) 4))]
+      (is (= "kt: body" (:error r))))))
+
+(deftest b4-a-java-interface
+  (testing "the Java single-method interfaces that a Java member returns"
+    (let [sb (StringBuilder.)
+          r (kt/reify pj.JRet9
+              (task [_] (fn [] (.append sb "ran")))
+              (supplier [_] (fn [] "sup"))
+              (op [_] (fn [x] (inc x)))
+              (number [_] 5)
+              (text [_] "t"))]
+      (.run (.task r))
+      (is (= "ran" (str sb)))
+      (is (= "sup" (.get (.supplier r))))
+      (is (= 5 (.applyAsInt (.op r) 4)))
+      (is (= 5 (.number r)))
+      (is (= "t" (.text r)))))
+  (testing "nil is a value of a Java type"
+    (is (nil? (.task ^pj.JRet9 (kt/reify pj.JRet9 (task [_] nil)))))))
+
+;; `fun interface Flt9 : (Handler9) -> Handler9` (http4k `Filter`): the member is the `invoke` of the function type
+
+(deftest b4-a-fun-interface-that-extends-a-function-type
+  (testing "the member returns a Clojure function: it is adapted to the Function1 that Kotlin wants"
+    (is (= "f:base:q" (d/runFlt9 (kt/reify d/Flt9 (.invoke [_ nxt] (fn [s] (str "f:" (nxt s))))) "q"))))
+  (testing "the parameter is a Clojure function too"
+    (is (= "f:base:q" (d/runFlt9 (kt/reify d/Flt9 (.invoke [_ nxt] (fn [s] (str "f:" (.invoke ^kotlin.jvm.functions.Function1 nxt s))))) "q"))
+        "and it is still a Function1"))
+  (testing "the member returns what it was given: the same Kotlin function"
+    (is (= "base:q" (d/runFlt9 (kt/reify d/Flt9 (.invoke [_ nxt] nxt)) "q"))))
+  (testing "a value that is no function"
+    (let [r (top-error #(d/runFlt9 (kt/reify d/Flt9 (.invoke [_ nxt] 5)) "q"))]
+      (is (error-has? r "the kt/reify member `Flt9.invoke` ((String) -> String)" "expected a function") r))))
+
+;; a Clojure function that Kotlin calls as a lambda whose RESULT is a function type: the function it returns is adapted too
+
+(deftest b4-the-result-of-a-lambda-that-is-a-function-type
+  (testing "a function type, a fun interface, a suspend function type, a number, Unit"
+    (is (= 5 (d/lam9 (fn [a] (fn [b] (+ a b))))))
+    (is (= "s45" (d/lamSam9 (fn [a] (fn [x] (str "s" a x))))))
+    (is (= 11 (d/lamSusp9 (fn [a] (fn [b] (+ a b))))))
+    (is (= "5" (d/lamNum9 (fn [a] 5))))
+    (is (= "kotlin.Unit" (d/lamUnit9 (fn [a] 5)))))
+  (testing "the dynamic path"
+    (is (= 5 (dynamic #'d/lam9 [(fn [a] (fn [b] (+ a b)))])))
+    (is (= "s45" (dynamic #'d/lamSam9 [(fn [a] (fn [x] (str "s" a x)))]))))
+  (testing "a value that cannot be the type is a kt error that names the Kotlin type of the function"
+    (let [r (top-error #(d/lam9 (fn [a] "notfn")))]
+      (is (error-has? r "kt: expected a function for a parameter of type kotlin.jvm.functions.Function1, got java.lang.String") r))
+    (let [r (top-error #(d/lam9 (fn [a] nil)))]
+      (is (= "kt: nil where Kotlin expects a non-null function ((Int) -> Int)" (:error r)) r))
+    (let [r (top-error #(d/lamNum9 (fn [a] 5.5)))]
+      (is (error-has? r "got java.lang.Double 5.5") r)))
+  (testing "a function that Kotlin returned goes back from a lambda unchanged"
+    (is (= 15 (d/lam9 (fn [a] (d/adder9 (+ a 10))))))))

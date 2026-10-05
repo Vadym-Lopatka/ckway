@@ -409,6 +409,24 @@
         (ifn? g) true
         :else (r/fail (str "kt: expected a function for a parameter of type " (.getName iface) ", got " (.getName (class g))))))
 
+(defn result-error
+  "The error for the value that a Clojure function returned where Kotlin expects another one: `e`, a kt error of the
+  conversion (`->kotlin`, `adapt?`, the check of a value class), now says where it came from: `what` names the member of
+  a `kt/reify`. Any other exception, and an error that already says it, is returned unchanged."
+  [^clojure.lang.ExceptionInfo e what]
+  (let [d (ex-data e)]
+    (if (and (:kt/error d) (not (:kt/result d)))
+      (ex-info (str "kt: the result of " what " is wrong: " (let [m (ex-message e)] (if (.startsWith ^String m "kt: ") (subs m 4) m)))
+               (assoc d :kt/result what) e)
+      e)))
+
+(defn nil-result
+  "nil that a `kt/reify` member returned where Kotlin expects a function: it is a value of a nullable type only."
+  [nullable? text]
+  (when-not nullable?
+    (r/fail (str "kt: expected a function (" text "), got nil: the Kotlin type is not nullable")))
+  nil)
+
 (defn arity-error
   "The error for a Clojure function of the wrong arity that Kotlin called. `e` is the
   ArityException, `g` the Clojure function, `text` what Kotlin called (a Kotlin function type or
@@ -460,6 +478,8 @@
       (= :unit k) kotlin.Unit/INSTANCE
       (nil? v) (cond (and (kind-names k) (not (:nullable? td)))
                      (r/fail (str "kt: nil where Kotlin expects a non-null " (kind-names k)))
+                     (and (#{:fn :fi} k) (not (:nullable? td)))
+                     (r/fail (str "kt: nil where Kotlin expects a non-null function" (when-let [t (:text td)] (str " (" t ")"))))
                      (= :obj k) (check-obj td v)
                      :else nil)
       :else

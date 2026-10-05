@@ -168,6 +168,14 @@ A constructor parameter counts as a property when the class has a public propert
   The leaves are matched by JVM name and JVM parameter types, not by the written name, so a Java leaf (`CharSequence get();`,
   written `get`) and a Kotlin leaf (`.get`) of one member are served by one form, also when the Java interface does not extend
   the Kotlin one (an abstract method of the same JVM name and parameters that differs only in the result type).
+* The value that a member returns is adapted to the declared return type as an argument is adapted to a parameter: a
+  function type (also `suspend` and with a receiver), a `fun interface`, a Java single-method interface (a Java member too;
+  there `nil` is a value), number width, a value class, `Unit`. An object that already has the type passes as it is. A wrong
+  value is a `kt:` error that names the member and the Kotlin type, at the point of return. A generic result (`T`, `Any`)
+  is not adapted: nothing says what it must be, so a Clojure function returned there stays a Clojure function.
+  An interface that extends a function type (`fun interface Filter : (Handler) -> Handler`) has the member `.invoke`
+  with the types of that supertype (before, the member was the generic `invoke(P1): R` of `Function1`, and nothing
+  was adapted); its parameter of a function type is a Clojure function that is also the original Kotlin `Function1`.
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined

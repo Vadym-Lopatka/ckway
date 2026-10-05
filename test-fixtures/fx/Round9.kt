@@ -249,3 +249,64 @@ class Mem9 {
 }
 val Mem9.extra9: Int get() = 8
 
+// ---- B4: a Clojure fn that a member of `kt/reify` returns
+fun interface Sam9 { fun go9(x: Int): String }
+interface Gen9 {
+    fun fn1(): (Int) -> Int
+    fun fn0(): () -> String
+    fun fn2(): (Int, Int) -> Int
+    fun fnNullable(): ((Int) -> Int)?
+    fun fnSusp(): suspend (Int) -> Int
+    fun fnRecv(): String.(Int) -> String
+    fun curried(): (Int) -> (Int) -> Int
+    fun sam(): Sam9
+    fun javaSam(): java.util.function.Function<String, String>
+    fun runnable(): Runnable
+    fun num(): Int
+    fun short9(): Short
+    fun double9(): Double
+    fun id(): Id9
+    fun any(): Any
+    fun str(): String
+    fun unit(): Unit
+    val prop: (Int) -> Int
+    val sprop: Sam9
+    val nprop: Int
+}
+fun callFn1(g: Gen9, x: Int): Int = g.fn1()(x)
+fun callFn0(g: Gen9): String = g.fn0()()
+fun callFn2(g: Gen9, a: Int, b: Int): Int = g.fn2()(a, b)
+fun callNullable(g: Gen9): String = g.fnNullable()?.invoke(3)?.toString() ?: "null"
+fun callFnSusp(g: Gen9, x: Int): Int = runSusp9 { g.fnSusp()(x) }
+fun <T> runSusp9(block: suspend () -> T): T = kotlinx.coroutines.runBlocking { block() }
+fun callFnRecv(g: Gen9, s: String, x: Int): String = g.fnRecv().invoke(s, x)
+fun callCurried(g: Gen9, a: Int, b: Int): Int = g.curried()(a)(b)
+fun callSam(g: Gen9, x: Int): String = g.sam().go9(x)
+fun callJavaSam(g: Gen9, s: String): String = g.javaSam().apply(s)
+fun callRunnable(g: Gen9, log: StringBuilder): String { g.runnable().run(); return log.toString() }
+fun callNum(g: Gen9): String = g.num().toString()
+fun callShort(g: Gen9): String = g.short9().toString()
+fun callDouble(g: Gen9): String = g.double9().toString()
+fun callId(g: Gen9): Int = g.id().v
+fun callIdObj(g: Gen9): Any = g.id()
+fun callAny(g: Gen9): String = g.any().toString()
+fun callStr(g: Gen9): String = g.str()
+fun callUnit(g: Gen9): String = g.unit().toString()
+fun callProp(g: Gen9, x: Int): Int = g.prop(x)
+fun callSprop(g: Gen9, x: Int): String = g.sprop.go9(x)
+fun callNprop(g: Gen9): String = g.nprop.toString()
+
+// a Kotlin function value
+fun adder9(n: Int): (Int) -> Int = { it + n }
+
+// a Kotlin lambda whose RESULT is a function type
+fun lam9(f: (Int) -> (Int) -> Int): Int = f(2)(3)
+fun lamSam9(f: (Int) -> Sam9): String = f(4).go9(5)
+fun lamNum9(f: (Int) -> Long): String = f(1).toString()
+fun lamSusp9(f: (Int) -> suspend (Int) -> Int): Int = runSusp9 { f(1)(10) }
+fun lamUnit9(f: (Int) -> Unit): String = f(1).toString()
+
+// a function-typed supertype that is a `fun interface` (http4k Filter)
+fun interface Flt9 : (Handler9) -> Handler9
+fun Flt9.then9(h: Handler9): Handler9 = this(h)
+fun runFlt9(f: Flt9, s: String): String = f.then9 { x -> "base:$x" }(s)

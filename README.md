@@ -277,6 +277,14 @@ Example 10.
 ```
 
 Example 11. A property getter is `(name [this] ...)` and the setter is `(name [this value] ...)`. A member that you do not write keeps its Kotlin default.
+What a member returns is adapted to the declared Kotlin return type, as an argument is adapted to a parameter type (rule 6 and rule 7): a Clojure function becomes the function type, `fun interface` or Java single-method interface, a number gets its width, a value class is the object. An object that already has the type passes as it is. A value that cannot be that type (`nil` for a type that is not nullable too) is a `kt:` error that names the member. The function that a Clojure function returns, for a Kotlin lambda whose result is a function type, is adapted the same way.
+
+```clojure
+;; Kotlin: object : Filter { override fun invoke(next: HttpHandler): HttpHandler = { req -> next(req) } }
+(kt/reify h/Filter
+  (.invoke [this next] (fn [req] (next req))))
+```
+
 ### 11. Data
 
 `(kt/data x)` gives a read-only map of the primary-constructor properties of `x`.
