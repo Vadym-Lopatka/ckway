@@ -243,6 +243,15 @@
                    (when receiver? (same-name-hint site (class v))))
               {:kt/wrong-class (.getName (class v))}))))
 
+(defn nn-arg
+  "`v`, or a kt error when it is nil: the parameter is a type parameter with a non-null bound (`T : Any`), so Kotlin
+  takes no nil. `site` = {:call :sig :what :bound}; the static path calls it for a nil that it could not see at compile time."
+  [site v]
+  (if (nil? v)
+    (r/fail (str "kt: " (when (:call site) (str (:call site) ": ")) "nil where Kotlin expects a non-null value of the type parameter `"
+                 (:bound site) "` (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site)))))
+    v))
+
 (defn check-obj
   "`v` if it fits the object descriptor `td` ({:k :obj :cls :text :nullable?}), else a kt error that names the
   Kotlin type and the class of `v`. `where` (optional) says which value it is, for example \"the result of the Clojure function\"."
@@ -409,6 +418,24 @@
         (ifn? g) true
         :else (r/fail (str "kt: expected a function for a parameter of type " (.getName iface) ", got " (.getName (class g))))))
 
+(defn result-error
+  "The error for the value that a Clojure function returned where Kotlin expects another one: `e`, a kt error of the
+  conversion (`->kotlin`, `adapt?`, the check of a value class), now says where it came from: `what` names the member of
+  a `kt/reify`. Any other exception, and an error that already says it, is returned unchanged."
+  [^clojure.lang.ExceptionInfo e what]
+  (let [d (ex-data e)]
+    (if (and (:kt/error d) (not (:kt/result d)))
+      (ex-info (str "kt: the result of " what " is wrong: " (let [m (ex-message e)] (if (.startsWith ^String m "kt: ") (subs m 4) m)))
+               (assoc d :kt/result what) e)
+      e)))
+
+(defn nil-result
+  "nil that a `kt/reify` member returned where Kotlin expects a function: it is a value of a nullable type only."
+  [nullable? text]
+  (when-not nullable?
+    (r/fail (str "kt: expected a function (" text "), got nil: the Kotlin type is not nullable")))
+  nil)
+
 (defn arity-error
   "The error for a Clojure function of the wrong arity that Kotlin called. `e` is the
   ArityException, `g` the Clojure function, `text` what Kotlin called (a Kotlin function type or
@@ -460,6 +487,8 @@
       (= :unit k) kotlin.Unit/INSTANCE
       (nil? v) (cond (and (kind-names k) (not (:nullable? td)))
                      (r/fail (str "kt: nil where Kotlin expects a non-null " (kind-names k)))
+                     (and (#{:fn :fi} k) (not (:nullable? td)))
+                     (r/fail (str "kt: nil where Kotlin expects a non-null function" (when-let [t (:text td)] (str " (" t ")"))))
                      (= :obj k) (check-obj td v)
                      :else nil)
       :else
@@ -779,9 +808,19 @@
          parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
                  :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (cond-> (info k x) elems? (as-> inf (if-let [es (elements x)] (assoc inf :elems es) inf))) :idx (+ n i)}]) named))
                  :strict-elems elems?}]
-     (try (let [{:keys [decl items checks]} (r/choose var-name decls parsed false)]
+     (try (let [invokes (:kt/invokes (meta v))
+                root (when (seq invokes) (.getRawRoot v))
+                {:keys [decl items checks via-invoke]}
+                (r/choose-call var-name decls invokes parsed #(r/with-class-first % (r/var-form v) (r/value-info root)) false)]
             (r/check-supported! decl checks)
-            (prepare (r/plan decl items)))
+            (let [call (prepare (r/plan decl items))]
+              ;; the class var is the receiver of the companion `invoke`: the first value
+              (if via-invoke
+                (fn [^objects a] (let [b (object-array (inc (alength a)))]
+                                   (aset b 0 root)
+                                   (System/arraycopy a 0 b 1 (alength a))
+                                   (call b)))
+                call)))
           (catch clojure.lang.ExceptionInfo e
             (if (and (not elems?) (:kt/elements-needed (ex-data e)))
               (element-call v decls n (mapv first named) lits)

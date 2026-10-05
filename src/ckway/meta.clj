@@ -48,6 +48,9 @@
                  The dispatch receiver has no :jvm-type (it is the call target).
                  A companion member has {:role :dispatch :companion-of \"fx.C\" ...}:
                  the value is the class var of C, the call target is C.Companion.
+                 An extension receiver whose type is a companion object has {:role :extension :companion-of \"fx.C\"
+                 :companion-field \"Companion\" ...}: the class var of C is accepted for it, and the receiver is
+                 C.Companion.
     :params      [{:name :type <type> :default? :vararg? :jvm-type \"int\"|\"[Ljava.lang.String;\"|...}]
     :return      <type>
     :type-params [{:name \"T\" :reified? bool [:bounds [<type> ...]]}]
@@ -289,6 +292,18 @@
          (reduce (fn [[seen out] ^File f] (let [k (.getPath f)] (if (seen k) [seen out] [(conj seen k) (conj out f)]))) [#{} []])
          second
          with-manifest-class-paths)))
+
+(defn class-file-on-classpath?
+  "Is there a class file for the class `binary` (\"a.b.C$D\") in a directory or jar of `classpath-files`, which is what
+  the Kotlin compiler of a bridge reads? A class that Clojure made at run time (`defprotocol`, `deftype`, `kt/reify`...)
+  lives in a `DynamicClassLoader` and has none."
+  [^String binary]
+  (let [rel (str (str/replace binary "." "/") ".class")]
+    (boolean (some (fn [^File f]
+                     (if (.isDirectory f)
+                       (.isFile (File. f rel))
+                       (try (with-open [jf (JarFile. f)] (some? (.getEntry jf rel))) (catch Exception _ false))))
+                   (classpath-files)))))
 
 (defn- package-roots
   "The classpath entries (Files: directories and jars) that can hold the package `pkg`: `classpath-files`, and what
@@ -680,10 +695,26 @@
     {:name (.getName p) :type (km-type tps (.getType p)) :default? (Attributes/getDeclaresDefaultValue p)
      :vararg? (some? vt) :vararg-elem (when vt (km-type tps vt)) :jvm-type jvm-type}))
 
+(declare kotlin-class)
+
+(defn- companion-class
+  "{:companion-of \"fx.C\" :companion-field \"Companion\"} when the Kotlin class `internal` is the companion object of
+  a class (`fx/C.Companion`), else nil."
+  [^String internal]
+  (when (and internal (str/includes? (subs internal (inc (.lastIndexOf internal "/"))) "."))
+    (when-let [^KmClass km (:km (kotlin-class internal))]
+      (when (= ClassKind/COMPANION_OBJECT (Attributes/getKind km))
+        (let [i (.lastIndexOf internal ".")]
+          {:companion-of (internal->binary (subs internal 0 i)) :companion-field (subs internal (inc i))})))))
+
 (defn- receivers
   "Receivers in Clojure argument order; `jvm-types` are the non-dispatch JVM parameter types, in order."
   [tps ctx-params ext-type dispatch jvm-types]
-  (let [mk (fn [role t jt name] (cond-> {:role role :type (km-type tps t)} jt (assoc :jvm-type jt) name (assoc :name name)))
+  (let [mk (fn [role t jt name]
+             (let [ty (km-type tps t)]
+               (cond-> {:role role :type ty}
+                 jt (assoc :jvm-type jt) name (assoc :name name)
+                 (and (= :extension role) (not (:nullable? ty))) (merge (companion-class (:class ty))))))
         nctx (count ctx-params)
         ctx (map-indexed (fn [i ^KmValueParameter p] (mk :context (.getType p) (nth jvm-types i nil) (.getName p))) ctx-params)
         ext (when ext-type [(mk :extension ext-type (nth jvm-types nctx nil) nil)])]
@@ -1076,9 +1107,11 @@
   declaration without a JVM member (the placeholder of a class without a constructor, an alias) the declaration itself."
   [d]
   (let [m (if (= :property (:kind d)) (or (:getter d) (:jvm d)) (:jvm d))]
-    (if (:class m)
-      [(:class m) (or (:name m) (:field m) (:instance-field m)) (:desc m)]
-      d)))
+    (cond
+      ;; the `invoke` of a function type is one JVM member of `FunctionN`, and one declaration for each class that has it
+      (and (:class m) (:fn-supertype d)) [(:class m) (:name m) (:desc m) (:owner d)]
+      (:class m) [(:class m) (or (:name m) (:field m) (:instance-field m)) (:desc m)]
+      :else d)))
 
 (def ^:private declared-members-cache
   "Documented cache: Kotlin internal class name -> the members that class declares."
@@ -1130,8 +1163,82 @@
   (let [tps (tparams [(.getTypeParameters k)])]
     (for [^KmType t (.getSupertypes k)
           :let [c (.getClassifier t)]
-          :when (instance? KmClassifier$Class c)]
-      [(.getName ^KmClassifier$Class c) (mapv #(subst-type env %) (:args (km-type tps t)))])))
+          :when (instance? KmClassifier$Class c)
+          :let [kt (subst-type env (km-type tps t))]]
+      [(.getName ^KmClassifier$Class c) (:args kt) (:fn-type kt)])))
+
+(defn- plain-type
+  "The type `t` as the synthetic `invoke` of a function type shows it: a type parameter, a star projection and a value
+  class (that a generic position holds boxed, so the JVM slot is the object itself) are `Any?`."
+  [t]
+  (let [any {:class "kotlin/Any" :nullable? true :args [] :value-class? false :fun-interface? false :fn-type nil :alias nil :type-param nil}]
+    (cond
+      (or (nil? t) (:star? t) (:type-param t) (:value-class? t)) any
+      :else (cond-> t
+              (seq (:args t)) (update :args (fn [as] (mapv plain-type as)))
+              (:fn-type t) (update :fn-type (fn [f] (-> f (update :args (fn [as] (mapv plain-type as))) (update :return plain-type))))))))
+
+(def ^:private boxed-jvm
+  {"kotlin/Int" "java.lang.Integer" "kotlin/Long" "java.lang.Long" "kotlin/Short" "java.lang.Short" "kotlin/Byte" "java.lang.Byte"
+   "kotlin/Double" "java.lang.Double" "kotlin/Float" "java.lang.Float" "kotlin/Char" "java.lang.Character"
+   "kotlin/Boolean" "java.lang.Boolean" "kotlin/String" "java.lang.String"})
+
+(defn- generic-slot
+  "[type jvm-type] of a parameter of the `invoke` of a function type, whose JVM parameter is `Object`: the Kotlin type
+  says what the value must be (a number is converted to its width, a function is adapted, a value class is the box
+  itself), as it does at the parameter of another declaration. Another type is `Any?` for the check."
+  [t]
+  (cond
+    (:value-class? t) [t (:class (:value-class t))]
+    (:fn-type t) (let [f (:fn-type t)
+                       n (cond-> (:arity f) (:suspend? f) inc)]
+                   (if (<= n 22)
+                     [(plain-type t) (str "kotlin.jvm.functions.Function" n)]
+                     [(plain-type {:class "kotlin/Any" :nullable? (:nullable? t) :args []}) "java.lang.Object"]))
+    (:fun-interface? t) [(plain-type t) (internal->binary (:class t))]
+    (boxed-jvm (:class t)) [(plain-type t) (boxed-jvm (:class t))]
+    :else [(plain-type t) "java.lang.Object"]))
+
+(defn- function-type-invoke
+  "The declaration of `operator fun invoke(p1: P1, ..., pN: PN): R` that the class `k` inherits from a supertype that is
+  a Kotlin function type `(P1, ..., PN) -> R` (`interface Handler : (Request) -> Response`, `suspend` function types too).
+  The metadata of a Kotlin function type has no class (`kotlin/Function1` is the JVM interface
+  `kotlin.jvm.functions.Function1`), so the walk over the supertypes cannot read it: this is what `Function1` declares,
+  with the type arguments of the supertype. The receiver is the class `k` itself, so that the objects of other classes
+  that implement another function type are no candidates for it. The JVM member is the erased `invoke`, which the class
+  has (it inherits it from the interface); a `suspend` one has the continuation as its last parameter. nil for a function
+  type of more than 22 parameters."
+  [^KmClass k {:keys [args return suspend?] :as ft}]
+  (let [n (count args)
+        jn (cond-> n suspend? inc)]
+    (when (<= jn 22)
+      (let [internal (.getName k)
+            binary (internal->binary internal)
+            obj "Ljava/lang/Object;"
+            desc (str "(" (apply str (repeat jn obj)) ")" obj)
+            params (vec (map-indexed (fn [i t] (let [[pt jt] (generic-slot t)]
+                                                 {:name (str "p" (inc i)) :type pt :default? false :vararg? false
+                                                  :vararg-elem nil :jvm-type jt}))
+                                     args))
+            ft-text (type-text {:class "kotlin/Function" :args [] :fn-type ft})
+            ret (plain-type return)]
+        {:kind :function :name "invoke" :var-name ".invoke" :owner binary
+         :receivers [{:role :dispatch :type (class-type internal (map #(.getName ^KmTypeParameter %) (.getTypeParameters k)))}]
+         :params params :return ret :type-params [] :flags (cond-> #{:operator} suspend? (conj :suspend))
+         :jvm {:class (str "kotlin.jvm.functions.Function" jn) :name "invoke" :desc desc :static? false}
+         :fn-supertype true
+         :signature (str "operator " (when suspend? "suspend ") "fun " (type-text (class-type internal [])) "." "invoke("
+                         (str/join ", " (map #(str (:name %) ": " (type-text (:type %))) params)) "): " (type-text ret)
+                         "  [from " ft-text "]")}))))
+
+(defn function-type-decls
+  "The `invoke` declarations (`function-type-invoke`) that the Kotlin class `c` (a Class) gets from its direct supertypes that
+  are function types: `fun interface Filter : (Handler) -> Handler`. nil for a class that has no Kotlin class metadata."
+  [^Class c]
+  (let [m (read-meta c)]
+    (when (instance? KotlinClassMetadata$Class m)
+      (let [k (.getKmClass ^KotlinClassMetadata$Class m)]
+        (seq (for [[_ _ ft] (supertypes k nil) :when ft :let [d (function-type-invoke k ft)] :when d] d))))))
 
 (defn- inherited-members
   "[declaration env] for the public members that the Kotlin supertypes of `k` declare, transitively (superclass and
@@ -1142,17 +1249,25 @@
   without Kotlin metadata (Java class, kotlin.Any, mapped types) ends the walk on its branch."
   [^KmClass k]
   (loop [queue (supertypes k nil) seen #{} out []]
-    (if-let [[n args] (first queue)]
-      (let [sc (when-not (seen n) (kotlin-class n))
+    (if-let [[n args fn-type] (first queue)]
+      (let [;; a function type is no class in the metadata; its JVM interface `kotlin.jvm.functions.Function1` is one, and
+            ;; declares the generic `invoke(p1: P1): R`, which every object of a class that implements the type has
+            ;; (a suspend function type is a `Function2` with a continuation: it has no generic `invoke`)
+            sc (when-not (seen n)
+                 (kotlin-class (if (and fn-type (not (:suspend? fn-type)))
+                                 (str "kotlin/jvm/functions/" (subs n (inc (.lastIndexOf ^String n "/"))))
+                                 n)))
+            invoke (when (and fn-type (not (seen n))) (function-type-invoke k fn-type))
             ^KmClass sk (:km sc)
             env (when sc
                   (let [names (map #(.getName ^KmTypeParameter %) (.getTypeParameters sk))]
                     (when (= (count names) (count args)) (into {} (remove (comp :star? val)) (zipmap names args)))))]
         (recur (if sc (concat (rest queue) (supertypes sk env)) (rest queue))
                (conj seen n)
-               (if (and sc (visible? (Attributes/getVisibility sk)))
-                 (into out (map (fn [d] [d env])) (declared-members sc))
-                 out)))
+               (cond-> out
+                 sc (as-> o (if (visible? (Attributes/getVisibility sk)) (into o (map (fn [d] [d env])) (declared-members sc)) o))
+                 ;; the `invoke` with the types of the supertype (more specific than the generic one: its receiver is the class)
+                 invoke (conj [invoke nil]))))
       out)))
 
 (defn- inherited-decls

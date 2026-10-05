@@ -113,6 +113,20 @@ A class var means what the bare class name means in Kotlin (call it to construct
 
 Examples 02 and 03.
 
+A call of a class var follows Kotlin: the constructors first; when none fits (an interface has none), the `operator fun invoke` of the companion object, and the `operator fun invoke` extensions on its `Companion` that the same package declares. A constructor that fits always wins. A function that is not an `operator` is not called this way. When neither fits, the error lists both kinds. `(h/.invoke h/Request ...)` still works. An `object` that has an `operator fun invoke` is called the same way (`Foo(1)`).
+
+```clojure
+;; Kotlin: Request(GET, "/a")   -- http4k: interface Request { companion object { operator fun invoke(method: Method, uri: String): Request } }
+(h/Request h/Method.GET "/a")
+```
+
+The class var is also the receiver of an extension on a `Companion`, a function or a property (`val Filter.Companion.NoOp`; `kt/set!` writes a `var`):
+
+```clojure
+;; Kotlin: Filter.NoOp
+(h/NoOp h/Filter)
+```
+
 ### 4. Arguments
 
 Positional arguments bind in sequence; a keyword literal names the parameter of the next argument and all arguments after it are named; a parameter with no argument takes its Kotlin default; a `vararg` takes the remaining positional arguments, or one collection when named.
@@ -163,6 +177,7 @@ Example 06. When no positional argument can be the lambda, the error says to nam
 
 Example 09. This needs the Kotlin compiler in the JVM, or a stored bridge (see Install). The examples use the alias `:kotlinc` for it.
 The default Kotlin names (`Int`, `String`, `Any`, `List`, `Map`, ...) are known without a `kt/require`. `Object` means `Any`.
+A class that Clojure made at run time (`defprotocol`, `definterface`, `deftype`, `defrecord`, `gen-class` not yet compiled, an earlier `kt/reify`) has no class file, so the Kotlin compiler cannot read it as a `:<>` argument: `kt` stops before the compiler runs with a `kt:` error that names the class and gives the two ways out (AOT-compile the namespace that defines it, or use an overload that takes a `KClass`); a stored bridge still loads (`doc/limits.md`, 9).
 
 ### 6. Functions
 
@@ -184,6 +199,7 @@ A Clojure function goes where Kotlin wants a function type or a `fun interface`;
 ```
 
 Example 06.
+A class that implements a function type (`interface Handler : (Request) -> Response`) has the member `invoke(p1, ...): R`, with the type arguments of that supertype: `(h/.invoke handler req)`. A suspend function type gives the result as other suspend calls do. An object of a class that the package does not know (`RoutingHttpHandler` of another package) is called with the generic `invoke` of `Function1`, whose argument types are not checked (`doc/limits.md`, 10).
 A Clojure function also goes where a Java interface with exactly one abstract method is expected (`Function`, `Predicate`, `Runnable`, `Comparator`, ...), as Kotlin converts a lambda there (example 14).
 
 ### 7. No guess
@@ -214,6 +230,8 @@ More about the choice and the numbers (example 14 shows them with the Kotlin sta
 * `kt` changes a number only when the declared Kotlin type of the parameter says so (`Int`, `Short`, `Byte`, `Long`, `Float`, `Double`). At `Any`, `Any?`, `Number`, a type parameter or a vararg of those, every Clojure value is passed unchanged: a Clojure integer stays a `Long`, so `(c/listOf 1 2)` (`c` is `kotlin.collections`) holds `Long`s and `(c/.contains (c/listOf 1 2) 1)` is `true`. Only the choice between overloads that differ in a number type looks at a literal (`1` is an `Int` before it is a `Long`, as in Kotlin), and a conversion that `kt` makes itself (an integer for a `Double`) is used only when no overload takes the value as it is.
   Data that Kotlin code made with `Int` holds `Integer`s: say `(int 1)`, or give the type with `:<>` (`doc/limits.md`, 1).
 * A type hint that you write decides between the candidates that it fits for sure, as the declared type of a variable does in Kotlin (`^String x` at `kind`). When it fits no candidate for sure but the value could still fit (the hint is an interface, or a non-final class that a parameter type extends: `^clojure.lang.IPersistentVector v` for a `List` receiver), it is only an upper bound and the call is checked at run time. A hint that can never fit (`^Long n` for a `List` receiver: `Long` is final) is a compile error. A hint that is wrong at run time is a `kt:` error, not a `ClassCastException`. A type that only the Clojure compiler inferred, and a type that `kt` itself puts on a local (the parameters of a `fn` literal at a Kotlin function type, the parameters of a `kt/reify` member), is an upper bound; `^Object` or no hint means unknown. Example 14 shows each case.
+* A literal (a string, a character, a boolean, a number by the number rule above), an `object` var and an enum entry var have a static type in every position, the receiver too: `(r/.bind "/health" h/Method.GET)` is a direct call with no reflection warning. A call of a Clojure function has the type of its `:tag`, as the Clojure compiler takes it: the tag of the arglist that takes this number of arguments, else the tag of the var (`(defn u ^String [s] ...)`, then `(creq/.get client (u "/x"))` is direct). It is a hint that you wrote, so it works as one (see the bullet above): a wrong tag is a `kt:` error at run time. A macro, and a function with an inline expansion for that number of arguments, have no such type.
+* `nil` is checked against the bounds of a type parameter. `T : Any` (also `T : Foo`, or several bounds of which one is not nullable) does not take `nil`: `(k/.getProperty koin "key" nil)` for `fun <T : Any> getProperty(key: String, defaultValue: T)` is a `kt:` error, as it is for a parameter of type `String`. A `nil` that is only known at run time (a local, a call) is a `kt:` error too, not the `NullPointerException` of Kotlin. Plain `T` (the bound is `Any?`), `T?` and `T : Foo?` take `nil`, and so does `T` that you give as a nullable type with `:<>`. The same holds for a type parameter of a class (`Box<T : Any>.put(x: T)`) and for the elements of a `vararg`. A `nil` never makes such a candidate applicable when `kt` chooses between overloads.
 * A collection passed as a whole to a `vararg` (`:list xs`) chooses between vararg overloads by its elements, when it has elements that `kt` can see: every element must fit the element type of one candidate only. A vector literal of known values is seen at compile time, any other collection at run time. An empty collection, or elements that fit several candidates, is an error.
 * Overloads that differ only in the parameter types of a lambda (`(ApplicationCall) -> Unit` and `(StatusContext) -> Unit`) have the same JVM method. Type hints on the parameters of a `fn` literal choose: `(fn [^io.ktor.server.application.ApplicationCall call status] ...)`. A hint fits a parameter type when it is that class or extends it. With no hint, or when more than one candidate still fits, the call is an error. This works on the static path only. When the receiver has a known type, the error is a compile error.
 * Only a Clojure character is a Kotlin `Char`.
@@ -262,6 +280,13 @@ Example 10.
 ```
 
 Example 11. A property getter is `(name [this] ...)` and the setter is `(name [this value] ...)`. A member that you do not write keeps its Kotlin default.
+What a member returns is adapted to the declared Kotlin return type, as an argument is adapted to a parameter type (rule 6 and rule 7): a Clojure function becomes the function type, `fun interface` or Java single-method interface, a number gets its width, a value class is the object. An object that already has the type passes as it is. A value that cannot be that type (`nil` for a type that is not nullable too) is a `kt:` error that names the member. The function that a Clojure function returns, for a Kotlin lambda whose result is a function type, is adapted the same way.
+
+```clojure
+;; Kotlin: object : Filter { override fun invoke(next: HttpHandler): HttpHandler = { req -> next(req) } }
+(kt/reify h/Filter
+  (.invoke [this next] (fn [req] (next req))))
+```
 
 ### 11. Data
 

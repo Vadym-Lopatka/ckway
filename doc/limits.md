@@ -168,6 +168,14 @@ A constructor parameter counts as a property when the class has a public propert
   The leaves are matched by JVM name and JVM parameter types, not by the written name, so a Java leaf (`CharSequence get();`,
   written `get`) and a Kotlin leaf (`.get`) of one member are served by one form, also when the Java interface does not extend
   the Kotlin one (an abstract method of the same JVM name and parameters that differs only in the result type).
+* The value that a member returns is adapted to the declared return type as an argument is adapted to a parameter: a
+  function type (also `suspend` and with a receiver), a `fun interface`, a Java single-method interface (a Java member too;
+  there `nil` is a value), number width, a value class, `Unit`. An object that already has the type passes as it is. A wrong
+  value is a `kt:` error that names the member and the Kotlin type, at the point of return. A generic result (`T`, `Any`)
+  is not adapted: nothing says what it must be, so a Clojure function returned there stays a Clojure function.
+  An interface that extends a function type (`fun interface Filter : (Handler) -> Handler`) has the member `.invoke`
+  with the types of that supertype (before, the member was the generic `invoke(P1): R` of `Function1`, and nothing
+  was adapted); its parameter of a function type is a Clojure function that is also the original Kotlin `Function1`.
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
@@ -208,6 +216,16 @@ A constructor parameter counts as a property when the class has a public propert
 * `:<>` needs the static path. A receiver of unknown type with several candidates is a compile error ("add a type
   hint"); a var used as a value cannot take `:<>`.
 * Reified properties (`inline val <reified T> T.name`) are not supported.
+* A class that Clojure made at run time cannot be a `:<>` argument of a call that needs a compiled bridge. A `defprotocol`
+  or `definterface` interface, a `deftype` or `defrecord` class, a `gen-class` that is not AOT-compiled yet and a class
+  of an earlier `kt/reify` live in a `DynamicClassLoader`: the JVM has the class, but no class file is on the class path
+  for the Kotlin compiler to read (it would only say "unresolved reference 'domain'"). `kt` checks it before the compiler
+  runs: for each class in `:<>` (type arguments included) that is not a JDK class, there must be a class file in a
+  directory or jar of the class path. If not, the call is a `kt:` error that names the class, says that it was made at run
+  time, and gives two ways out: AOT-compile the namespace that defines it and put the classes directory on the class
+  path (then the file exists), or use an overload that takes a `KClass` (`(kt/ref X class)`), if the library has one. No stub
+  is generated. The check runs only when a bridge has to be compiled: a stored bridge (AOT class, disk cache) loads as it is,
+  also when the class exists only at run time.
 * Two context parameters of the same type on a reified function are refused: Kotlin binds a context argument by type, so
   both would get the same value (a hand-written `with(x) { with(y) { both<Int>() } }` returns `"y|y"`). A function that is
   not reified is called directly and binds each parameter.
@@ -222,7 +240,24 @@ A constructor parameter counts as a property when the class has a public propert
 * A declaration without a JVM member, and a `fun interface` without exactly one abstract method, when a Clojure
   function has to be adapted to it (from the code).
 * An `object` or an enum entry is a value, not a function: `(f/Registry)` is a compile error. `apply` on one is a
-  `ClassCastException`.
+  `ClassCastException`. An `object` with an `operator fun invoke` (its own or inherited, or an extension of the same
+  package) is callable as `(f/Registry 1)`; `(f/.invoke f/Registry 1)` works too. `apply` on the var is still an error.
+* The call of a class var falls back to the `operator fun invoke` of the companion object when no constructor fits
+  (rule 3). It reads the members of the companion of that class and the extensions on its `Companion` that the package
+  of the class var declares. An `invoke` that the companion inherits from a supertype, and an extension `invoke` that
+  another package declares, are not seen: write `(alias/.invoke alias/Name ...)`. A type alias of a class in another
+  package does not see the companion `invoke` of its target either.
+* A class that implements a Kotlin function type has the member `invoke` (rule 6) with the parameter and result types of
+  that supertype. A type parameter of the class (`class Box<T> : (T) -> T`) is `Any?` there, a value class in the type
+  arguments is the object itself in a parameter and `Any?` in the result (the JVM holds it boxed in a generic position),
+  and a function type of more than 22 parameters gives no `invoke`. Kotlin picks the member by the static type of the
+  receiver; `kt` sees only the class of the value, so the declaration of each class applies to the objects of that
+  class. The object of a class that the package does not know (`RoutingHttpHandler` is in `org.http4k.routing`, the call
+  is `(core/.invoke handler req)`; a Clojure `reify` of `Function1`; a Kotlin function value) gets the generic
+  `invoke(p1: P1): R` of `Function1` (and `Function2`...), which the package has as soon as one of its classes implements
+  a function type: nothing checks the types of the arguments (a position of a type parameter, see 1: a Clojure integer for an
+  `Int` is a `Long` there, say `(int 1)`), and a result of a function type is not a Clojure function. A package with no class
+  that implements a function type, and no `operator fun invoke`, has no `.invoke` var.
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
 * A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
@@ -289,6 +324,11 @@ class, with a reflection warning (`*warn-on-reflection*`). A type hint or a loca
 (let [c (f/Other)] (f/.count c))                ; static: the class var tells the type of `c`
 ```
 
+A call of a function that has a return tag is not like this: `(defn u ^String [s] ...)` makes `(f/.get c (u "/x"))` static,
+because the Clojure compiler gives the call the tag of its arglist (else of the var), and `kt` takes the same tag (see below). A
+literal and an enum entry var have a static type too, as the receiver as well. What is still untyped: a var that holds a value
+(`(def c (f/Other))` without a hint), a local that the compiler could not infer, the result of a function without a tag.
+
 A correct call on an untyped receiver costs one `instance?` check on top of the call. A wrong receiver says which
 call, which Kotlin declaration was selected, the actual class and, if that class has a property or function of the same
 name, how to write it: "`weigh` is a property of fx.Cart2: write (f/weigh cart)".
@@ -315,6 +355,15 @@ A type hint that you write is the static type of the argument, as the declared t
 (In case 2 a value of the wrong class is a `kt:` error at run time, with the candidates.) A hint that the static path
 trusts and that is wrong at run time is a `kt:` error too, never the JVM's `ClassCastException`: it names the call, the
 parameter, the Kotlin declaration and the actual class. A correct call costs one `instance?` check.
+The tag of a call of a var is a hint that you wrote. `kt` reads it as the Clojure compiler does (`InvokeExpr`): the tag of the
+arglist that takes this number of arguments (a variadic arglist takes any number from its `&`), else the tag of the var; it
+resolves the class name in the namespace of the var, then in yours (`^String`, `^java.util.List`, `^"[B"` or `^bytes`, `^long`,
+`^double`). A primitive is only an upper bound. A macro, and a function with an `:inline` expansion for that number of
+arguments, have no tag. A tag that is wrong is a `kt:` error at run time, as any hint is; and note that a tag decides like any
+hint: `(defn ^CharSequence cs [] "x")` makes `(f/tag (cs))` the `CharSequence` overload, where the class of the value would choose `String`.
+Write the tag on the arglist (`(defn u ^String [s] ...)`) or the var (`(defn ^String u [s] ...)`); `^long` before the name is
+evaluated by Clojure to the function `long`, which is no tag.
+
 A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`, the element of a `doseq`) is an upper
 bound: the class of the value decides at run time. `^Object` says nothing. One exception: `^Number` for an argument that
 goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of the value decides, as for an inferred type.
