@@ -81,7 +81,7 @@ A member is in the namespace of the package of the class that declares it (`call
 | `server.start(wait = false)` | `(eng/.start server :wait false)` |
 | `server.engine.resolvedConnectors().first().port` | `(eng/port (first (eng/.resolvedConnectors (eng/engine server))))` |
 | `server.stop(100, 2000)` | `(eng/.stop server 100 2000)` |
-| `install(StatusPages) { ... }` | `(app/.install application (sp/StatusPages) (fn [^StatusPagesConfig cfg] ...))` (a property is a function: `(sp/StatusPages)`) |
+| `install(StatusPages) { ... }` | `(app/.install application (sp/StatusPages) (fn [cfg] ...))` (a property is a function: `(sp/StatusPages)`) |
 | `install(CallLogging)` | `(app/.install application (cl/CallLogging))` |
 | `exception<Throwable> { call, cause -> ... }` | `(sp/.exception cfg (kt/ref Throwable class) (fn [call cause] ...))` |
 | `exception<Throwable> { call, cause -> ... }` (reified) | `(sp/.exception cfg (fn [call cause] ...) :<> Throwable)` (needs `:kotlinc`) |
@@ -112,15 +112,15 @@ A member is in the namespace of the package of the class that declares it (`call
 the first lambda parameter (`ApplicationCall` or `StatusContext`). Write the type as a hint on the `fn` parameter:
 
 ```clojure
-(fn [^StatusPagesConfig cfg]                       ; the hint on cfg is needed (see below)
+(fn [cfg]                                          ; cfg is typed by (sp/StatusPages)
   (sp/.status cfg (http/NotFound http/HttpStatusCode)
               (fn [^ApplicationCall call status] ...)))        ; the handler gets an ApplicationCall
 ```
 
 * `^StatusPagesConfig$StatusContext ctx` selects the other overload.
 * No hint is a compile error "is ambiguous", whose "Way out" names the hint.
-* `cfg` needs `^StatusPagesConfig`. ckway does not infer the type argument of `(sp/StatusPages)`, so `cfg` of `(fn [cfg] ...)` has no type, the
-  call goes the dynamic path, the lambda hint is not seen, and the call is "ambiguous" when the module runs (`start` throws it).
+* `cfg` needs no hint: ckway takes its type from `(sp/StatusPages)` (`ApplicationPlugin<StatusPagesConfig>`). The same holds for `Application` and
+  `ApplicationTestBuilder` in a `fn` literal at a function type. A `defn` parameter (`^RoutingContext ctx`, `^Application application`) still needs its hint.
 * The trailing lambda goes after the `vararg` of codes: `(sp/.status cfg code1 code2 f)`.
 
 ### 404 and 405
@@ -132,7 +132,6 @@ There is no `Allow` header.
 
 ### Types that kt needs at `embeddedServer`
 
-`(eng/embeddedServer cio/CIO (long (:port config)) ^String (:host config) f)` has hints on purpose. With `(:port config)` and `(:host config)`
-(types unknown to the compiler) kt chooses the overload `embeddedServer(factory, environment, configure, module)` and fails at run time:
-`the argument `environment` (...ApplicationEnvironment) is java.lang.Long 0, but the Kotlin declaration that was selected needs ...ApplicationEnvironment`.
-With literals, or with `(long ...)` and `^String`, the right overload is chosen.
+`(eng/embeddedServer cio/CIO (long (:port config)) ^String (:host config) f)` has hints so that the call is resolved at compile time.
+Without them (`(:port config)`, `(:host config)`) the values choose the overload when the call runs, and the compiler gives a reflection warning.
+(An older ckway chose a wrong overload there and failed at run time; this is fixed.) `interop_test.clj` pins the untyped form.

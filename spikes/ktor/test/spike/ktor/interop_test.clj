@@ -41,7 +41,7 @@
   "Runs (f port) on a server whose StatusPages config is `configure` (a fn of the StatusPagesConfig)."
   [configure f]
   (let [server (eng/embeddedServer cio/CIO 0 "127.0.0.1"
-                                   (fn [^Application a]
+                                   (fn [a]
                                      (app/.install a (sp/StatusPages) configure)
                                      (rt/.routing a (fn [r]
                                                       (rt/.get r "/health" (fn [ctx] (resp/.respondText (rt/call ctx) "ok")))))))]
@@ -86,7 +86,7 @@
   (let [msg (compile-error
              '(fn [^Application a]
                 (app/.install a (sp/StatusPages)
-                              (fn [^StatusPagesConfig cfg]
+                              (fn [cfg]
                                 (sp/.status cfg (http/NotFound http/HttpStatusCode) (fn [call status] nil))))))]
     (is (some? msg) "a compile error, not a run-time one")
     (is (str/includes? msg "is ambiguous"))
@@ -94,18 +94,29 @@
     (is (str/includes? msg "(fn [^io.ktor.server.application.ApplicationCall x y] ...)") "the way out names the hint")
     (is (str/includes? msg ".statusWithContext x y z)"))))
 
-(deftest untyped-config-parameter-is-a-run-time-error
-  ;; `cfg` of `(fn [cfg] ...)` at `.install` has no static type (kt does not infer the type argument of
-  ;; `(sp/StatusPages)`), so the hint of the lambda is not seen: the call is "ambiguous" when it runs.
-  (is (nil? (compile-error '(fn [^Application a]
-                              (app/.install a (sp/StatusPages)
-                                            (fn [cfg] (sp/.status cfg (http/NotFound http/HttpStatusCode) (fn [^ApplicationCall c s] nil)))))))
-      "it compiles: the error comes only when the code runs, and a reflection warning is the sign")
-  (is (str/includes?
-       (reflection-warnings '(fn [^Application a]
-                               (app/.install a (sp/StatusPages)
-                                             (fn [cfg] (sp/.status cfg (http/NotFound http/HttpStatusCode) (fn [^ApplicationCall c s] nil))))))
-       "Reflection warning")))
+(deftest config-parameter-is-typed-by-the-plugin
+  ;; `cfg` of `(fn [cfg] ...)` at `.install` gets its type from `(sp/StatusPages)` (ApplicationPlugin<StatusPagesConfig>):
+  ;; no hint on `cfg`, the hinted inner lambda selects at compile time, and there is no warning.
+  (let [form '(fn [^Application a]
+                (app/.install a (sp/StatusPages)
+                              (fn [cfg]
+                                (sp/.status cfg (http/NotFound http/HttpStatusCode)
+                                            (fn [^ApplicationCall c s] nil))
+                                (sp/.exception cfg (kt/ref Throwable class) (fn [c e] nil)))))]
+    (is (nil? (compile-error form)))
+    (is (= "" (reflection-warnings form)))))
+
+(deftest untyped-port-and-host-choose-by-value
+  ;; Kotlin: embeddedServer(CIO, port, host) { } with values that kt cannot see at compile time.
+  ;; It was a run-time error ("the argument `environment` is Long 0"); now the values choose. Not started here.
+  (let [server (binding [*ns* (the-ns 'spike.ktor.interop-test) *warn-on-reflection* false]
+                 (eval '(let [m {:port 0 :host "127.0.0.1"}]
+                          (eng/embeddedServer cio/CIO (:port m) (:host m) (fn [_a] nil)))))]
+    (is (instance? EmbeddedServer server)))
+  (is (str/includes? (reflection-warnings '(let [m {:port 0 :host "h"}]
+                                             (eng/embeddedServer cio/CIO (:port m) (:host m) (fn [_a] nil))))
+                     "Reflection warning")
+      "the dynamic path warns; the app uses (long ...) and ^String instead"))
 
 (defn- u ^String [s] (str "http://127.0.0.1:1" s))
 (defn- u-untyped [s] (str "http://127.0.0.1:1" s))
@@ -119,8 +130,8 @@
 
 (deftest trailing-lambda-after-skipped-defaults
   ;; Kotlin: embeddedServer(CIO, 0, "127.0.0.1") { }   (`watchPaths` is skipped, the lambda is `module`)
-  (let [server (eng/embeddedServer cio/CIO 0 "127.0.0.1" (fn [^Application _a] nil))]
+  (let [server (eng/embeddedServer cio/CIO 0 "127.0.0.1" (fn [_a] nil))]
     (is (instance? EmbeddedServer server)))
   (testing "after a named argument a positional one is still an error"
-    (is (str/includes? (compile-error '(eng/embeddedServer cio/CIO :port 0 (fn [^Application _a] nil)))
+    (is (str/includes? (compile-error '(eng/embeddedServer cio/CIO :port 0 (fn [_a] nil)))
                        "follows a named argument"))))

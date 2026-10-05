@@ -32,7 +32,7 @@
   (let [seen (atom [])]
     ;; Kotlin: testApplication { application { module() }; client.get("/health") }
     (tst/testApplication
-     (fn [^ApplicationTestBuilder b]
+     (fn [b]
        (tst/.application b (core/module core/default-config (d/memory-store)))
        (let [^HttpClient client (tst/client b)]
          ;; Kotlin: client.get("/health")

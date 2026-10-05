@@ -5,7 +5,6 @@
             [spike.ktor.domain :as d])
   (:import (io.ktor.server.application Application ApplicationCall)
            (io.ktor.server.engine EmbeddedServer)
-           (io.ktor.server.plugins.statuspages StatusPagesConfig)
            (io.ktor.server.routing RoutingContext)
            (org.slf4j LoggerFactory))
   (:gen-class))
@@ -145,8 +144,7 @@
 (defn- install-status-pages [^Application application {:keys [log-error]}]
   ;; Kotlin: install(StatusPages) { exception<Throwable> { call, cause -> ... } }
   (app/.install application (sp/StatusPages)
-                ;; the hint on `cfg` is needed: kt does not infer the type argument of `(sp/StatusPages)`
-                (fn [^StatusPagesConfig cfg]
+                (fn [cfg]
                   ;; Kotlin: exception<Throwable> { call, cause -> ... }   (the reified form is not used: see FINDINGS)
                   (sp/.exception cfg (kt/ref Throwable class)
                                  (fn [call cause]
@@ -228,7 +226,7 @@
         ;; The port and the host need a type: with values that kt cannot see (`(:port config)`) it takes the
         ;; overload `embeddedServer(factory, environment, configure, module)` and fails: see FINDINGS)
         server (eng/embeddedServer cio/CIO (long (:port config)) ^String (:host config)
-                                   (fn [^Application application]
+                                   (fn [application]
                                      (try (app-module application)
                                           (catch Throwable e (deliver failed e) (throw e)))))]
     ;; Kotlin: server.start(wait = false)
