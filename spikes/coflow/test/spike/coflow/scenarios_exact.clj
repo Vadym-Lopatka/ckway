@@ -14,7 +14,7 @@
                    :transform (fn [s _ m] (swap! seen conj m) [s nil])})
             [g report error] (mk {:procs {:p {:proc (flow/process step) :args {:src src}}} :conns []})]
         (flow/resume g)
-        (flow/ping-proc g :p)
+        (flow/ping-proc g :p :timeout-ms 5000)
         (let [go (promise)
               f1 (future @go (a/>!! src :m))
               f2 (future @go (flow/stop g))]

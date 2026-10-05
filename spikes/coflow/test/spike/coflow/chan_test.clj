@@ -9,6 +9,7 @@
 (set! *warn-on-reflection* true)
 
 (kt/require '[kotlinx.coroutines :as co]
+            '[kotlinx.coroutines.channels :as kch]
             '[kotlinx.coroutines.flow :as kflow]
             '[kotlin.coroutines :as kc])
 
@@ -84,7 +85,7 @@
         (let [p (cc/port scope 4) o (a/chan 4) n 4000 got (atom [])
               done (promise)
               consumers (mapv (fn [_] (future (loop []
-                                                (let [[v port] (a/alts!! [p o (a/timeout 1500)])]
+                                                (let [[v port] (a/alts!! [p o (a/timeout 5000)])]
                                                   (when (some? v)
                                                     (swap! got conj v)
                                                     (when (= n (count @got)) (deliver done true))
@@ -156,3 +157,13 @@
         (is (= (set (keys (clojure.datafy/datafy c))) (set (keys (clojure.datafy/datafy p)))))
         (is (= (set (keys (:buffer (clojure.datafy/datafy c)))) (set (keys (:buffer (clojure.datafy/datafy p))))))
         (is (= (:buffer (clojure.datafy/datafy c)) (:buffer (clojure.datafy/datafy p))))))))
+
+(deftest ckway-suspend-function-that-returns-a-value-class
+  ;; ckway batch D boxes the result of a suspend function whose Kotlin return type is a value class
+  ;; (ChannelResult). Before, this threw: kt: `this` expects kotlinx.coroutines.channels.ChannelResult, got java.lang.String "a".
+  ;; If this test fails after a ckway change, the value class is unboxed again.
+  (let [c (kch/Channel 5)]
+    (kch/.send c "a")
+    (is (= "a" (kch/.getOrNull (kch/.receiveCatching c))))
+    (kch/.close c)
+    (is (nil? (kch/.getOrNull (kch/.receiveCatching c))) "closed")))

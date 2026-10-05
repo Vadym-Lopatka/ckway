@@ -61,10 +61,12 @@ flow; `(running-scope g)` gives its `CoroutineScope`.
 * One `CoroutineScope(SupervisorJob() + Dispatchers.Default)` per started flow. Every proc loop, mult and pump is a coroutine of it.
 * **`stop` returns at once with `true`, as the original does.** It sends the stop command, closes the report, error and
   (internal) control channels, and starts a **reaper**: one coroutine outside the flow's scope (`GlobalScope`, it ends by
-  itself). The reaper waits until every coroutine of the scope is done (procs run their stop transition, injects and
-  transforms finish) for at most the grace time (property `coflow.stop.grace.ms`, 5000), then `cancelAndJoin`s the scope.
-  So no coroutine outlives a stop for longer than the grace time. `start` after `stop` makes a new scope, and works while
-  the reaper of the old run still waits. A proc that calls `stop` on its own flow from a step fn does not wait for itself.
+  itself). The reaper waits until every proc has taken the stop command and ended (their transition fn runs), closes the
+  internal channels (so the pumps, mults and blocked injects of the run end), waits until every other coroutine of the scope is
+  done, and completes the scope. **No time limit and no interrupt of user code, as in the original.** A forced cancel after a
+  grace time is an opt-in extra: `(spike.coflow.ext/stop-with-grace g ms)` or the system property `coflow.stop.grace.ms`.
+  `start` after `stop` makes a new scope, and works while the reaper of the old run still waits. A proc that calls `stop` on its
+  own flow from a step fn does not wait for itself.
 * A proc loop is a Clojure fn run as a suspend lambda (so on a virtual thread). It waits in a Kotlin
   `select { control.onReceiveCatching ...; casts...; in.onReceiveCatching ... }`, biased: control first, as `alts!! :priority true`.
   Before it suspends, it tries `tryReceive` on each port in the same order (no suspension on a busy flow).
@@ -77,35 +79,45 @@ flow; `(running-scope g)` gives its `CoroutineScope`.
   does not bound its parallelism.
 * mult: a coroutine per mult; the next message is taken when all taps have the last one.
 * **A user's own channel (core.async) in `::flow/in-ports` / `::flow/out-ports` is read and written by the loop itself, with
-  no bridge and no extra buffer.** In: the proc only *polls* it (`take!` with a non-blocking handler) while it looks for
-  input, in the order of the read set; only if nothing is ready does it register a blocking take (a handler with an
-  active flag, like `alts!`), together with its Kotlin `select`, and cancels the registration when the select returns. A
-  paused proc, a proc that waits in a transform, an input that the filter excludes, and a flow that was never started
-  take nothing. Out: control first, then a non-blocking put, then a registered put handler that is cancelled if control
-  wins (if the put committed in the same moment, the loop knows and does not write the message again).
+  no bridge and no extra buffer, under ONE arbitration.** A proc that has such a port waits with core.async's own commit
+  protocol (`clojure.core.async.impl.protocols/Handler`: `active?`, `commit`, `lock-id`, `blockable?`; `spike.coflow.chan/alts-ops`).
+  All sources of one wait (control, casts, internal inputs, user inputs, or the pending put into a user's channel) register a
+  handler that shares ONE flag and ONE lock, in the priority order of the original (control first), exactly as `alts` does.
+  A channel commits a take or a put only if the flag is still free, under the lock, and the commit makes it busy. So exactly
+  one source wins, nothing is taken from a user's channel that the proc does not consume, and nothing is put into it that the
+  proc does not write. Our own ports take part through their `ReadPort`/`WritePort` implementation (the take path of
+  `KPort`): a value that a pump took for a handler that is no longer free stays in the port (the stash), in its place, and
+  counts in its capacity. A proc with no user ports keeps the Kotlin `select` fast path. Paused procs, procs that wait in a
+  transform, inputs that the filter excludes and flows that were never started take nothing.
+  If a proc is cancelled by force while it waits (opt-in grace, or `Job.cancel`), a handler that had already committed
+  has delivered its message to a wait that no longer exists: that message is lost. A stop is not a cancel: the proc takes the
+  stop command through the arbitration and ends, and loses nothing (tests below).
 * `futurize` and `inject` return a `java.util.concurrent.FutureTask` (the class of the original's futures; a `proxy`
   subclass, so `(class f)` is a different class, but `instance?`, `future-cancel`, `deref` with timeout, `.get` and the
   exception wrapping behave the same). The task is run by a coroutine.
 
-### The one race (in-ports)
+### Why there is no race (in-ports, out-ports)
 
-A Kotlin `select` and a core.async handler cannot commit together. In the instant when a control message wins the select
-and the user's channel commits a take of the registered handler, the message has left the user's channel. The proc then
-keeps it (`held`) and reads it next, at the position of that input in the read set. It is lost only if the flow is stopped
-(or its scope cancelled) before that read. So at most **one message per in-port per proc** can be lost, and only in a
-stop that falls into that window. The original loses none (`alts!!` is atomic). Tests: `item-2-in-ports-race-bound`
-(25 rounds of pause/resume floods with a stop in the middle, 3 arms: 0 messages lost in every round we ran, so the race
-was not observed; the assertion is "at most 1"), and `item-2-in-ports-nothing-lost-while-the-flow-runs` (3000
-messages, random pause/resume, no stop: all arrive once, in order).
+The first version used a Kotlin `select` for the internal ports and a separate core.async handler for the user's channel: two
+commits, so in one instant control could win the `select` while the user's channel committed the take, and the message was
+lost (600 rounds of "a put into the user's channel and a stop in the same moment": 60 lost on that version, 0 now, same
+test on the oracle: 0). Now there is one commit (see above). Tests: `exact_test.clj` (a user's channel double that commits at a
+controlled moment: control wins then the channel gives nothing; the channel wins then control stays in its port; a put happens
+only if control did not win; 1000 races; a proc waiting on the user's channel and paused/stopped takes nothing; the stop race
+in all arms with loss 0) and `item-2-in-ports-lose-nothing-with-stops-in-the-flood` in `fixes_test.clj`.
 
 ### The report channel and the hand-held value
 
-A take of a core.async user on a port is served by a pump coroutine. The pump receives from the Kotlin channel only while
-a take waits. If that take is given up (an `alts!!` took another branch) in the moment the value arrives, the pump keeps the
-value (the *stash*), and the next take gets it first (so it is never lost or reordered). The stash counts as one slot of the
-capacity: when buffer plus stash is full, a sliding port drops the stash (the oldest) and a dropping port drops the new
-value. A fixed-buffer port that a user builds with `chan/port` can hold one value more than its capacity in this case
-(the flow's own channels that a user can read, report and error, are sliding).
+A take of a core.async user on a port first tries the Kotlin channel (`tryReceive`: a message that is there is given at once),
+and otherwise registers the handler; a pump coroutine then receives from the Kotlin channel only while a handler waits. If that
+handler is no longer free when the value arrives (an `alts!!` took another branch), the pump keeps the value (the *stash*), and
+the next take gets it first, so it is never lost or reordered. The stash counts as one slot of the capacity for the sliding
+and dropping ports (the flow's own report and error channels are sliding): when buffer plus stash is full, a sliding port drops
+the stash (the oldest) and a dropping port drops the new value.
+**What is left:** a *fixed-buffer* port that a user builds with `chan/port` can hold one value more than its capacity in this case.
+Why it cannot go: a Kotlin `Channel` has no peek, so a value has to leave the channel before a handler can be offered it; to count
+it we would have to make the suspending `send` of the Kotlin channel refuse while the stash is full, and `Channel.send` has no
+such hook. (The `send` that the flow itself uses on its channels is not affected: they are not read through the pump.)
 
 ### Where the quirks of the original come from
 
@@ -170,6 +182,5 @@ very short timeout, the first `ping` after a `pause`.
 ## What still differs for a user
 
 See the final report that came with this spike ("Semantic differences"); in short: the channel class, the `FutureTask`
-subclass, the `datafy` counts of channels, one possible lost message per in-port in a stop that hits the race window,
-the grace time (a transform or inject that runs for more than the grace time after `stop` is cancelled), and that a
-Clojure step fn always runs on a virtual thread.
+subclass, the `datafy` counts of channels (pending takers only),
+a fixed-buffer user port that can hold one more value (above), and that a Clojure step fn always runs on a virtual thread.

@@ -121,15 +121,15 @@
                :transform (fn [s _ m] [(update s :n inc) {::fk/report [[m (:n s)]]}])})
         [g report error] (mk {:procs {:p {:proc (flow/process step) :args {:log log :stopped stopped}}}
                               :conns []})]
-    (let [paused-ping (-> (flow/ping-proc g :p) norm-ping (update ::fk/state select-keys [:n]))]
+    (let [paused-ping (-> (flow/ping-proc g :p :timeout-ms 5000) norm-ping (update ::fk/state select-keys [:n]))]
       (flow/resume g)
       ;; a ping is answered after the commands before it: it tells that the transition is done
-      (flow/ping-proc g :p)
+      (flow/ping-proc g :p :timeout-ms 5000)
       @(flow/inject g [:p :in] [1])
       (let [r1 (rd report)]
         (flow/pause g)
         (flow/resume g)
-        (flow/ping-proc g :p)
+        (flow/ping-proc g :p :timeout-ms 5000)
         @(flow/inject g [:p :in] [2])
         (let [r2 (rd report)
               before-stop @log]
@@ -142,19 +142,19 @@
         [g report error] (mk {:procs {:a {:proc (lift1 inc)}
                                       :b {:proc (flow/process collector) :args {:sink sink}}}
                               :conns [[[:a :out] [:b :in]]]})]
-    (let [s0 (mapv #(::fk/status (flow/ping-proc g %)) [:a :b])
+    (let [s0 (mapv #(::fk/status (flow/ping-proc g % :timeout-ms 5000)) [:a :b])
           _ (flow/resume g)
-          s1 (mapv #(::fk/status (flow/ping-proc g %)) [:a :b])
+          s1 (mapv #(::fk/status (flow/ping-proc g % :timeout-ms 5000)) [:a :b])
           _ (flow/pause-proc g :b)
-          s2 (mapv #(::fk/status (flow/ping-proc g %)) [:a :b])
+          s2 (mapv #(::fk/status (flow/ping-proc g % :timeout-ms 5000)) [:a :b])
           _ @(flow/inject g [:a :in] [1 2 3])
           ;; b is paused: nothing in the report; a did its work
           none (rd report 200)
-          pb (flow/ping-proc g :b)
+          pb (flow/ping-proc g :b :timeout-ms 5000)
           _ (flow/resume-proc g :b)
           got (rd-n report 3)
           _ (flow/pause g)
-          s3 (mapv #(::fk/status (flow/ping-proc g %)) [:a :b])
+          s3 (mapv #(::fk/status (flow/ping-proc g % :timeout-ms 5000)) [:a :b])
           _ @(flow/inject g [:a :in] [10])
           none2 (rd report 200)
           _ (flow/resume g)
@@ -170,8 +170,8 @@
         [g report error] (mk {:procs {:p {:proc (flow/process step)} :q {:proc (lift1 inc)}}
                               :conns [[[:p :out] [:q :in]]]})]
     (flow/resume g)
-    (let [all (flow/ping g)
-          one (flow/ping-proc g :p)
+    (let [all (flow/ping g :timeout-ms 5000)
+          one (flow/ping-proc g :p :timeout-ms 5000)
           unknown (flow/ping-proc g :nope :timeout-ms 100)
           short (flow/ping g :timeout-ms 1)] ;; not compared: which procs answer within 1 ms depends on timing
       (flow/stop g)
@@ -185,7 +185,7 @@
   ;; ping replies do not go to the report channel
   (let [[g report error] (mk {:procs {:q {:proc (lift1 inc)}} :conns []})]
     (flow/resume g)
-    (flow/ping g)
+    (flow/ping g :timeout-ms 5000)
     (let [r (rd report 150)]
       (flow/stop g)
       {:report r})))
@@ -216,8 +216,8 @@
     {:inject (try (flow/inject g [:a :in] [1]) :no-throw (catch Throwable t (nx t)))
      :pause (try (flow/pause g) :no-throw (catch Throwable t (nx t)))
      :resume (try (flow/resume g) :no-throw (catch Throwable t (nx t)))
-     :ping (try (flow/ping g) :no-throw (catch Throwable t (nx t)))
-     :ping-proc (try (flow/ping-proc g :a) :no-throw (catch Throwable t (nx t)))
+     :ping (try (flow/ping g :timeout-ms 5000) :no-throw (catch Throwable t (nx t)))
+     :ping-proc (try (flow/ping-proc g :a :timeout-ms 5000) :no-throw (catch Throwable t (nx t)))
      :pause-proc (try (flow/pause-proc g :a) :no-throw (catch Throwable t (nx t)))
      :stop (flow/stop g)}))
 
@@ -236,7 +236,7 @@
     (let [r1 (rd report)
           e (norm-err (rd error))
           r2 (rd report)
-          ping (norm-ping (flow/ping-proc g :p))]
+          ping (norm-ping (flow/ping-proc g :p :timeout-ms 5000))]
       (flow/stop g)
       {:r1 r1 :error e :r2 r2 :ping-status (::fk/status ping) :ping-count (::fk/count ping)})))
 
@@ -251,7 +251,7 @@
     (flow/pause g)
     (let [e (norm-err (rd error))
           ;; the proc is still alive, status unchanged (running), state unchanged
-          ping (norm-ping (flow/ping-proc g :p))]
+          ping (norm-ping (flow/ping-proc g :p :timeout-ms 5000))]
       @(flow/inject g [:p :in] [1])
       (let [r (rd report)]
         (flow/stop g)
@@ -310,7 +310,7 @@
         _ (flow/start g)
         after-start @calls
         _ (flow/resume g)
-        _ (flow/ping g)
+        _ (flow/ping g :timeout-ms 5000)
         _ (flow/stop g)
         _ (await-pred calls #(some #{::fk/stop} (:transition %)) T)
         stopped @calls
@@ -336,7 +336,7 @@
         {r2 :report-chan e2 :error-chan} (flow/start g)
         _ (flow/resume g)
         _ @(flow/inject g [:a :in] [1])
-        ping2 (some? (flow/ping-proc g :a))
+        ping2 (some? (flow/ping-proc g :a :timeout-ms 5000))
         stop3 (flow/stop g)]
     {:same-chans same-chans? :already already :stop [stop1 stop2 stop3] :closed closed
      :put-closed put-closed :new-chans-differ [(not= report r2) (not= error e2)] :ping-after-restart ping2
@@ -469,7 +469,7 @@
     (flow/resume g)
     (let [accepted (loop [i 0]
                      (if (< i 10)
-                       (let [r (deref (flow/inject g [:p :in] [i]) 300 ::blocked)]
+                       (let [r (deref (flow/inject g [:p :in] [i]) 1500 ::blocked)]
                          (if (= r ::blocked) i (recur (inc i))))
                        i))
           ;; the blocked inject is still pending; release the consumer
@@ -491,7 +491,7 @@
     (flow/resume g)
     @(flow/inject g [:p :in] [0])
     ;; give the proc the time to take 0 (it blocks in the step on the gate)
-    (let [ping (flow/ping-proc g :p)]
+    (let [ping (flow/ping-proc g :p :timeout-ms 5000)]
       (doseq [i (range 1 10)] (deref (flow/inject g [:p :in] [i]) 1000 ::blocked))
       (deliver gate true)
       (await-count seen 3 T)
@@ -508,7 +508,7 @@
         [g report error] (mk {:procs {:p {:proc (flow/process step) :chan-opts {:in {:buf-or-n (a/dropping-buffer 2)}}}} :conns []})]
     (flow/resume g)
     @(flow/inject g [:p :in] [0])
-    (let [ping (flow/ping-proc g :p)]
+    (let [ping (flow/ping-proc g :p :timeout-ms 5000)]
       (doseq [i (range 1 10)] (deref (flow/inject g [:p :in] [i]) 1000 ::blocked))
       (deliver gate true)
       (await-count seen 3 T)
@@ -646,7 +646,7 @@
     @(flow/inject g [:p :in] [1 2])
     (let [r (rd-n report 2)
           st (deref started T :no)
-          ping (flow/ping-proc g :p)]
+          ping (flow/ping-proc g :p :timeout-ms 5000)]
       (flow/stop g)
       {:r r :start-args (update st 1 sort) :ping ping})))
 

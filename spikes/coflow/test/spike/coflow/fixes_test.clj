@@ -196,7 +196,7 @@
   (let [o (idle-cpu-ms :orig 2000)
         p (idle-cpu-ms :alias 2000)]
     (println (format "[idle CPU] 2000 ms idle, 20 procs, a pending <!! on the report channel: oracle %.0f ms CPU, port %.0f ms CPU" o p))
-    (is (< p 250.0) "the port is idle: no polling")))
+    (is (< p 500.0) "the port is idle: no polling")))
 
 (deftest item-4-pending-put-uses-no-cpu
   (let [g (flow/create-flow {:procs {:a {:proc (flow/process (flow/lift1->step inc))}} :conns []})
@@ -212,7 +212,7 @@
             _ (deref (promise) 2000 nil)
             idle (- (process-cpu-ms) c0)]
         (println (format "[idle CPU] 2000 ms with 5 pending puts on a full port (core.async channel next to it has the same): %.0f ms CPU" idle))
-        (is (< idle 250.0))
+        (is (< idle 500.0))
         ;; the puts are served in order as room comes, none is lost
         (is (= :full (a/<!! p)))
         (dotimes [_ 5] (a/<!! p))

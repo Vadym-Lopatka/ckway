@@ -82,7 +82,7 @@
                                 (when-let [^Job j @job-ref] (cancel-job! j)))
                               (when on-done (on-done))))
          ;; Kotlin: scope.launch(dispatcher) { task.run() }
-         ^Job job (co/.launch scope :context dispatcher :block (fn [_] (.run task)))]
+         job (co/.launch scope :context dispatcher :block (fn [_] (.run task)))]
      (vreset! job-ref job)
      task)))
 
@@ -193,7 +193,8 @@
                            (do (co/withTimeoutOrNull (long grace) (fn [_] (run-all)))
                                (doseq [p internals] (chan/close-quiet! p))
                                (co/.cancelAndJoin job))
-                           (run-all))))))
+                           ;; every coroutine of the scope is done: complete its job (nothing is interrupted)
+                           (do (run-all) (co/.cancelAndJoin job)))))))
 
 (defn create-flow
   "see lib ns for docs"
@@ -536,7 +537,7 @@
         (assert (or (not params) args) "must provide :args if :params")
         (let [scope (flow-scope resolver)
               transform (if (= workload :compute)
-                          (let [^CoroutineDispatcher cd (get-dispatcher resolver :compute)]
+                          (let [cd (get-dispatcher resolver :compute)]
                             (fn [state a b]
                               (compute-transform scope cd step compute-timeout-ms state a b)))
                           (fn [state a b] (step state a b)))

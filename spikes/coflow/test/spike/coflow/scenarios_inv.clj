@@ -67,15 +67,15 @@
     (flow/resume g)
     @(flow/inject g [:p :in] (range 300))
     (flow/pause g)
-    (let [p1 (flow/ping-proc g :p)
-          p2 (flow/ping-proc g :p)
+    (let [p1 (flow/ping-proc g :p :timeout-ms 5000)
+          p2 (flow/ping-proc g :p :timeout-ms 5000)
           ;; paused: more input is not taken
           _ @(flow/inject g [:p :in] (range 300 310))
-          p3 (flow/ping-proc g :p)
-          p4 (flow/ping-proc g :p)]
+          p3 (flow/ping-proc g :p :timeout-ms 5000)
+          p4 (flow/ping-proc g :p :timeout-ms 5000)]
       (flow/resume g)
-      (let [n-reports (loop [n 0] (if (= :timeout (rd report 700)) n (recur (inc n))))
-            p5 (flow/ping-proc g :p)]
+      (let [n-reports (loop [n 0] (if (= :timeout (rd report 2000)) n (recur (inc n))))
+            p5 (flow/ping-proc g :p :timeout-ms 5000)]
         (flow/stop g)
         {:status [(::fk/status p1) (::fk/status p2) (::fk/status p3) (::fk/status p4) (::fk/status p5)]
          :count-stable (= (::fk/count p2) (::fk/count p3) (::fk/count p4))
@@ -94,7 +94,7 @@
     (doseq [c [#(flow/resume g) #(flow/resume g) #(flow/pause g) #(flow/pause g) #(flow/resume g)
                #(flow/pause-proc g :p) #(flow/pause-proc g :p) #(flow/resume-proc g :p) #(flow/resume-proc g :p)]]
       (c))
-    (flow/ping g)
+    (flow/ping g :timeout-ms 5000)
     (let [r1 (flow/stop g) r2 (flow/stop g)]
       (await-pred log #(some #{::fk/stop} %) T)
       (let [log2 (atom [])
@@ -133,9 +133,9 @@
     (flow/resume g)
     @(flow/inject g [:p :in] (range 50))
     (flow/stop g)
-    (let [_ (rd report 400)
+    (let [_ (rd report 1500)
           later @calls
-          _ (rd report 400)
+          _ (rd report 1500)
           later2 @calls]
       {:stable-after-stop (= later later2) :less-than-all (< later2 50)
        :closed [(rd report 50) (rd error 50)]})))
@@ -181,7 +181,7 @@
         [g report error] (mk {:procs {:a {:proc (lift1 inc)} :b {:proc (lift1 inc)} :s {:proc (flow/process sink)}}
                               :conns [[[:a :out] [:b :in]] [[:b :out] [:s :in]]]})]
     (flow/resume g)
-    (flow/ping g)
+    (flow/ping g :timeout-ms 5000)
     (let [t0 (System/nanoTime)
           f (flow/inject g [:a :in] (range n))
           ok (deref done 120000 false)

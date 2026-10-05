@@ -144,13 +144,6 @@
             (.get drained)
             (do (commit-now h) (box nil))
 
-            ;; a pump runs: a blocking take waits in the queue of the pump. A poll! (not blockable) looks at the
-            ;; channel itself, below.
-            (and (.get pumping) (impl/blockable? h))
-            (do (.add takers h)
-                (kch/.trySend wake true)
-                nil)
-
             :else
             (do
               (.lock h)
@@ -167,7 +160,9 @@
                   (identical? ret ::empty)
                   (do (when (impl/blockable? h)
                         (.add takers h)
-                        (ensure-pump! p))
+                        (ensure-pump! p)
+                        ;; a pump that already runs looks at its takers again
+                        (kch/.trySend wake true))
                       nil)
                   :else ret)))))
         (finally (.unlock plock)))))
@@ -356,9 +351,8 @@
 (defn- recv-or-closed
   "Waits for the next value of the Kotlin channel. Returns the value, or ::closed."
   [^Channel ch]
-  ;; Kotlin: select { ch.onReceiveCatching { it } }
-  ;; (`ch.receiveCatching()` itself is not used: a suspend function that returns a value class comes back unwrapped, see README)
-  (let [r (sel/select (fn [sb] (sel/.invoke sb (kch/onReceiveCatching ch) (fn [r] r))))]
+  ;; Kotlin: ch.receiveCatching().getOrNull()   (a suspend function that returns a value class: boxed by ckway since batch D)
+  (let [r (kch/.receiveCatching ch)]
     (if-some [v (kch/.getOrNull r)] v ::closed)))
 
 (defn recv!

@@ -107,6 +107,22 @@
         (is (= [1 2 3] (mapv (fn [_] (first (cc/alts-ops [[:take control :control]]))) (range 3)))
             "no message lost or reordered")))))
 
+(deftest control-already-in-the-port-wins-over-a-ready-user-message
+  ;; priority as in the original alts: a take on control returns at once when control has a message, also when a pump
+  ;; of the port runs (an earlier wait started it). The first version let the pump deliver it later, so a ready message of the
+  ;; user's channel won (the proc then read data after a stop).
+  (with-scope
+    (fn [scope]
+      (let [control (cc/port scope 10) user (a/chan 5)]
+        (a/>!! user "u0")
+        (is (= ["u0" :user] (cc/alts-ops [[:take control :control] [:take user :user]])))
+        (deref (promise) 200 nil)
+        (cc/send! control :cmd)
+        (deref (promise) 200 nil)
+        (a/>!! user "u1")
+        (is (= [:cmd :control] (cc/alts-ops [[:take control :control] [:take user :user]])) "control first")
+        (is (= ["u1" :user] (cc/alts-ops [[:take control :control] [:take user :user]])))))))
+
 (deftest a-put-to-the-user-channel-happens-only-if-control-did-not-win
   (with-scope
     (fn [scope]

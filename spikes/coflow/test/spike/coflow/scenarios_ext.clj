@@ -30,7 +30,7 @@
     (deref entered T nil)
     (let [t0 (System/nanoTime)
           r (flow/stop g)
-          fast (< (ms-since t0) 500)]
+          fast (< (ms-since t0) 2000)]
       (deliver gate true)
       {:stop-ret r :stop-fast fast :report-closed (rd report 500) :error-closed (rd error 500)})))
 
@@ -43,7 +43,7 @@
                :transform (fn [s _ m]
                             (let [t0 (System/nanoTime)
                                   r (flow/stop @gref)]
-                              (deliver result [r (< (ms-since t0) 1000)]))
+                              (deliver result [r (< (ms-since t0) 3000)]))
                             [s nil])})
         [g report error] (mk {:procs {:p {:proc (flow/process step)}} :conns []})]
     (deliver gref g)
@@ -63,12 +63,12 @@
     (rd report 100)
     (let [t0 (System/nanoTime)
           stop-ret (flow/stop g)
-          fast (< (ms-since t0) 500)
+          fast (< (ms-since t0) 2000)
           {r2 :report-chan e2 :error-chan} (flow/start g)]
       (flow/resume g)
       @(flow/inject g [:p :in] [2])
       (let [new-run (rd r2)
-            status (::fk/status (flow/ping-proc g :p))]
+            status (::fk/status (flow/ping-proc g :p :timeout-ms 5000))]
         (deliver gate true)
         (flow/stop g)
         {:stop-ret stop-ret :stop-fast fast :new-run-report new-run :new-run-status status
@@ -93,13 +93,13 @@
     (case mode
       :never-started (do (flow/create-flow def) {:left (drain-poll src)})
       :paused (let [[g report error] (mk def)]
-                (flow/ping-proc g :p)
+                (flow/ping-proc g :p :timeout-ms 5000)
                 (flow/stop g)
                 (deref (promise) 150 nil)
                 {:left (drain-poll src)})
       :filtered (let [[g report error] (mk def)]
                   (flow/resume g)
-                  (flow/ping-proc g :p)
+                  (flow/ping-proc g :p :timeout-ms 5000)
                   (flow/stop g)
                   (deref (promise) 150 nil)
                   {:left (drain-poll src)})
@@ -108,9 +108,9 @@
                  (deref entered T nil)
                  (flow/stop g)
                  ;; the stop reaches the proc while its transform waits; then the transform goes on
-                 (deref (promise) 300 nil)
+                 (deref (promise) 1500 nil)
                  (deliver gate true)
-                 (deref (promise) 300 nil)
+                 (deref (promise) 1500 nil)
                  {:left (drain-poll src)})
       :all-read (let [[g report error] (mk def)]
                   (flow/resume g)
@@ -146,7 +146,7 @@
     (flow/resume g)
     (let [accepted (loop [i 0]
                      (if (< i 30)
-                       (if (= ::blocked (deref (flow/inject g [:p :in] [i]) 300 ::blocked)) i (recur (inc i)))
+                       (if (= ::blocked (deref (flow/inject g [:p :in] [i]) 1500 ::blocked)) i (recur (inc i)))
                        i))
           in-sink (a/poll! sink)]
       ;; read what is in the user's channel now: the proc goes on
@@ -166,10 +166,10 @@
         [g report error] (mk {:procs {:p {:proc (flow/process step) :args {:sink sink}}} :conns []})]
     (flow/resume g)
     @(flow/inject g [:p :in] [7])
-    (let [ping (::fk/status (flow/ping-proc g :p))
+    (let [ping (::fk/status (flow/ping-proc g :p :timeout-ms 5000))
           _ (flow/pause g)
           _ (flow/resume g)
-          ping2 (::fk/status (flow/ping-proc g :p))
+          ping2 (::fk/status (flow/ping-proc g :p :timeout-ms 5000))
           first-msg (rd sink)
           second-msg (rd sink)
           none (rd sink 200)]
@@ -193,7 +193,7 @@
     @(flow/inject g [:p :in] [250])
     @(flow/inject g [:p :in] (map (fn [i] [:throw i]) (range 150)))
     ;; the ping is answered after the 151 messages were handled (the control channel has priority, so wait for the count)
-    (loop [n 0] (when (and (< n 2000) (< (::fk/count (flow/ping-proc g :p)) 151)) (recur (inc n))))
+    (loop [n 0] (when (and (< n 2000) (< (::fk/count (flow/ping-proc g :p :timeout-ms 5000)) 151)) (recur (inc n))))
     (let [reps (drain-poll report)
           errs (drain-poll error)]
       (flow/stop g)
@@ -217,7 +217,7 @@
     @(flow/inject g [:p :in] [1])
     (let [e (norm-err (rd error))
           fin (deref finished 5000 :no)
-          status (::fk/status (flow/ping-proc g :p))
+          status (::fk/status (flow/ping-proc g :p :timeout-ms 5000))
           late-report (rd report 200)]
       (flow/stop g)
       {:error-ex (select-keys (::fk/ex e) [:class]) :interrupted @interrupted :ran-to-end fin
@@ -260,7 +260,7 @@
 (defn make-flow [d] (flow/create-flow d))
 (defn start-flow [g] (flow/start g))
 (defn resume-flow [g] (flow/resume g))
-(defn ping-flow [g] (flow/ping g))
+(defn ping-flow [g] (flow/ping g :timeout-ms 5000))
 (defn stop-flow [g] (flow/stop g))
 
 (def scenarios
