@@ -168,6 +168,14 @@ A constructor parameter counts as a property when the class has a public propert
   The leaves are matched by JVM name and JVM parameter types, not by the written name, so a Java leaf (`CharSequence get();`,
   written `get`) and a Kotlin leaf (`.get`) of one member are served by one form, also when the Java interface does not extend
   the Kotlin one (an abstract method of the same JVM name and parameters that differs only in the result type).
+* The value that a member returns is adapted to the declared return type as an argument is adapted to a parameter: a
+  function type (also `suspend` and with a receiver), a `fun interface`, a Java single-method interface (a Java member too;
+  there `nil` is a value), number width, a value class, `Unit`. An object that already has the type passes as it is. A wrong
+  value is a `kt:` error that names the member and the Kotlin type, at the point of return. A generic result (`T`, `Any`)
+  is not adapted: nothing says what it must be, so a Clojure function returned there stays a Clojure function.
+  An interface that extends a function type (`fun interface Filter : (Handler) -> Handler`) has the member `.invoke`
+  with the types of that supertype (before, the member was the generic `invoke(P1): R` of `Function1`, and nothing
+  was adapted); its parameter of a function type is a Clojure function that is also the original Kotlin `Function1`.
 * Two unrelated interfaces with a default body for the same member are a compile error that names the member
   (the JVM would fail with `IncompatibleClassChangeError` at the call): write the member yourself.
 * The class of a form is reused as long as it implements the current interface classes. When an interface is redefined
@@ -208,6 +216,16 @@ A constructor parameter counts as a property when the class has a public propert
 * `:<>` needs the static path. A receiver of unknown type with several candidates is a compile error ("add a type
   hint"); a var used as a value cannot take `:<>`.
 * Reified properties (`inline val <reified T> T.name`) are not supported.
+* A class that Clojure made at run time cannot be a `:<>` argument of a call that needs a compiled bridge. A `defprotocol`
+  or `definterface` interface, a `deftype` or `defrecord` class, a `gen-class` that is not AOT-compiled yet and a class
+  of an earlier `kt/reify` live in a `DynamicClassLoader`: the JVM has the class, but no class file is on the class path
+  for the Kotlin compiler to read (it would only say "unresolved reference 'domain'"). `kt` checks it before the compiler
+  runs: for each class in `:<>` (type arguments included) that is not a JDK class, there must be a class file in a
+  directory or jar of the class path. If not, the call is a `kt:` error that names the class, says that it was made at run
+  time, and gives two ways out: AOT-compile the namespace that defines it and put the classes directory on the class
+  path (then the file exists), or use an overload that takes a `KClass` (`(kt/ref X class)`), if the library has one. No stub
+  is generated. The check runs only when a bridge has to be compiled: a stored bridge (AOT class, disk cache) loads as it is,
+  also when the class exists only at run time.
 * Two context parameters of the same type on a reified function are refused: Kotlin binds a context argument by type, so
   both would get the same value (a hand-written `with(x) { with(y) { both<Int>() } }` returns `"y|y"`). A function that is
   not reified is called directly and binds each parameter.
@@ -222,7 +240,24 @@ A constructor parameter counts as a property when the class has a public propert
 * A declaration without a JVM member, and a `fun interface` without exactly one abstract method, when a Clojure
   function has to be adapted to it (from the code).
 * An `object` or an enum entry is a value, not a function: `(f/Registry)` is a compile error. `apply` on one is a
-  `ClassCastException`.
+  `ClassCastException`. An `object` with an `operator fun invoke` (its own or inherited, or an extension of the same
+  package) is callable as `(f/Registry 1)`; `(f/.invoke f/Registry 1)` works too. `apply` on the var is still an error.
+* The call of a class var falls back to the `operator fun invoke` of the companion object when no constructor fits
+  (rule 3). It reads the members of the companion of that class and the extensions on its `Companion` that the package
+  of the class var declares. An `invoke` that the companion inherits from a supertype, and an extension `invoke` that
+  another package declares, are not seen: write `(alias/.invoke alias/Name ...)`. A type alias of a class in another
+  package does not see the companion `invoke` of its target either.
+* A class that implements a Kotlin function type has the member `invoke` (rule 6) with the parameter and result types of
+  that supertype. A type parameter of the class (`class Box<T> : (T) -> T`) is `Any?` there, a value class in the type
+  arguments is the object itself in a parameter and `Any?` in the result (the JVM holds it boxed in a generic position),
+  and a function type of more than 22 parameters gives no `invoke`. Kotlin picks the member by the static type of the
+  receiver; `kt` sees only the class of the value, so the declaration of each class applies to the objects of that
+  class. The object of a class that the package does not know (`RoutingHttpHandler` is in `org.http4k.routing`, the call
+  is `(core/.invoke handler req)`; a Clojure `reify` of `Function1`; a Kotlin function value) gets the generic
+  `invoke(p1: P1): R` of `Function1` (and `Function2`...), which the package has as soon as one of its classes implements
+  a function type: nothing checks the types of the arguments (a position of a type parameter, see 1: a Clojure integer for an
+  `Int` is a `Long` there, say `(int 1)`), and a result of a function type is not a Clojure function. A package with no class
+  that implements a function type, and no `operator fun invoke`, has no `.invoke` var.
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
 * A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
@@ -289,6 +324,11 @@ class, with a reflection warning (`*warn-on-reflection*`). A type hint or a loca
 (let [c (f/Other)] (f/.count c))                ; static: the class var tells the type of `c`
 ```
 
+A call of a function that has a return tag is not like this: `(defn u ^String [s] ...)` makes `(f/.get c (u "/x"))` static,
+because the Clojure compiler gives the call the tag of its arglist (else of the var), and `kt` takes the same tag (see below). A
+literal and an enum entry var have a static type too, as the receiver as well. What is still untyped: a var that holds a value
+(`(def c (f/Other))` without a hint), a local that the compiler could not infer, the result of a function without a tag.
+
 A correct call on an untyped receiver costs one `instance?` check on top of the call. A wrong receiver says which
 call, which Kotlin declaration was selected, the actual class and, if that class has a property or function of the same
 name, how to write it: "`weigh` is a property of fx.Cart2: write (f/weigh cart)".
@@ -315,6 +355,15 @@ A type hint that you write is the static type of the argument, as the declared t
 (In case 2 a value of the wrong class is a `kt:` error at run time, with the candidates.) A hint that the static path
 trusts and that is wrong at run time is a `kt:` error too, never the JVM's `ClassCastException`: it names the call, the
 parameter, the Kotlin declaration and the actual class. A correct call costs one `instance?` check.
+The tag of a call of a var is a hint that you wrote. `kt` reads it as the Clojure compiler does (`InvokeExpr`): the tag of the
+arglist that takes this number of arguments (a variadic arglist takes any number from its `&`), else the tag of the var; it
+resolves the class name in the namespace of the var, then in yours (`^String`, `^java.util.List`, `^"[B"` or `^bytes`, `^long`,
+`^double`). A primitive is only an upper bound. A macro, and a function with an `:inline` expansion for that number of
+arguments, have no tag. A tag that is wrong is a `kt:` error at run time, as any hint is; and note that a tag decides like any
+hint: `(defn ^CharSequence cs [] "x")` makes `(f/tag (cs))` the `CharSequence` overload, where the class of the value would choose `String`.
+Write the tag on the arglist (`(defn u ^String [s] ...)`) or the var (`(defn ^String u [s] ...)`); `^long` before the name is
+evaluated by Clojure to the function `long`, which is no tag.
+
 A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`, the element of a `doseq`) is an upper
 bound: the class of the value decides at run time. `^Object` says nothing. One exception: `^Number` for an argument that
 goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of the value decides, as for an inferred type.
@@ -481,8 +530,8 @@ control: the JVM's own start-up messages for your flags, and a warning that a fu
 ## 18. Erased overloads
 
 `(c/.sum xs)`, `(c/.sumOf xs f)`, `(c/.maxOrNull xs)` and `(c/.flatMap xs f)` are several Kotlin declarations with the same
-JVM parameter types: they differ in a type argument or in the result type of a lambda, which the JVM erases. `kt` does
-not guess. The error lists each candidate with its Java interop call:
+JVM parameter types: they differ in a type argument, in the parameter types of a lambda or in its result type, which the JVM
+erases. `kt` does not guess. The error says which of these it is, and lists each candidate with its Java interop call:
 
 ```clojure
 (c/.sum (c/listOf 1 2 3))
@@ -491,6 +540,24 @@ not guess. The error lists each candidate with its Java interop call:
 ;;     ->  (kotlin.collections.CollectionsKt/sumOfInt x)    ; JVM descriptor (Ljava/lang/Iterable;)I
 (kotlin.collections.CollectionsKt/sumOfInt (c/listOf 1 2 3))   ; 6
 ```
+
+When the candidates differ in the parameter types of a lambda, the way out is a type hint on the parameters of the `fn`
+literal (the error shows it first). Ktor has `status(vararg status: HttpStatusCode, handler: suspend (ApplicationCall,
+HttpStatusCode) -> Unit)` and the same with `suspend (StatusContext, HttpStatusCode) -> Unit` (`@JvmName("statusWithContext")`):
+
+```clojure
+(sp/.status cfg code (fn [^io.ktor.server.application.ApplicationCall call status] ...))   ; the first one
+(sp/.status cfg code (fn [^io.ktor.server.routing.StatusContext ctx status] ...))          ; the second
+```
+
+A hint fits the parameter type of a candidate when it is that class or a class that extends it (the lambda is then given a
+value that it takes). A parameter without a hint, and a parameter type that the JVM does not tell (`Any`, a type
+parameter), fit every candidate. If more than one candidate still fits, or none, the call stays ambiguous: a hint only
+chooses where a call is ambiguous, it never turns a call into an error. Only a `fn` or `fn*` literal that you write
+in the call has hints (not `#(...)`, not a function value), and only the static path looks at them: through a
+receiver of unknown class the call is selected at run time, where the lambda has no hints. When the receiver has a type for
+the compiler (a hint, a local, a parameter of a `fn` at a function type) the ambiguity is a compile error, not a run-time one:
+all candidates are members of the same class, so no subclass can change the answer.
 
 Type arguments count in the choice only where they can be seen. When two candidates are different Kotlin types, the type
 arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;
@@ -583,9 +650,12 @@ the argument (`(p/iv (p/readOnly))`); through a local, on the dynamic path and f
 of the object is known (`java.util.Arrays$ArrayList` for `listOf(1, 2)`), and that is a mutable list for the JVM.
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
-seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the
-error says that the element type cannot be seen, and the way out is to pass the elements positionally or a typed array
-(`(int-array xs)`, `(into-array String xs)`).
+seen: a primitive or typed array, a vector literal of values of known classes, or, at run time, the elements themselves.
+The run time looks at the elements of any list, vector, seq or set that has some: a candidate fits only if every element
+fits its element type, and exactly one candidate must fit (`(r/routes :list [h])`, with `routes(vararg Pair<..>)` and
+`routes(vararg RoutingHttpHandler)`). The selection is kept per class of the elements, so another call with other
+elements chooses again. An empty collection, or elements that fit several candidates, is ambiguous: the error says so,
+and the way out is to pass the elements positionally or a typed array (`(int-array xs)`, `(into-array String xs)`).
 
 An `inline` candidate has no public JVM method (`(c/.sumOf xs f)`: "no public JVM method (it is `inline`): write it in
 Clojure"). Write the loop in Clojure.
@@ -601,8 +671,13 @@ The members of Kotlin's built-in types (`Int.rangeTo`, `Map.keys`, `Map.getOrDef
 `(r/.rangeTo 1 5)` is the extension for `Comparable` and gives a `ComparableRange`, not an `IntRange`; `c/keys` is
 the property of `AbstractMap` only, so `(c/keys {})` or a `HashMap` is an error. `c/.getOrDefault` is not a var.
 
-A top-level function and a property of the same name share one var. A call that fits both is an error that gives the
-interop forms of both.
+A top-level function and a property of the same name share one var (`routes(vararg h)` and `val H.routes`; a member
+property and a top-level function too). A call that fits both is an error, never the property or the member by a rule:
+`routes(h)` and `h.routes` are different texts in Kotlin, and one form here. The error names the ways out: the function by a
+named argument (`(r/routes :list [h])`, a property has no such parameter), the property by a reference
+(`((kt/ref X routes) h)`, rule 9). A property without a receiver has no reference that tells it from the function: the
+error then gives the Java interop forms of both. A call that fits only one of them is unchanged. When the types of the
+arguments are not known to the compiler, the run time decides, and so does the error.
 
 ## 19. A class that cannot be linked
 

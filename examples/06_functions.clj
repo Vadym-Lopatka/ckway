@@ -53,23 +53,28 @@
 ;; ## Skip a parameter before the lambda
 ;;
 ;; In Kotlin you write the lambda after the parentheses, so the defaults before it need no name.
-;; `kt` has no such syntax. If you skip `owner`, you name the lambda: all arguments after a keyword are named.
+;; `kt` does the same when the last parameter is a function and has no default: the last positional argument
+;; goes to it, and the parameters before it take their defaults. (A call that fits without this rule is never changed.)
 
 ;; Kotlin: cart { add(tea) }
+(s/owner (s/cart (fn [c] (s/.add c tea))))
+;; => "guest"
+
+;; You can also name the lambda: all arguments after a keyword are named.
 (s/owner (s/cart :build (fn [c] (s/.add c tea))))
 ;; => "guest"
 
 ;; Kotlin: report(cart) { "..." }   -- `title` is skipped
-(s/report ann-cart :format (fn [c] (str (s/total c))))
+(s/report ann-cart (fn [c] (str (s/total c))))
 ;; => "Report: 13.50"
 
 ;; Kotlin: report(cart, "Total") { "..." }
 (s/report ann-cart "Total" (fn [c] (str (s/total c))))
 ;; => "Total: 13.50"
 
-;; Without the name, the lambda would be the argument for `title`. The error says what is missing.
-(err (s/report ann-cart (fn [c] (str (s/total c)))))
-;; => "kt: (report ann-cart (fn [c] (str (s/total c)))): missing required parameter `format`. Pass it positionally or as `:format`."
+;; With no lambda, the error says what is missing. A positional argument cannot reach `format` here, so it says to name it.
+(err (s/report ann-cart))
+;; => "kt: (report ann-cart): missing required parameter `format`. A positional argument cannot reach it here: name it, `:format`."
 
 ;; ## fun interface
 ;;

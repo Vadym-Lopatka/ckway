@@ -102,7 +102,7 @@
 (str (s/.price repo 3))
 ;; => "3.00"
 
-;; A number is not a `Money`. The error says so.
+;; A number is not a `Money`. The error says so, and names the member.
 (err (s/.price (kt/reify s/Repository
             (name [this] "x")
             (.all [this] [])
@@ -111,7 +111,7 @@
             (.price [this id] 5)
             (.load [this id] nil))
           1))
-;; => "kt: expected shop.Money where Kotlin expects it, got java.lang.Long 5. A value class is always the object, not the underlying value."
+;; => "kt: the result of the kt/reify member `Repository.price` (shop.Money) is wrong: expected shop.Money where Kotlin expects it, got java.lang.Long 5. A value class is always the object, not the underlying value."
 
 ;; The same for a `fun interface` with a value class in its method:
 ;; `fun interface Discount { fun adjust(total: Money): Money }`.
