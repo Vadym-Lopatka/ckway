@@ -12,9 +12,9 @@
 (defn request
   "Kotlin: Request(method, uri).body(body)"
   (^Request [^Method method ^String uri]
-   (h/.invoke h/Request method uri))
+   (h/Request method uri))
   (^Request [^Method method ^String uri ^String body]
-   (h/.body (h/.invoke h/Request method uri) body)))
+   (h/.body (h/Request method uri) body)))
 
 (defn handle
   "Call the handler in memory, as http4k tests do. No socket. Returns a plain map."

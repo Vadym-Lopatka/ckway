@@ -50,20 +50,21 @@ The `:kotlinc` alias is there only for a `:<>` call. This spike has none, so it 
 | `import org.http4k.core.*` | `(kt/require '[org.http4k.core :as h])` |
 | `Method.GET` | `h/Method.GET` |
 | `Status.OK` | `(h/OK h/Status)` |
-| `Request(GET, "/a")` | `(h/.invoke h/Request h/Method.GET "/a")` |
-| `Response(OK)` | `(h/.invoke h/Response status)` |
+| `Request(GET, "/a")` | `(h/Request h/Method.GET "/a")` |
+| `Response(OK)` | `(h/Response status)` |
 | `response.header("Location", x)` | `(h/.header response "Location" x)` |
 | `response.body(text)` | `(h/.body response text)` |
 | `request.bodyString()` | `(h/.bodyString request)` |
 | `response.status.code` | `(h/code (h/status response))` |
 | `"/health" bind GET to { ... }` | `(r/.to (r/.bind "/health" h/Method.GET) (fn [req] ...))` |
-| `routes(a, b, c)` | `(r/routes a b c)` (not with one argument; see FINDINGS 4) |
+| `routes(a, b, c)` | `(r/routes a b c)`; with one argument it is an "ambiguous" error, use `(r/routes :list [a])` |
 | `Path.int().of("id")` | `(l/.of (l/.int l/Path) "id")` |
 | `Query.optional("tag")` | `(l/.optional l/Query "tag")` |
-| `idLens(request)` | `(l/.invoke ^org.http4k.lens.LensExtractor id-lens request)` |
-| `Filter { next -> { req -> ... } }` | `(kt/reify h/Filter (.invoke [_ next] handler))` |
+| `idLens(request)` | `(.invoke ^org.http4k.lens.LensExtractor id-lens request)` (Java interop; `l/.invoke` is ambiguous) |
+| `Filter { next -> { req -> ... } }` | `(kt/reify h/Filter (.invoke [_ next] (fn [req] ...)))` |
+| `Filter.NoOp` | `(h/NoOp h/Filter)` |
 | `a.then(b)` (Filter, handler) | `(h/.then filter handler)` |
-| `handler(request)` | `(.invoke ^kotlin.jvm.functions.Function1 handler request)` |
+| `handler(request)` | `(h/.invoke handler request)` (hint the local: `^kotlin.jvm.functions.Function1`) |
 | `handler.asServer(SunHttp(port))` | `(srv/.asServer handler (srv/SunHttp (int port)))` |
 | `server.start()` | `(srv/.start server)` |
 | `server.port()` | `(srv/.port server)` |

@@ -15,23 +15,17 @@
 
 ;; ## Small helpers
 
-;; An http4k HttpHandler is a Kotlin typealias for (Request) -> Response, so it is a Function1.
-;; ckway turns a Clojure function into a Function1 when a Kotlin parameter asks for one (the `to` calls below).
-;; It does not do that for the RETURN value of a kt/reify member (FINDINGS 6), so this is plain Clojure interop.
-(defn- ->handler ^Function1 [f]
-  (reify Function1
-    (invoke [_ req] (f req))))
-
 ;; Kotlin: handler(request)
-;; The handler is a Function1, not a Clojure fn (FINDINGS 3).
+;; An HttpHandler is a Kotlin function type, and a RoutingHttpHandler is a class that implements it, so `.invoke` is its call.
 (defn call ^Response [^Function1 handler ^Request request]
-  (.invoke handler request))
+  (h/.invoke handler request))
 
 ;; Kotlin: Filter { next -> { request -> next(request) } }
-;; Filter(fn) is an inline function and has no JVM method (FINDINGS 5). kt/reify of the interface works.
+;; Filter(fn) is an inline function and has no JVM method (FINDINGS 5). kt/reify of the interface works,
+;; and the member can return a plain Clojure fn.
 (defn- filter* ^org.http4k.core.Filter [wrap]
   (kt/reify h/Filter
-    (.invoke [_ next] (->handler (wrap next)))))
+    (.invoke [_ next] (wrap next))))
 
 ;; Kotlin: Status.OK
 ;; Status.OK is a property of the companion object.
@@ -56,7 +50,7 @@
   "A new Response with a JSON body (or no body when `body` is nil)."
   ^Response [status body]
   ;; Kotlin: Response(status)
-  (let [^Response base (h/.invoke h/Response status)]
+  (let [^Response base (h/Response status)]
     (if (nil? body)
       base
       (with-json base body))))
@@ -80,7 +74,7 @@
   "The id path parameter as a long. A bad number throws LensFailure."
   [^Request req]
   ;; Kotlin: id(request)
-  (long (l/.invoke ^org.http4k.lens.LensExtractor id-lens req)))
+  (long (.invoke ^org.http4k.lens.LensExtractor id-lens req)))
 
 ;; ## Handlers
 
@@ -89,7 +83,7 @@
 
 (defn- list-products [store]
   (fn [^Request req]
-    (let [tag (l/.invoke ^org.http4k.lens.LensExtractor tag-lens req)
+    (let [tag (.invoke ^org.http4k.lens.LensExtractor tag-lens req)
           items (domain/all-products store)]
       (response OK (if tag
                      (filterv #(some #{tag} (:tags %)) items)
@@ -127,21 +121,14 @@
 
 ;; ## Routes
 
-;; Kotlin: path bind method to handler
-;; `bind` and `to` are infix functions: `(r/.bind path method)` makes a PathMethod, `(r/.to path-method handler)` binds it.
-(defn- route ^org.http4k.routing.RoutingHttpHandler [^String path ^org.http4k.core.Method method handler]
-  (r/.to (r/.bind path method) handler))
-
 ;; Kotlin: routes("/health" bind GET to { ... }, "/products" bind GET to { ... }, ...)
-;; Note: (r/routes a) with ONE argument picks the property `routes` (FINDINGS 4).
-;; The call is written with `apply`, because the written form with five untyped arguments is a reflection warning (FINDINGS 4).
 (defn- routes ^org.http4k.routing.RoutingHttpHandler [store]
-  (apply r/routes
-         [(route "/health" h/Method.GET health)
-          (route "/products" h/Method.GET (list-products store))
-          (route "/products/{id}" h/Method.GET (get-product store))
-          (route "/products" h/Method.POST (create-product store))
-          (route "/products/{id}" h/Method.DELETE (delete-product store))]))
+  (r/routes
+   (r/.to (r/.bind "/health" h/Method.GET) health)
+   (r/.to (r/.bind "/products" h/Method.GET) (list-products store))
+   (r/.to (r/.bind "/products/{id}" h/Method.GET) (get-product store))
+   (r/.to (r/.bind "/products" h/Method.POST) (create-product store))
+   (r/.to (r/.bind "/products/{id}" h/Method.DELETE) (delete-product store))))
 
 ;; ## Filters
 
