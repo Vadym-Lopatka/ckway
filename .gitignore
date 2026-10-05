@@ -13,3 +13,5 @@ examples/target/
 *.swp
 *~
 .DS_Store
+# Claude Code local files (worktrees, settings)
+.claude/
