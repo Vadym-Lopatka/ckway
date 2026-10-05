@@ -15,6 +15,7 @@ Tests call the real server with `java.net.http.HttpClient`, with `testApplicatio
 | `DELETE /products/{id}` | 204, or 404, or 400 |
 | an exception in a handler | 500 `{"error":"internal error"}`, logged, no stack trace to the client |
 | an unknown route | 404 `{"error":"not found"}` |
+| a known path with a wrong method | 405 `{"error":"method not allowed"}` |
 
 JSON is read and written with `org.clojure/data.json`. There is no ContentNegotiation.
 
@@ -25,6 +26,7 @@ JSON is read and written with `org.clojure/data.json`. There is no ContentNegoti
 * `test/spike/ktor/api_test.clj` - every route and every error path, over a real socket.
 * `test/spike/ktor/ktor_tools_test.clj` - `testApplication` and the Ktor client (`HttpClient(CIO)`).
 * `test/spike/ktor/reified_test.clj` - the `inline reified` forms with `:<>`.
+* `test/spike/ktor/interop_test.clj` - pins the ckway forms that needed a fix (`status` overloads by hint, compile-time ambiguity, defn return hint, trailing lambda).
 * `FINDINGS.md` - what worked, what did not, and why.
 
 ## Run and test
@@ -62,7 +64,7 @@ A Ktor handler is a `suspend` lambda. ckway runs your Clojure function on a virt
 * Let other exceptions go out of the handler. StatusPages turns them into the 500 answer.
 * A `ThreadLocal` set outside is not visible in the handler. `set!` of a var that was bound outside fails. (`doc/limits.md`, 4.)
 * On JDK 21 to 23, `synchronized` in a handler pins the carrier thread.
-* Put a type hint on the lambda parameter (`^RoutingContext ctx`), so the calls are resolved at compile time and there is no reflection warning. The type of a `fn` literal parameter is known to ckway, but not the type of a `defn` parameter, so hint it there.
+* Put a type hint on the lambda parameter (`^RoutingContext ctx`), so the calls are resolved at compile time and there is no reflection warning. The type of a `fn` literal parameter is known to ckway, but not the type of a `defn` parameter, so hint it there. A return hint on a `defn` (`(defn url ^String [..] ..)`) is used.
 * `start(wait = false)` throws the exception of a module that fails. But then `resolvedConnectors()` waits for ever. `start!` does not call it blindly: it waits with a time limit.
 
 ## Kotlin form -> Clojure form
@@ -75,19 +77,19 @@ A member is in the namespace of the package of the class that declares it (`call
 | Kotlin | Clojure |
 |---|---|
 | `import io.ktor.server.engine.*` | `(kt/require '[io.ktor.server.engine :as eng])` |
-| `embeddedServer(CIO, port = 0, host = "127.0.0.1") { module }` | `(eng/embeddedServer cio/CIO :port 0 :host "127.0.0.1" :module (fn [app] ...))` |
+| `embeddedServer(CIO, port = 0, host = "127.0.0.1") { module }` | `(eng/embeddedServer cio/CIO 0 "127.0.0.1" (fn [app] ...))` (the lambda is the trailing argument; hint a non-literal port and host: see below) |
 | `server.start(wait = false)` | `(eng/.start server :wait false)` |
 | `server.engine.resolvedConnectors().first().port` | `(eng/port (first (eng/.resolvedConnectors (eng/engine server))))` |
 | `server.stop(100, 2000)` | `(eng/.stop server 100 2000)` |
-| `install(StatusPages) { ... }` | `(app/.install application (sp/StatusPages) (fn [cfg] ...))` (a property is a function: `(sp/StatusPages)`) |
+| `install(StatusPages) { ... }` | `(app/.install application (sp/StatusPages) (fn [^StatusPagesConfig cfg] ...))` (a property is a function: `(sp/StatusPages)`) |
 | `install(CallLogging)` | `(app/.install application (cl/CallLogging))` |
 | `exception<Throwable> { call, cause -> ... }` | `(sp/.exception cfg (kt/ref Throwable class) (fn [call cause] ...))` |
 | `exception<Throwable> { call, cause -> ... }` (reified) | `(sp/.exception cfg (fn [call cause] ...) :<> Throwable)` (needs `:kotlinc`) |
 | `routing { ... }` | `(rt/.routing application (fn [r] ...))` |
 | `get("/health") { ... }` | `(rt/.get r "/health" (fn [ctx] ...))` |
 | `route("/products") { get { ... } }` | `(rt/.route r "/products" (fn [r2] (rt/.get r2 (fn [ctx] ...))))` |
-| `get("/{id}") { ... }`, `post { ... }`, `delete("/{id}") { ... }` | `(rt/.get r2 "/{id}" f)`, `(rt/.post r2 f)`, `(rt/.delete r2 "/{id}" f)` |
-| `route("{...}") { handle { ... } }` | `(rt/.route r "{...}" (fn [r3] (rt/.handle r3 (fn [ctx] ...))))` |
+| `route("/{id}") { get { ... }; delete { ... }; handle { ... } }` | `(rt/.route r2 "/{id}" (fn [r3] (rt/.get r3 f) (rt/.delete r3 f) (rt/.handle r3 f)))` |
+| `status(HttpStatusCode.NotFound) { call, _ -> ... }` | `(sp/.status cfg (http/NotFound http/HttpStatusCode) (fn [^ApplicationCall call status] ...))` |
 | `call` (in the handler) | `(rt/call ctx)` |
 | `call.parameters["id"]` | `(http/.get (app/parameters call) "id")` |
 | `call.request.queryParameters["tag"]` | `(http/.get (req/queryParameters (app/request call)) "tag")` |
@@ -104,11 +106,33 @@ A member is in the namespace of the package of the class that declares it (`call
 | `response.status.value` | `(http/value (cst/status response))` |
 | `client.close()` | `(cl/.close client)` |
 
-Not possible with the `kt` form: `status(HttpStatusCode.NotFound) { call, _ -> ... }` of StatusPages. Two overloads have the same JVM
-signature, so kt stops with an "ambiguous" error (the error is raised when the module runs, and `start` throws it; it is never a wrong call).
-Plain Java interop works: `(.status ^StatusPagesConfig cfg (into-array HttpStatusCode [code]) (reify kotlin.jvm.functions.Function3 (invoke [_ call status k] ... kotlin.Unit/INSTANCE)))`.
-The handler then gets an `ApplicationCall`. `.statusWithContext` gets a `StatusContext`. The spike does not use it: the
-suspend calls in such a handler block a Ktor thread, and nothing cancels them. It uses a catch-all route.
+### `status(...)` of StatusPages
 
-One difference to a usual Ktor app: the catch-all route `{...}` answers 404 for every method, so a known path with a wrong
-method (for example `PUT /products`) gives 404 `{"error":"not found"}`, not 405.
+`status(HttpStatusCode.NotFound) { call, _ -> ... }` has two overloads with the same JVM signature. They differ in the type of
+the first lambda parameter (`ApplicationCall` or `StatusContext`). Write the type as a hint on the `fn` parameter:
+
+```clojure
+(fn [^StatusPagesConfig cfg]                       ; the hint on cfg is needed (see below)
+  (sp/.status cfg (http/NotFound http/HttpStatusCode)
+              (fn [^ApplicationCall call status] ...)))        ; the handler gets an ApplicationCall
+```
+
+* `^StatusPagesConfig$StatusContext ctx` selects the other overload.
+* No hint is a compile error "is ambiguous", whose "Way out" names the hint.
+* `cfg` needs `^StatusPagesConfig`. ckway does not infer the type argument of `(sp/StatusPages)`, so `cfg` of `(fn [cfg] ...)` has no type, the
+  call goes the dynamic path, the lambda hint is not seen, and the call is "ambiguous" when the module runs (`start` throws it).
+* The trailing lambda goes after the `vararg` of codes: `(sp/.status cfg code1 code2 f)`.
+
+### 404 and 405
+
+Unknown path: 404 `{"error":"not found"}`. Known path, wrong method: 405 `{"error":"method not allowed"}`.
+Ktor gives 405 only for a constant path (`/health`, `/products`). For a path with a parameter (`PUT /products/1`) it gives 404.
+To have one behaviour, `route("/{id}")` has a `handle { 405 }` after `get` and `delete` (a route with a method is preferred over it).
+There is no `Allow` header.
+
+### Types that kt needs at `embeddedServer`
+
+`(eng/embeddedServer cio/CIO (long (:port config)) ^String (:host config) f)` has hints on purpose. With `(:port config)` and `(:host config)`
+(types unknown to the compiler) kt chooses the overload `embeddedServer(factory, environment, configure, module)` and fails at run time:
+`the argument `environment` (...ApplicationEnvironment) is java.lang.Long 0, but the Kotlin declaration that was selected needs ...ApplicationEnvironment`.
+With literals, or with `(long ...)` and `^String`, the right overload is chosen.

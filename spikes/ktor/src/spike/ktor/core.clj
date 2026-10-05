@@ -5,6 +5,7 @@
             [spike.ktor.domain :as d])
   (:import (io.ktor.server.application Application ApplicationCall)
            (io.ktor.server.engine EmbeddedServer)
+           (io.ktor.server.plugins.statuspages StatusPagesConfig)
            (io.ktor.server.routing RoutingContext)
            (org.slf4j LoggerFactory))
   (:gen-class))
@@ -49,6 +50,8 @@
     :bad-request (http/BadRequest http/HttpStatusCode)
     ;; Kotlin: HttpStatusCode.NotFound
     :not-found (http/NotFound http/HttpStatusCode)
+    ;; Kotlin: HttpStatusCode.MethodNotAllowed
+    :method-not-allowed (http/MethodNotAllowed http/HttpStatusCode)
     ;; Kotlin: HttpStatusCode.InternalServerError
     :internal-error (http/InternalServerError http/HttpStatusCode)))
 
@@ -125,8 +128,8 @@
         (let [p (d/add-product! store (update data :tags #(vec (or % []))))]
           (respond-json call :created p {"Location" (str "/products/" (:id p))}))))))
 
-(defn- not-found [^RoutingContext ctx]
-  (respond-json (rt/call ctx) :not-found (error-json "not found")))
+(defn- wrong-method [^RoutingContext ctx]
+  (respond-json (rt/call ctx) :method-not-allowed (error-json "method not allowed")))
 
 (defn- delete-product [store ^RoutingContext ctx]
   (let [call (rt/call ctx)
@@ -142,12 +145,22 @@
 (defn- install-status-pages [^Application application {:keys [log-error]}]
   ;; Kotlin: install(StatusPages) { exception<Throwable> { call, cause -> ... } }
   (app/.install application (sp/StatusPages)
-                (fn [cfg]
+                ;; the hint on `cfg` is needed: kt does not infer the type argument of `(sp/StatusPages)`
+                (fn [^StatusPagesConfig cfg]
                   ;; Kotlin: exception<Throwable> { call, cause -> ... }   (the reified form is not used: see FINDINGS)
                   (sp/.exception cfg (kt/ref Throwable class)
                                  (fn [call cause]
                                    (log-error cause)
-                                   (respond-json call :internal-error (error-json "internal error")))))))
+                                   (respond-json call :internal-error (error-json "internal error"))))
+                  ;; Kotlin: status(HttpStatusCode.NotFound) { call, _ -> call.respondText(...) }
+                  ;; The hint on the lambda parameter chooses between the two `status` overloads.
+                  (sp/.status cfg (http/NotFound http/HttpStatusCode)
+                              (fn [^ApplicationCall call _status]
+                                (respond-json call :not-found (error-json "not found"))))
+                  ;; Kotlin: status(HttpStatusCode.MethodNotAllowed) { call, _ -> call.respondText(...) }
+                  (sp/.status cfg (http/MethodNotAllowed http/HttpStatusCode)
+                              (fn [^ApplicationCall call _status]
+                                (respond-json call :method-not-allowed (error-json "method not allowed")))))))
 
 (defn module
   "A Ktor module (Application -> Unit) for the Catalog API over `store`."
@@ -168,11 +181,14 @@
                   (fn [products]
                     (rt/.get products (partial list-products store))
                     (rt/.post products (partial create-product store))
-                    (rt/.get products "/{id}" (partial get-product store))
-                    (rt/.delete products "/{id}" (partial delete-product store))))
-       ;; Kotlin: route("{...}") { handle { call.respondText(...) } }
-       ;; (`status(HttpStatusCode.NotFound) { ... }` of StatusPages is ambiguous for kt: see FINDINGS)
-       (rt/.route r "{...}" (fn [any] (rt/.handle any not-found)))))))
+                    ;; Kotlin: route("/{id}") { get { ... }; delete { ... }; handle { 405 } }
+                    ;; Ktor answers 405 for a wrong method on a constant path, but 404 on a path with `{id}`.
+                    ;; The `handle` with no method makes it 405 here too (a `get` or `delete` is preferred).
+                    (rt/.route products "/{id}"
+                               (fn [one]
+                                 (rt/.get one (partial get-product store))
+                                 (rt/.delete one (partial delete-product store))
+                                 (rt/.handle one wrong-method)))))))))
 
 (defn stop!
   "Stops the server of a system map made by `start!`. Safe to call twice."
@@ -207,11 +223,14 @@
         store (or (:store config) (d/memory-store))
         failed (promise)
         app-module (module config store)
-        ;; Kotlin: embeddedServer(CIO, port = 0, host = "127.0.0.1", module = { ... })
-        server (eng/embeddedServer cio/CIO :port (:port config) :host (:host config)
-                                   :module (fn [^Application application]
-                                             (try (app-module application)
-                                                  (catch Throwable e (deliver failed e) (throw e)))))]
+        ;; Kotlin: embeddedServer(CIO, port = 0, host = "127.0.0.1") { module }
+        ;; (the lambda is the last positional argument: it goes to `module`, `watchPaths` keeps its default.
+        ;; The port and the host need a type: with values that kt cannot see (`(:port config)`) it takes the
+        ;; overload `embeddedServer(factory, environment, configure, module)` and fails: see FINDINGS)
+        server (eng/embeddedServer cio/CIO (long (:port config)) ^String (:host config)
+                                   (fn [^Application application]
+                                     (try (app-module application)
+                                          (catch Throwable e (deliver failed e) (throw e)))))]
     ;; Kotlin: server.start(wait = false)
     (try
       ;; `start` may throw the exception of the module itself ...

@@ -40,7 +40,7 @@
                  (rt/.get r "/boom" (fn [_ctx] (throw (ex-info "boom" {})))))))
 
 (deftest reified-calls
-  (let [server (eng/embeddedServer cio/CIO :port 0 :host "127.0.0.1" :module reified-module)]
+  (let [server (eng/embeddedServer cio/CIO 0 "127.0.0.1" reified-module)]
     (eng/.start server :wait false)
     (try
       (let [system {:port (long (eng/port (first (eng/.resolvedConnectors (eng/engine server)))))}]

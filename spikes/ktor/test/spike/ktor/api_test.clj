@@ -67,10 +67,15 @@
       (is (= {:error "not found"} (:json (request s "DELETE" "/products/42"))))
       (is (= 400 (:status (request s "DELETE" "/products/abc")))))
     (testing "unknown routes"
-      (doseq [[m p] [["GET" "/nope"] ["GET" "/products/1/extra"] ["PUT" "/products"] ["GET" "/"]]]
+      (doseq [[m p] [["GET" "/nope"] ["GET" "/products/1/extra"] ["GET" "/"] ["DELETE" "/health/x"]]]
         (let [r (request s m p)]
           (is (= 404 (:status r)) (str m " " p))
-          (is (= {:error "not found"} (:json r))))))))
+          (is (= {:error "not found"} (:json r))))))
+    (testing "a known path with a wrong method is 405"
+      (doseq [[m p] [["PUT" "/products"] ["DELETE" "/products"] ["POST" "/health"] ["PUT" "/products/1"] ["POST" "/products/1"]]]
+        (let [r (request s m p)]
+          (is (= 405 (:status r)) (str m " " p))
+          (is (= {:error "method not allowed"} (:json r))))))))
 
 (deftest invalid-bodies
   (with-system [s {}]

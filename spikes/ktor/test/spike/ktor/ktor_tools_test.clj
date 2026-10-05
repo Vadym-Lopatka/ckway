@@ -25,7 +25,7 @@
   ;; Kotlin: response.status.value, response.bodyAsText()
   [(http/value (cst/status response)) (cst/.bodyAsText response)])
 
-(defn- url [system path]
+(defn- url ^String [system path]
   (str "http://127.0.0.1:" (:port system) path))
 
 (deftest test-application
@@ -50,9 +50,9 @@
     (let [^HttpClient client (cl/HttpClient ccio/CIO)]
       (try
         ;; Kotlin: client.get(url).bodyAsText()
-        (is (= [200 "{\"status\":\"ok\"}"] (result (creq/.get client ^String (url s "/health")))))
+        (is (= [200 "{\"status\":\"ok\"}"] (result (creq/.get client (url s "/health")))))
         ;; Kotlin: client.post(url) { setBody(json) }
-        (let [[code body] (result (creq/.post client ^String (url s "/products")
+        (let [[code body] (result (creq/.post client (url s "/products")
                                               (fn [b]
                                                 ;; Kotlin: header("Content-Type", "application/json"); setBody(text)
                                                 (creq/.header b "Content-Type" "application/json")
@@ -60,9 +60,9 @@
           (is (= 201 code))
           (is (= {"id" 1 "name" "Tea" "price" 350 "tags" []} (json/read-str body))))
         ;; Kotlin: client.get(url) { parameter("tag", "x") }
-        (is (= [200 "[]"] (result (creq/.get client ^String (url s "/products")
+        (is (= [200 "[]"] (result (creq/.get client (url s "/products")
                                              (fn [b] (creq/.parameter b "tag" "x"))))))
-        (is (= 204 (first (result (creq/.delete client ^String (url s "/products/1"))))))
+        (is (= 204 (first (result (creq/.delete client (url s "/products/1"))))))
         (finally
           ;; Kotlin: client.close()
           (cl/.close client))))))
