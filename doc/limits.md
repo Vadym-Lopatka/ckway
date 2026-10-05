@@ -223,21 +223,6 @@ A constructor parameter counts as a property when the class has a public propert
   function has to be adapted to it (from the code).
 * An `object` or an enum entry is a value, not a function: `(f/Registry)` is a compile error. `apply` on one is a
   `ClassCastException`.
-* A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
-  which, and lists the entries of an enum or the companion functions that return the class.
-* A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with
-  `@PublishedApi`; `protected`; `private`), and one that Kotlin refuses because it is deprecated:
-  `@Deprecated(level = DeprecationLevel.ERROR)` (a call is a compile error in Kotlin; the stdlib's
-  `MutableList.sort(comparison)`, `String.toUpperCase()`, `appendln`) and `DeprecationLevel.HIDDEN`, also through
-  `@DeprecatedSinceKotlin(errorSince = ..., hiddenSince = ...)` when the Kotlin of the stdlib on the class path has
-  reached that version (the stdlib's old `maxBy` that returns `T?`; the one-parameter `Channel(capacity)` of
-  kotlinx.coroutines is hidden by its level). A class with such a deprecation is no var either, with its members.
-  The Kotlin metadata does not mark these declarations; `kt` reads the annotations from the class file. For a class
-  that cannot reflect (19) that check is not made. `@JvmSynthetic`, `@SinceKotlin`, `@RequiresOptIn` and
-  `@Deprecated` with the level WARNING ARE vars (Kotlin can call them). One difference from Kotlin is left: Kotlin
-  still RESOLVES a call to an ERROR-level declaration and then refuses it, so `err(a: Int = 1)` (ERROR) hides
-  `err(a: Int = 1, b: Int = 2)` for `err()` in Kotlin; `kt` does not see the first and calls the second.
-
 ## 11. Kotlin metadata
 
 `kt` reads metadata with `kotlin-metadata-jvm` 2.4.20 (`readStrict`). Classes compiled by Kotlin 2.2.0, 2.4.0, 2.4.20,

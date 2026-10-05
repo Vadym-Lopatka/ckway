@@ -162,7 +162,7 @@
         parsed (r/parse-args var-name pdecls forms (fn [f] {:arg f :info (r/form-info env f)}))
         sel (r/choose var-name pdecls parsed true)
         vinfo (r/form-info env value)]
-    (if (:dynamic? sel)
+    (if (or (:dynamic? sel) (r/companion-unknown? (:decl sel) (:items sel)))
       (do (r/warn-dynamic form var-name)
           `(ckway.set/set-dyn (var ~(var-symbol v)) [~@forms] ~value ~@(when-let [l (:lit vinfo)] [l])))
       (let [decl (:decl sel)

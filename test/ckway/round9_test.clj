@@ -1,14 +1,18 @@
 (ns ckway.round9-test
-  "Fixes after the spikes (http4k, Koin, Ktor), batch A: argument binding and overload selection.
+  "Fixes after the spikes (http4k, Koin, Ktor). Batch A: argument binding and overload selection.
   A1: a property never wins silently over a function of the same name. A2: a trailing lambda. A3: a collection passed
   as a whole to a `vararg`, on the dynamic path. A4: overloads that differ only in the parameter types of a lambda.
+  Batch B: declarations and function values. B1: a companion `operator fun invoke` is a constructor form. B2: `invoke` on
+  a class that implements a Kotlin function type. B3: the class var is the receiver of an extension on a Companion.
+  B4: a Clojure function that a `kt/reify` member returns is adapted to the declared type.
   The Kotlin shapes are in `test-fixtures/fx/Round9.kt`. Each case is tried on the static path (`eval` of the call),
   on the dynamic path (`rt/call-dyn`) and, where it matters, as a var value."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [ckway.call-test :as ct]
             [ckway.core :as kt]
-            [ckway.rt :as rt]))
+            [ckway.rt :as rt]
+            [ckway.set]))
 
 (kt/require '[fx.r9 :as d])
 
@@ -306,3 +310,89 @@
     (let [f (eval-here '(fn [x] (d/.at9 x (fn [c] "x"))))]
       (is (fn? f))
       (is (error-has? (outcome #(f (d/makeHost9))) "is ambiguous" "the parameter types of a lambda")))))
+
+;; ================================================================ Batch B: declarations and function values
+
+(defn- top-error
+  "{:error message} of the exception that `(f)` throws, as it is: not the root cause (`outcome` gives that). The Clojure
+  compiler's and the reflection's wrappers are taken off."
+  [f]
+  (try (f)
+       (catch Throwable t
+         (let [t (loop [t t]
+                   (if (and (or (instance? clojure.lang.Compiler$CompilerException t)
+                                (instance? java.lang.reflect.InvocationTargetException t))
+                            (.getCause t))
+                     (recur (.getCause t))
+                     t))]
+           {:error (ex-message t)}))))
+
+;; ---------------------------------------------------------------- B3
+
+;; `val Prop9.Companion.zero9`, `var Prop9.Companion.level9`: the class var is the receiver, as it is for the members of a
+;; companion. An extension FUNCTION on a Companion takes it too.
+
+(deftest b3-an-extension-property-on-a-companion
+  (testing "read: static path, dynamic path, the var as a value"
+    (is (= "zero" (.getTag (d/zero9 d/Prop9))))
+    (is (= "zero" (.getTag ^fx.r9.Prop9 (dynamic #'d/zero9 [d/Prop9]))))
+    (is (= "zero" (.getTag ^fx.r9.Prop9 (as-value #'d/zero9 d/Prop9)))))
+  (testing "a local that holds the class var"
+    (is (= "zero" (.getTag (let [c d/Prop9] (d/zero9 c))))))
+  (testing "the Companion object itself still works"
+    (is (= "zero" (.getTag (d/zero9 fx.r9.Prop9/Companion))))
+    (is (= "zero" (.getTag ^fx.r9.Prop9 (dynamic #'d/zero9 [fx.r9.Prop9/Companion])))))
+  (testing "a property of the Companion that returns nil"
+    (is (nil? (d/nullable9 d/Prop9)))
+    (is (nil? (dynamic #'d/nullable9 [d/Prop9]))))
+  (testing "a named companion"
+    (is (= "factory-prop" (d/made9 d/Fac9) (dynamic #'d/made9 [d/Fac9]) (as-value #'d/made9 d/Fac9)))
+    (is (= "factory-prop" (d/made9 fx.r9.Fac9/Factory)))))
+
+(deftest b3-write-an-extension-property-on-a-companion
+  (testing "kt/set! with the class var: static path"
+    (is (= 5 (kt/set! (d/level9 d/Prop9) 5)))
+    (is (= 5 (d/level9 d/Prop9)))
+    (is (= 6 (let [c d/Prop9] (kt/set! (d/level9 c) 6))) "a local")
+    (is (= 6 (d/level9 d/Prop9))))
+  (testing "dynamic path"
+    (is (= 7 (ckway.set/set-dyn #'d/level9 [d/Prop9] 7)))
+    (is (= 7 (d/level9 d/Prop9) (dynamic #'d/level9 [d/Prop9]))))
+  (testing "the Companion object itself"
+    (is (= 8 (kt/set! (d/level9 fx.r9.Prop9/Companion) 8)))
+    (is (= 8 (d/level9 d/Prop9))))
+  (testing "a named companion"
+    (is (= "m1" (kt/set! (d/mark9 d/Fac9) "m1")))
+    (is (= "m1" (d/mark9 d/Fac9) (d/mark9 fx.r9.Fac9/Factory))))
+  (testing "a val has no setter: the error is the old one"
+    (let [m (compile-error '(kt/set! (d/made9 d/Fac9) "x"))]
+      (is (str/includes? (str m) "is read-only: a `val` has no setter") m))))
+
+(deftest b3-an-extension-function-on-a-companion
+  (is (= "ext-fun:1" (d/.build9 d/Ext9 1) (dynamic #'d/.build9 [d/Ext9 1]) (d/.build9 fx.r9.Ext9/Companion 1)))
+  (is (= "ext-fun:1" (let [c d/Ext9] (d/.build9 c 1))) "a local")
+  (is (= "factory-fun:1" (d/.make9 d/Fac9 1) (dynamic #'d/.make9 [d/Fac9 1]))))
+
+(deftest b3-the-wrong-receiver-is-an-error
+  (testing "the class var of another class, a string"
+    (let [r (dynamic #'d/zero9 [d/Mem9])]
+      (is (error-has? r "no Kotlin declaration of `zero9` fits" "val fx.r9.Prop9.Companion.zero9: fx.r9.Prop9"
+                      "`receiver` expects the class var of fx.r9.Prop9") r))
+    (is (error-has? (dynamic #'d/zero9 ["s"]) "no Kotlin declaration of `zero9` fits"))
+    (is (error-has? (static '(d/zero9 "s")) "no Kotlin declaration of `zero9` fits")))
+  (testing "set!"
+    (is (error-has? (static '(kt/set! (d/level9 d/Mem9) 1)) "no Kotlin declaration of `level9` fits"))
+    (is (error-has? (outcome #(ckway.set/set-dyn #'d/level9 ["s"] 1)) "no Kotlin declaration of `level9` fits"))))
+
+(deftest b3-nothing-else-changed
+  (testing "a property of a companion (a member): the class var is the receiver"
+    (is (= 42 (d/answer9 d/Mem9) (dynamic #'d/answer9 [d/Mem9])))
+    (is (= 3 (kt/set! (d/counter9 d/Mem9) 3)))
+    (is (= 3 (d/counter9 d/Mem9))))
+  (testing "a property of an ordinary class and an extension property of it"
+    (let [m (d/Mem9)]
+      (is (= 7 (d/inst9 m) (dynamic #'d/inst9 [m])))
+      (is (= 8 (d/extra9 m) (dynamic #'d/extra9 [m])))))
+  (testing "nil is no receiver of an extension on a Companion"
+    (is (error-has? (static '(d/.build9 nil 1)) "`nil` passed to non-nullable `receiver`"))))
+

@@ -1721,8 +1721,13 @@
         dispatch-i (first (keep-indexed #(when (= :dispatch (:role %2)) %1) recvs))
         disp-recv (when dispatch-i (nth recvs dispatch-i))
         disp-item (when dispatch-i (nth ritems dispatch-i))
+        ;; the class var for the receiver of an extension on a Companion is the Companion object (the plain Companion
+        ;; object is passed as it is)
+        comp-entry (fn [r it] (if (and (:companion-of r) (:companion-of (:info it)))
+                                (assoc it :companion {:class (:companion-of r) :field (:companion-field r)})
+                                it))
         other (for [[r it] (map vector recvs ritems) :when (not= :dispatch (:role r))]
-                (cond-> {:entry it :jvm-type (:jvm-type r)}
+                (cond-> {:entry (comp-entry r it) :jvm-type (:jvm-type r)}
                   (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver"))
                   (assoc :vc (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver")))))
         self (when-let [jt (:jvm-type disp-recv)]
@@ -2454,12 +2459,18 @@
                   item)))
             (slots decl) items)))
 
-(defn- companion-unknown?
+(defn companion-unknown?
   "Does the call pass a receiver of unknown type where the class var of a companion is expected?
-  The static path would ignore it, so such a call checks the receiver at run time."
+  The static path would ignore it, so such a call checks the receiver at run time. The receiver of an extension on a
+  Companion is used as it is when it is not the class var, so there only a class var or a class that the compiler knows
+  for sure is known."
   [decl items]
   (boolean (some (fn [[slot item]]
-                   (and (:companion-of slot) (empty? (select-keys (:info item) [:class :companion-of]))))
+                   (and (:companion-of slot)
+                        (let [info (:info item)]
+                          (if (= :extension (:role slot))
+                            (not (or (:companion-of info) (and (:class info) (not (:upper info)))))
+                            (empty? (select-keys info [:class :companion-of]))))))
                  (map vector (slots decl) items))))
 
 (defn- user-form

@@ -109,3 +109,32 @@ class Host9 {
 }
 fun makeHost9(): Host9 = Host9()
 fun withHost9(block: (Host9) -> String): String = block(Host9())
+
+// ================================================================ Batch B: declarations and function values
+
+// ---- B3: the class var as the receiver of an extension property on a Companion (http4k: `Filter.NoOp`)
+class Prop9(val tag: String = "p") {
+    companion object
+}
+val Prop9.Companion.zero9: Prop9 get() = Prop9("zero")
+var level9Store: Int = 0
+var Prop9.Companion.level9: Int
+    get() = level9Store
+    set(v) { level9Store = v }
+val Prop9.Companion.nullable9: String? get() = null
+class Fac9 {
+    companion object Factory
+}
+val Fac9.Factory.made9: String get() = "factory-prop"
+var Fac9.Factory.mark9: String
+    get() = marks9
+    set(v) { marks9 = v }
+var marks9: String = "m0"
+fun Fac9.Factory.make9(x: Int): String = "factory-fun:$x"
+// a member property of a companion keeps working, and a property of an ordinary class
+class Mem9 {
+    companion object { val answer9: Int = 42; var counter9: Int = 0 }
+    val inst9: Int = 7
+}
+val Mem9.extra9: Int get() = 8
+

@@ -113,6 +113,13 @@ A class var means what the bare class name means in Kotlin (call it to construct
 
 Examples 02 and 03.
 
+The class var is also the receiver of an extension on a `Companion`, a function or a property (`val Filter.Companion.NoOp`; `kt/set!` writes a `var`):
+
+```clojure
+;; Kotlin: Filter.NoOp
+(h/NoOp h/Filter)
+```
+
 ### 4. Arguments
 
 Positional arguments bind in sequence; a keyword literal names the parameter of the next argument and all arguments after it are named; a parameter with no argument takes its Kotlin default; a `vararg` takes the remaining positional arguments, or one collection when named.
@@ -262,7 +269,6 @@ Example 10.
 ```
 
 Example 11. A property getter is `(name [this] ...)` and the setter is `(name [this value] ...)`. A member that you do not write keeps its Kotlin default.
-
 ### 11. Data
 
 `(kt/data x)` gives a read-only map of the primary-constructor properties of `x`.

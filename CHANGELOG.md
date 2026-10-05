@@ -6,12 +6,13 @@ The project is alpha: the API may change before 1.0.
 
 ## [Unreleased]
 
-Fixes after the spikes with http4k, Koin and Ktor: argument binding and overload selection.
+Fixes after the spikes with http4k, Koin and Ktor. Batch A: argument binding and overload selection. Batch B: declarations and function values.
 
 * A property no longer wins silently over a function of the same name. `(r/routes h)` with `routes(vararg ...)` and `val H.routes` was the property; it is now an "ambiguous" error that lists both and gives the ways out (`(r/routes :list [h])` for the function, `((kt/ref X routes) h)` for the property). It is the same for a member property and a top-level function, on the static and the dynamic path.
 * Trailing lambda (rule 4): when the usual binding leaves the last parameter without an argument and it takes a function (function type, `fun interface`, Java single-method interface) and has no default, the last positional argument goes to it. `(dsl/module f)` for `module(createdAtStart = false, declaration: ...)` and `(sp/.status cfg code f)` after a `vararg` now work. A call that fits by the usual binding is never changed. The error "missing required parameter" says "name it" where a positional argument cannot reach the parameter.
 * A collection passed as a whole to a `vararg` chooses between overloads by its elements on the dynamic path: `(r/routes :list [h])` is no longer ambiguous when every element is a `RoutingHttpHandler`. An empty collection, or elements that fit several overloads, stay ambiguous. The selection is kept per class of the elements.
 * Overloads that differ only in the parameter types of a lambda (Ktor `status`): type hints on the parameters of a `fn` literal choose (`(fn [^ApplicationCall call status] ...)`). The error now says "the parameter types of a lambda" and shows the hint as the first way out. When the receiver has a type for the compiler (also a `fn` parameter at a function type), the ambiguity is a compile error, not a run-time one.
+* The class var is the receiver of an extension on a `Companion`, for a property and a function (rule 3): `(h/NoOp h/Filter)` for `val Filter.Companion.NoOp` (the error was "`receiver` is Companion but got AFn"), also `kt/set!` of a `var`, also a named companion. The Companion object itself is still accepted.
 
 ## [0.1.0] - 2026-10-04
 

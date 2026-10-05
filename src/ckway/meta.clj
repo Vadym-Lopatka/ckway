@@ -48,6 +48,9 @@
                  The dispatch receiver has no :jvm-type (it is the call target).
                  A companion member has {:role :dispatch :companion-of \"fx.C\" ...}:
                  the value is the class var of C, the call target is C.Companion.
+                 An extension receiver whose type is a companion object has {:role :extension :companion-of \"fx.C\"
+                 :companion-field \"Companion\" ...}: the class var of C is accepted for it, and the receiver is
+                 C.Companion.
     :params      [{:name :type <type> :default? :vararg? :jvm-type \"int\"|\"[Ljava.lang.String;\"|...}]
     :return      <type>
     :type-params [{:name \"T\" :reified? bool [:bounds [<type> ...]]}]
@@ -680,10 +683,26 @@
     {:name (.getName p) :type (km-type tps (.getType p)) :default? (Attributes/getDeclaresDefaultValue p)
      :vararg? (some? vt) :vararg-elem (when vt (km-type tps vt)) :jvm-type jvm-type}))
 
+(declare kotlin-class)
+
+(defn- companion-class
+  "{:companion-of \"fx.C\" :companion-field \"Companion\"} when the Kotlin class `internal` is the companion object of
+  a class (`fx/C.Companion`), else nil."
+  [^String internal]
+  (when (and internal (str/includes? (subs internal (inc (.lastIndexOf internal "/"))) "."))
+    (when-let [^KmClass km (:km (kotlin-class internal))]
+      (when (= ClassKind/COMPANION_OBJECT (Attributes/getKind km))
+        (let [i (.lastIndexOf internal ".")]
+          {:companion-of (internal->binary (subs internal 0 i)) :companion-field (subs internal (inc i))})))))
+
 (defn- receivers
   "Receivers in Clojure argument order; `jvm-types` are the non-dispatch JVM parameter types, in order."
   [tps ctx-params ext-type dispatch jvm-types]
-  (let [mk (fn [role t jt name] (cond-> {:role role :type (km-type tps t)} jt (assoc :jvm-type jt) name (assoc :name name)))
+  (let [mk (fn [role t jt name]
+             (let [ty (km-type tps t)]
+               (cond-> {:role role :type ty}
+                 jt (assoc :jvm-type jt) name (assoc :name name)
+                 (and (= :extension role) (not (:nullable? ty))) (merge (companion-class (:class ty))))))
         nctx (count ctx-params)
         ctx (map-indexed (fn [i ^KmValueParameter p] (mk :context (.getType p) (nth jvm-types i nil) (.getName p))) ctx-params)
         ext (when ext-type [(mk :extension ext-type (nth jvm-types nctx nil) nil)])]
