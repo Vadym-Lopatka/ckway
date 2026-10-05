@@ -481,8 +481,8 @@ control: the JVM's own start-up messages for your flags, and a warning that a fu
 ## 18. Erased overloads
 
 `(c/.sum xs)`, `(c/.sumOf xs f)`, `(c/.maxOrNull xs)` and `(c/.flatMap xs f)` are several Kotlin declarations with the same
-JVM parameter types: they differ in a type argument or in the result type of a lambda, which the JVM erases. `kt` does
-not guess. The error lists each candidate with its Java interop call:
+JVM parameter types: they differ in a type argument, in the parameter types of a lambda or in its result type, which the JVM
+erases. `kt` does not guess. The error says which of these it is, and lists each candidate with its Java interop call:
 
 ```clojure
 (c/.sum (c/listOf 1 2 3))
@@ -491,6 +491,24 @@ not guess. The error lists each candidate with its Java interop call:
 ;;     ->  (kotlin.collections.CollectionsKt/sumOfInt x)    ; JVM descriptor (Ljava/lang/Iterable;)I
 (kotlin.collections.CollectionsKt/sumOfInt (c/listOf 1 2 3))   ; 6
 ```
+
+When the candidates differ in the parameter types of a lambda, the way out is a type hint on the parameters of the `fn`
+literal (the error shows it first). Ktor has `status(vararg status: HttpStatusCode, handler: suspend (ApplicationCall,
+HttpStatusCode) -> Unit)` and the same with `suspend (StatusContext, HttpStatusCode) -> Unit` (`@JvmName("statusWithContext")`):
+
+```clojure
+(sp/.status cfg code (fn [^io.ktor.server.application.ApplicationCall call status] ...))   ; the first one
+(sp/.status cfg code (fn [^io.ktor.server.routing.StatusContext ctx status] ...))          ; the second
+```
+
+A hint fits the parameter type of a candidate when it is that class or a class that extends it (the lambda is then given a
+value that it takes). A parameter without a hint, and a parameter type that the JVM does not tell (`Any`, a type
+parameter), fit every candidate. If more than one candidate still fits, or none, the call stays ambiguous: a hint only
+chooses where a call is ambiguous, it never turns a call into an error. Only a `fn` or `fn*` literal that you write
+in the call has hints (not `#(...)`, not a function value), and only the static path looks at them: through a
+receiver of unknown class the call is selected at run time, where the lambda has no hints. When the receiver has a type for
+the compiler (a hint, a local, a parameter of a `fn` at a function type) the ambiguity is a compile error, not a run-time one:
+all candidates are members of the same class, so no subclass can change the answer.
 
 Type arguments count in the choice only where they can be seen. When two candidates are different Kotlin types, the type
 arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;
@@ -583,9 +601,12 @@ the argument (`(p/iv (p/readOnly))`); through a local, on the dynamic path and f
 of the object is known (`java.util.Arrays$ArrayList` for `listOf(1, 2)`), and that is a mutable list for the JVM.
 
 A collection passed as a whole to a `vararg` (`:xs coll`) chooses between vararg overloads only when its elements can be
-seen: a primitive or typed array, or a vector literal of literals. Any other Clojure collection holds anything, so the
-error says that the element type cannot be seen, and the way out is to pass the elements positionally or a typed array
-(`(int-array xs)`, `(into-array String xs)`).
+seen: a primitive or typed array, a vector literal of values of known classes, or, at run time, the elements themselves.
+The run time looks at the elements of any list, vector, seq or set that has some: a candidate fits only if every element
+fits its element type, and exactly one candidate must fit (`(r/routes :list [h])`, with `routes(vararg Pair<..>)` and
+`routes(vararg RoutingHttpHandler)`). The selection is kept per class of the elements, so another call with other
+elements chooses again. An empty collection, or elements that fit several candidates, is ambiguous: the error says so,
+and the way out is to pass the elements positionally or a typed array (`(int-array xs)`, `(into-array String xs)`).
 
 An `inline` candidate has no public JVM method (`(c/.sumOf xs f)`: "no public JVM method (it is `inline`): write it in
 Clojure"). Write the loop in Clojure.
@@ -601,8 +622,13 @@ The members of Kotlin's built-in types (`Int.rangeTo`, `Map.keys`, `Map.getOrDef
 `(r/.rangeTo 1 5)` is the extension for `Comparable` and gives a `ComparableRange`, not an `IntRange`; `c/keys` is
 the property of `AbstractMap` only, so `(c/keys {})` or a `HashMap` is an error. `c/.getOrDefault` is not a var.
 
-A top-level function and a property of the same name share one var. A call that fits both is an error that gives the
-interop forms of both.
+A top-level function and a property of the same name share one var (`routes(vararg h)` and `val H.routes`; a member
+property and a top-level function too). A call that fits both is an error, never the property or the member by a rule:
+`routes(h)` and `h.routes` are different texts in Kotlin, and one form here. The error names the ways out: the function by a
+named argument (`(r/routes :list [h])`, a property has no such parameter), the property by a reference
+(`((kt/ref X routes) h)`, rule 9). A property without a receiver has no reference that tells it from the function: the
+error then gives the Java interop forms of both. A call that fits only one of them is unchanged. When the types of the
+arguments are not known to the compiler, the run time decides, and so does the error.
 
 ## 19. A class that cannot be linked
 

@@ -114,7 +114,7 @@
        "char" (to-char what v)
        "boolean" (to-bool what v)
        ("java.lang.Integer" "java.lang.Long" "java.lang.Short" "java.lang.Byte" "java.lang.Double"
-        "java.lang.Float" "java.lang.Character") (box what n v)
+                            "java.lang.Float" "java.lang.Character") (box what n v)
        v))))
 
 (defn ->array
@@ -282,9 +282,9 @@
 (def ^:private fn-invoke-method
   "Documented cache: arity -> the invoke Method of kotlin.jvm.functions.FunctionN."
   (mt/memo ::fn-invoke-method
-   (fn [n]
-     (.getMethod ^Class (r/jvm-class (str "kotlin.jvm.functions.Function" n)) "invoke"
-                 ^"[Ljava.lang.Class;" (into-array Class (repeat n Object))))))
+           (fn [n]
+             (.getMethod ^Class (r/jvm-class (str "kotlin.jvm.functions.Function" n)) "invoke"
+                         ^"[Ljava.lang.Class;" (into-array Class (repeat n Object))))))
 
 (defn- fn-iface-arity
   "Arity of the JVM FunctionN that a function descriptor stands for (a suspend function takes the Continuation too)."
@@ -349,7 +349,7 @@
            ~@(for [k (range (inc max-reify-arity))]
                `(~'invoke [~'_ ~@(vars k)] (invoke-wrapped ~g ~td ~(vars k))))
            (~'invoke [~'_ ~@(vars max-reify-arity) ~more]
-            (invoke-wrapped ~g ~td (into ~(vars max-reify-arity) (seq ~more))))
+             (invoke-wrapped ~g ~td (into ~(vars max-reify-arity) (seq ~more))))
            (~'applyTo [~'_ args#] (invoke-wrapped ~g ~td (vec (seq args#))))
            (~'call [~'_] (invoke-wrapped ~g ~td []))
            (~'run [~'_] (invoke-wrapped ~g ~td []) nil)
@@ -359,7 +359,7 @@
 (def ^:private wrapper-factory
   "Documented cache: JVM arity -> (fn [g td] wrapper), compiled once with `eval` (like `adapter-factory`)."
   (mt/memo ::wrapper-factory
-   (fn [m] (binding [*ns* (the-ns 'ckway.rt)] (eval (wrapper-form m))))))
+           (fn [m] (binding [*ns* (the-ns 'ckway.rt)] (eval (wrapper-form m))))))
 
 (deftype KtFn [g td]
   InvocationHandler
@@ -429,10 +429,10 @@
   real class: a checked exception that the Clojure function throws reaches Kotlin as itself
   (a java.lang.reflect.Proxy would wrap it in UndeclaredThrowableException)."
   (mt/memo ::adapter-factory
-   (fn [spec]
-     (let [g (gensym "g")]
-       (binding [*ns* (the-ns 'ckway.rt)]
-         (eval `(fn [~g] ~((case (:kind spec) :fn r/fn-reify :fi r/fi-reify) spec g {}))))))))
+           (fn [spec]
+             (let [g (gensym "g")]
+               (binding [*ns* (the-ns 'ckway.rt)]
+                 (eval `(fn [~g] ~((case (:kind spec) :fn r/fn-reify :fi r/fi-reify) spec g {}))))))))
 
 (defn adapt-arg
   "Value for a parameter of a function type or fun interface (`spec`, see
@@ -525,17 +525,17 @@
 (def ^:private find-member
   "Documented cache: [class name desc] -> reflective member."
   (mt/memo ::find-member
-   (fn [cname mname desc]
-     (let [^Class c (r/jvm-class cname)
-           m (cond
-               (= "<init>" mname)
-               (first (filter #(= desc (descriptor Void/TYPE (.getParameterTypes ^Constructor %))) (.getDeclaredConstructors c)))
-               :else
-               (first (filter #(and (= mname (.getName ^Method %))
-                                    (= desc (descriptor (.getReturnType ^Method %) (.getParameterTypes ^Method %))))
-                              (.getDeclaredMethods c))))]
-       (or (some-> ^java.lang.reflect.AccessibleObject m (doto (.trySetAccessible)))
-           (r/fail (str "kt: JVM member not found: " cname "." mname desc)))))))
+           (fn [cname mname desc]
+             (let [^Class c (r/jvm-class cname)
+                   m (cond
+                       (= "<init>" mname)
+                       (first (filter #(= desc (descriptor Void/TYPE (.getParameterTypes ^Constructor %))) (.getDeclaredConstructors c)))
+                       :else
+                       (first (filter #(and (= mname (.getName ^Method %))
+                                            (= desc (descriptor (.getReturnType ^Method %) (.getParameterTypes ^Method %))))
+                                      (.getDeclaredMethods c))))]
+               (or (some-> ^java.lang.reflect.AccessibleObject m (doto (.trySetAccessible)))
+                   (r/fail (str "kt: JVM member not found: " cname "." mname desc)))))))
 
 (defn- unboxer
   "Function that gives the underlying value of a value-class object (conversion `{:vc :nullable? :name}`)."
@@ -745,17 +745,47 @@
     (loop [i (count pos) s (seq named)] (when s (aset a i (val (first s))) (recur (inc i) (next s))))
     a))
 
+(defn- collection? [x] (or (sequential? x) (set? x) (instance? java.util.Collection x)))
+
+(defn- elements
+  "The infos (`r/value-info`) of the elements of the collection `x`, for the selection of a `vararg` that takes it as a
+  whole; nil for anything that is no collection with elements."
+  [x]
+  (when (collection? x) (some->> (seq x) (mapv r/value-info))))
+
+(declare prepare-call)
+
+(defn- element-call
+  "The prepared call for a selection that the elements of a collection passed as a whole to a `vararg` decide (`choose*`:
+  `:kt/elements-needed`). The classes of the values do not decide it, so the call of the cache is this function, which
+  selects again for each call, and keeps what it selected under the classes of the ELEMENTS (at most `cache-bound`)."
+  [v decls n names lits]
+  (let [cache (new-cache)]
+    (fn [^objects a]
+      (let [pos (vec (take n a))
+            named (mapv vector names (drop n a))
+            key (mapv (fn [[_ x]] (when (collection? x) (into #{} (map arg-part) (seq x)))) named)
+            call (cached cache key #(prepare-call v decls pos named lits true))]
+        (call a)))))
+
 (defn- prepare-call
-  "Select and plan the call of the var `v` for the values `pos`/`named` (as in `call-dyn`), prepare it."
-  [^clojure.lang.Var v decls pos named lits]
-  (let [var-name (str (.sym v))
-        n (count pos)
-        info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k) :val x)))
-        parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
-                :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (info k x) :idx (+ n i)}]) named))}
-        {:keys [decl items checks]} (r/choose var-name decls parsed false)]
-    (r/check-supported! decl checks)
-    (prepare (r/plan decl items))))
+  "Select and plan the call of the var `v` for the values `pos`/`named` (as in `call-dyn`), prepare it. `elems?`: the
+  elements of a collection that is passed as a whole to a `vararg` are looked at (see `element-call`)."
+  ([v decls pos named lits] (prepare-call v decls pos named lits false))
+  ([^clojure.lang.Var v decls pos named lits elems?]
+   (let [var-name (str (.sym v))
+         n (count pos)
+         info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k) :val x)))
+         parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
+                 :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (cond-> (info k x) elems? (as-> inf (if-let [es (elements x)] (assoc inf :elems es) inf))) :idx (+ n i)}]) named))
+                 :strict-elems elems?}]
+     (try (let [{:keys [decl items checks]} (r/choose var-name decls parsed false)]
+            (r/check-supported! decl checks)
+            (prepare (r/plan decl items)))
+          (catch clojure.lang.ExceptionInfo e
+            (if (and (not elems?) (:kt/elements-needed (ex-data e)))
+              (element-call v decls n (mapv first named) lits)
+              (throw e)))))))
 
 (declare call-dyn)
 

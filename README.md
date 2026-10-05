@@ -133,7 +133,15 @@ Positional arguments bind in sequence; a keyword literal names the parameter of 
 
 Example 02.
 A var that you pass as a value (`(apply s/joinLabel xs)`, `(map s/welcome names)`) takes positional arguments only; a keyword in `xs` is an ordinary value. Named arguments need the written form.
-In Kotlin you write a trailing lambda after the parentheses. `kt` has no such syntax: when you skip a defaulted parameter before a lambda, name the lambda (`(s/cart :build (fn [c] ...))`, example 06).
+A trailing lambda: when this binding leaves the last parameter without an argument, and that parameter takes a function (a function type, a `fun interface` or a Java single-method interface) and has no default, the last positional argument goes to it and the others are bound again without it. A skipped parameter takes its default, a `vararg` takes what is left. A call that fits by the usual binding is never changed, and a name still works (`(s/cart :build (fn [c] ...))`).
+
+```clojure
+;; Kotlin: cart { add(tea) }   -- `owner` is skipped
+(s/owner (s/cart (fn [c] (s/.add c tea))))
+;; => "guest"
+```
+
+Example 06. When no positional argument can be the lambda, the error says to name the parameter.
 
 ### 5. Type arguments
 
@@ -201,10 +209,13 @@ Examples 02 and 01. `err` is a helper of the examples (`examples/util.clj`): `(e
 More about the choice and the numbers (example 14 shows them with the Kotlin standard library):
 
 * An applicable member always wins over an extension, as in Kotlin.
+* A function and a property of one name are one var: `routes(h)` and `h.routes` are both `(r/routes h)`. A call that fits both is an error that lists both. Name a parameter to call the function (`(r/routes :list [h])`), or write `((kt/ref X routes) h)` for the property.
 * Among several applicable declarations `kt` picks the most specific one by Kotlin's rule (each parameter type a subtype of the other's, type arguments included: `List<T>` is not a subtype of `Collection<Int>`; `T` before `T?`; on a tie the one without a vararg, then the one that uses fewer defaults; when no candidate is the most specific, a function without type parameters before a generic one). If none is clearly most specific, the call is an error.
 * `kt` changes a number only when the declared Kotlin type of the parameter says so (`Int`, `Short`, `Byte`, `Long`, `Float`, `Double`). At `Any`, `Any?`, `Number`, a type parameter or a vararg of those, every Clojure value is passed unchanged: a Clojure integer stays a `Long`, so `(c/listOf 1 2)` (`c` is `kotlin.collections`) holds `Long`s and `(c/.contains (c/listOf 1 2) 1)` is `true`. Only the choice between overloads that differ in a number type looks at a literal (`1` is an `Int` before it is a `Long`, as in Kotlin), and a conversion that `kt` makes itself (an integer for a `Double`) is used only when no overload takes the value as it is.
   Data that Kotlin code made with `Int` holds `Integer`s: say `(int 1)`, or give the type with `:<>` (`doc/limits.md`, 1).
 * A type hint that you write decides between the candidates that it fits for sure, as the declared type of a variable does in Kotlin (`^String x` at `kind`). When it fits no candidate for sure but the value could still fit (the hint is an interface, or a non-final class that a parameter type extends: `^clojure.lang.IPersistentVector v` for a `List` receiver), it is only an upper bound and the call is checked at run time. A hint that can never fit (`^Long n` for a `List` receiver: `Long` is final) is a compile error. A hint that is wrong at run time is a `kt:` error, not a `ClassCastException`. A type that only the Clojure compiler inferred, and a type that `kt` itself puts on a local (the parameters of a `fn` literal at a Kotlin function type, the parameters of a `kt/reify` member), is an upper bound; `^Object` or no hint means unknown. Example 14 shows each case.
+* A collection passed as a whole to a `vararg` (`:list xs`) chooses between vararg overloads by its elements, when it has elements that `kt` can see: every element must fit the element type of one candidate only. A vector literal of known values is seen at compile time, any other collection at run time. An empty collection, or elements that fit several candidates, is an error.
+* Overloads that differ only in the parameter types of a lambda (`(ApplicationCall) -> Unit` and `(StatusContext) -> Unit`) have the same JVM method. Type hints on the parameters of a `fn` literal choose: `(fn [^io.ktor.server.application.ApplicationCall call status] ...)`. A hint fits a parameter type when it is that class or extends it. With no hint, or when more than one candidate still fits, the call is an error. This works on the static path only. When the receiver has a known type, the error is a compile error.
 * Only a Clojure character is a Kotlin `Char`.
 * A number outside the range of an `Int`, `Short` or `Byte` parameter is a `kt:` error that names the parameter.
 
