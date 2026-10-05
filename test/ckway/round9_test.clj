@@ -1560,3 +1560,75 @@
   (testing "a trailing lambda with known types: the same as in A2"
     (is (= "serve9-port:f:80:0.0.0.0:m" (static '(d/serve9 "f" (fn [] "m")))))))
 
+;; ---------------------------------------------------------------- D6
+
+;; Ktor: `fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure: B.() -> Unit)` and `(sp/StatusPages)` of the type
+;; `ApplicationPlugin<StatusPagesConfig>`, a subtype of `Plugin<Application, StatusPagesConfig, PluginInstance>`: Kotlin knows
+;; that `B` is `StatusPagesConfig`, so `cfg` of `(fn [cfg] ...)` has that type. In kt it had none, the inner call went the
+;; dynamic path, and the hints of its lambda (A4) were not seen. The type that the other arguments fix is the upper bound of the
+;; parameter now. It is read from the declared Kotlin type of an argument that is a call of a kt var (also a property).
+
+(deftest d6-the-lambda-parameter-has-the-type-that-another-argument-fixes
+  (testing "the receiver of the inner call is typed: the ambiguity is a compile error, and a hint on the inner lambda chooses"
+    (is (str/includes? (str (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/appPlug6)
+                                                         (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "is ambiguous"))
+    (is (= "install6:on6-call:x" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                          (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (is (= "install6:on6-ctx:y" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                         (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "y"))))))))
+  (testing "no reflection warning for the inner call"
+    (is (not (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h]
+                                                    (d/.install6 h (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x"))))))
+                            "Reflection warning"))))
+  (testing "a receiver of unknown type does not matter when one declaration is left: the call is static"
+    (is (str/includes? (str (compile-error '(fn [h] (d/.install6 h (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))) "is ambiguous"))))
+
+(deftest d6-the-class-of-the-parameter-is-an-upper-bound-only
+  (testing "a hint that the user wrote on the parameter wins"
+    (is (= "install6:on6-call:x" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)
+                                                          (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (is (str/includes? (str (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/appPlug6)
+                                                         (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "is ambiguous")))
+  (testing "the value of the parameter is the object that the plugin made"
+    (is (= "install6:other6" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6)
+                                                      (fn [cfg] (d/.other6 cfg))))))
+    (is (nil? (compile-error '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6) (fn [cfg] (d/.other6 cfg)))))))
+  (testing "the configure parameter is typed with another plugin: the type of that plugin"
+    (is (= "install6:other6" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlugB6) (fn [^fx.r9.CfgB6 cfg] (d/.other6 cfg))))))))
+
+(deftest d6-no-type-where-the-arguments-do-not-fix-one
+  (testing "two arguments that give different types: none (Kotlin takes the common supertype)"
+    (let [m (compile-error '(d/both6 (d/appPlug6) (d/appPlugB6) (fn [cfg] (d/.on6 cfg (fn [c] "x")))))]
+      (is (nil? m) m)))
+  (testing "a star projection: none"
+    (is (nil? (compile-error '(d/.install6 ^fx.r9.AppHost6 (identity nil) (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x")))))))
+    (is (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h] (d/.install6 h (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))
+                       "can't be resolved statically")))
+  (testing "a local: only the class is known, so no type argument"
+    (is (nil? (compile-error '(let [p (d/appPlug6)] (d/.install6 ^fx.r9.AppHost6 (identity nil) p (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))))
+    (is (str/includes? (reflection-warnings '(fn [^fx.r9.AppHost6 h] (let [p (d/appPlug6)] (d/.install6 h p (fn [cfg] (d/.on6 cfg (fn [c] "x")))))))
+                       "can't be resolved statically")))
+  (testing "a type parameter that no argument fixes, and one in a nested position"
+    (is (nil? (compile-error '(d/unfixed6 (fn [cfg] (d/.on6 cfg (fn [c] "x"))) (fn [] (identity nil))))))
+    (is (nil? (compile-error '(d/list6 [(d/appPlug6)] (fn [cfg] (d/.on6 cfg (fn [c] "x"))))))))
+  (testing "the calls run, the run time decides where the compiler did not"
+    (is (= "both6:on6-call:x" (eval-here '(d/both6 (d/appPlug6) (d/appPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Call9 c] "x")))))))
+    (testing "the hints of the inner lambda are not seen on the dynamic path (cfg has no type): ambiguous at run time"
+      (is (error-has? (static '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/starPlug6) (fn [cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "z")))))
+                      "is ambiguous"))
+      (is (= "install6:on6-ctx:z" (static '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/starPlug6) (fn [^fx.r9.CfgA6 cfg] (d/.on6 cfg (fn [^fx.r9.Ctx9 c] "z"))))))
+          "a hint on the parameter helps")))
+  (testing "no configure lambda: the default"
+    (is (= "install6:none" (eval-here '(d/.install6 ^fx.r9.AppHost6 (d/makeHost6) (d/appPlug6)))))))
+
+(deftest d6-nothing-else-changed
+  (testing "a fn literal at a function type whose parameter is a plain class: as before"
+    (is (= "on9-call:x" (d/on9 (fn [^fx.r9.Call9 c] "x"))))
+    (is (str/includes? (str (compile-error '(d/withHost9 (fn [host] (d/.at9 host (fn [c] "x")))))) "is ambiguous")))
+  (testing "supertype-args"
+    (is (= ["fx/r9/AppHost6" "fx/r9/CfgA6" "fx/r9/Inst6"]
+           (mapv :class (ckway.meta/supertype-args "fx/r9/AppPlug6" [{:class "fx/r9/CfgA6" :args [] :nullable? false}] "fx/r9/Plug6"))))
+    (is (nil? (ckway.meta/supertype-args "fx/r9/AppPlug6" [{:class "fx/r9/CfgA6" :args []}] "fx/r9/Cfg9")))
+    (is (nil? (ckway.meta/supertype-args "fx/r9/AppPlug6" [] "fx/r9/Plug6")) "a wrong number of arguments")))

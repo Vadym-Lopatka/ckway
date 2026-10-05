@@ -205,6 +205,11 @@
                       (not (:nullable? t)) (not (:type-param t)) (not (:star? t))
                       (not (#{"kotlin/Unit" "kotlin/Nothing"} (:class t))))))))
 
+(defn- closed-type?
+  "Is the Kotlin type `t` fully known: no type parameter and no star projection in it?"
+  [t]
+  (not-any? #(or (:type-param %) (:star? %)) (tree-seq map? #(concat (:args %) (some-> (:fn-type %) (as-> f (concat (:args f) [(:return f)])))) t)))
+
 (defn- nested-call-info
   "Info for a form that is itself a call of a kt var: when exactly one declaration fits, its
   Kotlin return type. Errors are left for the expansion of that inner call."
@@ -226,7 +231,11 @@
               ;; Kotlin declares the result as a read-only collection (see `applicability*`)
               (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)
               ;; Kotlin declares the result as a type that is not nullable: the value is not nil
-              (and (:decl r) (not (contains? r :tform)) (non-nil-result? (:decl r))) (assoc :non-nil true)))
+              (and (:decl r) (not (contains? r :tform)) (non-nil-result? (:decl r))) (assoc :non-nil true)
+              ;; the declared Kotlin type, with its type arguments, when it is fully known (`infer-type-args`)
+              (and (:decl r) (not (contains? r :tform)) (#{:function :property} (:kind (:decl r)))
+                   (:class (:return (:decl r))) (seq (:args (:return (:decl r)))) (closed-type? (:return (:decl r))))
+              (assoc :ktype (:return (:decl r)))))
           (catch clojure.lang.ExceptionInfo e
             (if (:kt/error (ex-data e)) {} (throw e))))))))
 
@@ -2709,16 +2718,39 @@
                          (concat nm (map clause more))))
       (meta form))))
 
+(defn- infer-type-args
+  "{type parameter name -> <type>} of the function `decl` that the static Kotlin types of the written arguments fix, through
+  their supertypes: `fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure: B.() -> Unit)` and the argument
+  `(sp/StatusPages)` of the type `ApplicationPlugin<StatusPagesConfig>`, which is `Plugin<Application, StatusPagesConfig,
+  PluginInstance>`: `B` is `StatusPagesConfig`. Only a type argument that is exactly a type parameter of `decl`, and a known
+  type (no star, no type parameter) at that place. A variable that two arguments fix to different types gets none. The
+  type is used as an upper bound only (`type-literals`)."
+  [decl items]
+  (let [own (set (map :name (:type-params decl)))
+        found (for [[slot item] (map vector (slots decl) items)
+                    :let [pt (:kotlin-type slot) at (:ktype (:info item))]
+                    :when (and pt at (:class pt) (seq (:args pt)) (not (:fn-type pt)) (:class at))
+                    :let [aargs (if (= (:class pt) (:class at)) (:args at) (meta/supertype-args (:class at) (:args at) (:class pt)))]
+                    :when (= (count aargs) (count (:args pt)))
+                    [pa aa] (map vector (:args pt) aargs)
+                    :when (and (contains? own (:type-param pa)) (:class aa) (closed-type? aa))]
+                [(:type-param pa) aa])]
+    (into {} (for [[n vs] (group-by first found)
+                   :when (= 1 (count (distinct (map (comp meta/type-text second) vs))))]
+               [n (second (first vs))]))))
+
 (defn type-literals
   "A `fn` literal at an adapter slot gets the Kotlin parameter types as local type information, so
-  kt calls on its parameters are resolved statically (the static path, see README How it works)."
+  kt calls on its parameters are resolved statically (the static path, see README How it works). A type parameter of the
+  declaration that the other arguments fix (`infer-type-args`) is the type there."
   [decl items]
-  (vec (map (fn [slot item]
-              (let [ad (:adapt slot)]
-                (if (and ad (not (:feature ad)) (fn-literal? (:arg item)))
-                  (update item :arg hint-fn-literal (param-hints ad (:kotlin-type slot)))
-                  item)))
-            (slots decl) items)))
+  (let [tmap (infer-type-args decl items)]
+    (vec (map (fn [slot item]
+                (let [ad (:adapt slot)]
+                  (if (and ad (not (:feature ad)) (fn-literal? (:arg item)))
+                    (update item :arg hint-fn-literal (param-hints ad (cond->> (:kotlin-type slot) (seq tmap) (types/subst tmap))))
+                    item)))
+              (slots decl) items))))
 
 (defn companion-unknown?
   "Does the call pass a receiver of unknown type where the class var of a companion is expected?

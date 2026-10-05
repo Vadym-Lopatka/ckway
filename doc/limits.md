@@ -574,6 +574,17 @@ receiver of unknown class the call is selected at run time, where the lambda has
 the compiler (a hint, a local, a parameter of a `fn` at a function type) the ambiguity is a compile error, not a run-time one:
 all candidates are members of the same class, so no subclass can change the answer.
 
+The parameter of a `fn` literal at a function type has the type of the function type as an upper bound. When that type is a
+type parameter of the function that another argument fixes (`fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure:
+B.() -> Unit)` with `(sp/StatusPages)` of the declared type `ApplicationPlugin<StatusPagesConfig>`, a subtype of `Plugin<Application,
+StatusPagesConfig, PluginInstance>`), `kt` reads `B` from the declared Kotlin type of that argument, through its supertypes, and
+`cfg` of `(fn [cfg] ...)` has the type `StatusPagesConfig`: the inner `(sp/.status cfg code (fn [^ApplicationCall call st] ...))` is a
+static call, and its hint chooses. This works for an argument that is a call of a `kt` var (a function or a property); the
+argument must have a type with type arguments that are known (no `*`, no type parameter). A local that holds the plugin has only
+its class, so `cfg` has no type there: write `(fn [^StatusPagesConfig cfg] ...)`. Two arguments that fix `B` to different types
+give no type, and a type parameter that only occurs inside another type (`List<Plugin<P, B, F>>`) is not read. The receiver
+is not needed when the call has one declaration; when it has several, the call is a static one only if the receiver and the arguments choose one.
+
 Type arguments count in the choice only where they can be seen. When two candidates are different Kotlin types, the type
 arguments must fit as Kotlin's declaration-site variance says (`List<out E>`, `Collection<out E>`, `Map<K, out V>`;
 `MutableList<E>` is invariant): `fun <T> gl(xs: List<T>)` and `fun gl(xs: Collection<Int>)` are unrelated (neither type is a

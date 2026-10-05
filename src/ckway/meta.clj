@@ -1172,6 +1172,25 @@
           :let [kt (subst-type env (km-type tps t))]]
       [(.getName ^KmClassifier$Class c) (:args kt) (:fn-type kt)])))
 
+(defn supertype-args
+  "The type arguments that the class `internal` (a Kotlin internal name) with the type arguments `args` gives to its
+  supertype `target` (a Kotlin internal name), transitively: `ApplicationPlugin<C>` is `Plugin<Application, C, PluginInstance>`,
+  so (supertype-args \"...ApplicationPlugin\" [C] \"...Plugin\") is [Application C PluginInstance]. nil when `target` is not a
+  supertype, the class has no Kotlin metadata or the number of arguments is not the number of its type parameters."
+  [^String internal args ^String target]
+  (letfn [(env-of [^KmClass k as]
+            (let [names (map #(.getName ^KmTypeParameter %) (.getTypeParameters k))]
+              (when (= (count names) (count as)) (zipmap names as))))
+          (walk [^KmClass k env seen]
+            (some (fn [[n sargs _]]
+                    (cond (= n target) sargs
+                          (seen n) nil
+                          :else (when-let [^KmClass sk (:km (kotlin-class n))]
+                                  (when-let [e (env-of sk sargs)] (walk sk e (conj seen n))))))
+                  (supertypes k env)))]
+    (when-let [^KmClass k (:km (kotlin-class internal))]
+      (when-let [env (env-of k args)] (walk k env #{internal})))))
+
 (defn- plain-type
   "The type `t` as the synthetic `invoke` of a function type shows it: a type parameter, a star projection and a value
   class (that a generic position holds boxed, so the JVM slot is the object itself) are `Any?`."

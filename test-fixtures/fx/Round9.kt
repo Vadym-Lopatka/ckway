@@ -542,3 +542,26 @@ fun serve9(factory: String, env: Env9 = Env9("default"), configure: () -> String
 // two overloads that both fit the usual binding: only the values choose
 fun pickU9(a: String, b: Int): String = "pickU9-String"
 fun pickU9(a: Env9, b: Int): String = "pickU9-Env"
+
+// ---- D6: a type parameter that another argument fixes gives the type of a lambda parameter (Ktor `install(plugin, configure)`)
+class AppHost6
+class Inst6
+interface Plug6<in P, out B : Any, F : Any> { fun make6(): B }
+interface AppPlug6<out C : Any> : Plug6<AppHost6, C, Inst6>
+class CfgA6 {
+    fun on6(h: (Call9) -> String): String = "on6-call:" + h(Call9())
+    @JvmName("on6Ctx")
+    fun on6(h: (Ctx9) -> String): String = "on6-ctx:" + h(Ctx9())
+}
+class CfgB6 { fun other6(): String = "other6" }
+fun appPlug6(): AppPlug6<CfgA6> = object : AppPlug6<CfgA6> { override fun make6() = CfgA6() }
+fun appPlugB6(): AppPlug6<CfgB6> = object : AppPlug6<CfgB6> { override fun make6() = CfgB6() }
+fun starPlug6(): Plug6<AppHost6, *, Inst6> = appPlug6()
+fun <P : Any, B : Any, F : Any> P.install6(plugin: Plug6<P, B, F>, configure: B.() -> String = { "none" }): String =
+    "install6:" + plugin.make6().configure()
+fun <B : Any> both6(a: Plug6<AppHost6, B, Inst6>, b: Plug6<AppHost6, B, Inst6>, configure: B.() -> String): String =
+    "both6:" + a.make6().configure()
+// the type parameter is fixed in the class of the receiver and in a nested position, not as a plain argument
+fun <B : Any> list6(plugins: List<Plug6<AppHost6, B, Inst6>>, configure: B.() -> String): String = "list6:" + plugins.first().make6().configure()
+fun <B : Any> unfixed6(configure: B.() -> String, make: () -> B): String = "unfixed6:" + make().configure()
+fun makeHost6(): AppHost6 = AppHost6()
