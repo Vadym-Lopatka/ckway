@@ -310,3 +310,103 @@ fun lamUnit9(f: (Int) -> Unit): String = f(1).toString()
 fun interface Flt9 : (Handler9) -> Handler9
 fun Flt9.then9(h: Handler9): Handler9 = this(h)
 fun runFlt9(f: Flt9, s: String): String = f.then9 { x -> "base:$x" }(s)
+
+// ================================================================ Batch C
+
+// ---- C1: nil for a parameter whose type is a type parameter with a non-null bound
+fun <T : Any> nnBound9(key: String, d: T): String = "nnBound9:" + d
+fun <T> plainT9(d: T): String = "plainT9:" + d
+fun <T> qT9(d: T?): String = "qT9:" + d
+fun <T : Number?> nullBound9(d: T): String = "nullBound9:" + d
+fun <T> twoBounds9(d: T): String where T : Any, T : Comparable<T> = "twoBounds9:" + d
+fun <T : Any> tAny9(d: T): String = "tAny9:" + d
+fun <T : Any> varNn9(vararg xs: T): String = "varNn9:" + xs.size
+fun <T> varPl9(vararg xs: T): String = "varPl9:" + xs.size
+fun <T : Any> varNnList9(vararg xs: T?): String = "varNnList9:" + xs.size
+fun plainStr9(s: String): String = "plainStr9:" + s
+// a non-null bound and a nullable parameter type of one overload family: nil cannot choose the first
+fun <T : Any> ovNil9(x: T): String = "ovNil9-any"
+fun ovNil9(x: Int?): String = "ovNil9-int?"
+fun <T : Any> ovNil9b(x: T): String = "ovNil9b-any"
+class BoxNn9<T : Any> {
+    fun put(x: T): String = "BoxNn9.put:" + x
+    fun <U : Any> mix(x: T, y: U): String = "BoxNn9.mix"
+}
+class BoxPl9<T> {
+    fun put(x: T): String = "BoxPl9.put:" + x
+}
+class BoxQ9<T : Any> {
+    fun put(x: T?): String = "BoxQ9.put:" + x
+}
+// an explicit nullable type argument makes nil legal for T : Any? only when the bound allows it
+fun <T> typed9(d: T): String = "typed9:" + d
+fun <T : Any> typedNn9(d: T?): String = "typedNn9:" + d
+
+// ---- C2: a literal and an enum entry var have a static type, also as the receiver
+enum class Verb9 { GET, POST { override fun weight() = 2 }; open fun weight() = 1 }
+fun String.bind9(v: Verb9): String = "bind9-String:" + this + ":" + v
+fun CharSequence.bind9(v: Verb9): String = "bind9-CharSequence:" + this + ":" + v
+fun String.bind9(n: Int): String = "bind9-Int:" + this + ":" + n
+fun Verb9.on9(s: String): String = "on9-Verb:" + this + ":" + s
+fun Any.on9(s: String): String = "on9-Any:" + s
+fun pickV9(v: Verb9): String = "pickV9-Verb"
+fun pickV9(v: Any): String = "pickV9-Any"
+fun pickV9(v: String): String = "pickV9-String"
+fun pickC9(c: Char): String = "pickC9-Char"
+fun pickC9(c: String): String = "pickC9-String"
+fun pickB9(b: Boolean): String = "pickB9-Boolean"
+fun pickB9(b: String): String = "pickB9-String"
+object Single9 { override fun toString() = "Single9" }
+fun pickO9(o: Single9): String = "pickO9-Single9"
+fun pickO9(o: Any): String = "pickO9-Any"
+
+// a literal is the receiver
+fun Char.cc9(): String = "cc9:" + this
+fun Boolean.bb9(): String = "bb9:" + this
+fun Long.ll9(): String = "ll9-Long:" + this
+fun Int.ll9(): String = "ll9-Int:" + this
+fun Double.dd9(): String = "dd9:" + this
+fun String.ss9(): String = "ss9-String"
+fun CharSequence.ss9(): String = "ss9-CharSequence"
+fun Any.ss9(): String = "ss9-Any"
+
+// ---- C3: the tag of a Clojure function is the static type of a call of it
+fun tag9(x: String): String = "tag9-String"
+fun tag9(x: Int): String = "tag9-Int"
+fun tag9(x: CharSequence): String = "tag9-CharSequence"
+fun tagB9(x: ByteArray): String = "tagB9-ByteArray"
+fun tagB9(x: String): String = "tagB9-String"
+fun tagL9(x: Long): String = "tagL9-Long"
+fun tagL9(x: String): String = "tagL9-String"
+fun tagD9(x: Double): String = "tagD9-Double"
+fun tagD9(x: String): String = "tagD9-String"
+// a call of a kt function as the argument: the declared Kotlin return type flows
+class Rq9(val path: String, val code: Int)
+class Holder9 { companion object { val NAME: String = "holder"; val CODE: Int = 7 } }
+fun Rq9.pathOf9(): String = path
+open class Call9c
+class RCall9 : Call9c()
+val Call9c.params9: String get() = "p-call"
+val RCall9.params9: Int get() = 5
+fun nested9(x: String): String = "nested9-String"
+fun nested9(x: Int): String = "nested9-Int"
+fun nested9(x: Any): String = "nested9-Any"
+
+// ---- C5: a Kotlin function value that takes a function
+fun hofNn9(): ((Int) -> Int) -> String = { f -> "hofNn9:" + f(1) }
+fun hofN9(): (((Int) -> Int)?) -> String = { f -> "hofN9:" + (f?.invoke(1) ?: "null") }
+fun hofFiNn9(): (Sam9) -> String = { f -> "hofFiNn9:" + f.go9(2) }
+fun hofFiN9(): (Sam9?) -> String = { f -> "hofFiN9:" + (f?.go9(2) ?: "null") }
+fun hofJavaNn9(): (java.util.function.Function<String, String>) -> String = { f -> "hofJavaNn9:" + f.apply("x") }
+fun hofJavaN9(): (java.util.function.Function<String, String>?) -> String = { f -> "hofJavaN9:" + (f?.apply("x") ?: "null") }
+fun hofRun9(): (Runnable?) -> String = { r -> if (r == null) "hofRun9:null" else { r.run(); "hofRun9:ran" } }
+typealias Cb9 = (Int) -> Int
+fun hofAliasNn9(): (Cb9) -> String = { f -> "hofAliasNn9:" + f(1) }
+fun hofAliasN9(): (Cb9?) -> String = { f -> "hofAliasN9:" + (f?.invoke(1) ?: "null") }
+fun hofSuspN9(): ((suspend (Int) -> Int)?) -> String = { f -> if (f == null) "hofSuspN9:null" else "hofSuspN9:fn" }
+fun hofSuspNn9(): (suspend (Int) -> Int) -> String = { _ -> "hofSuspNn9:fn" }
+fun hofInt9(): (Int?, String?) -> String = { a, b -> "hofInt9:" + a + ":" + b }
+fun hofIntNn9(): (Int, String) -> String = { a, b -> "hofIntNn9:" + a + ":" + b }
+fun hofAny9(): (Any?) -> String = { a -> "hofAny9:" + a }
+fun <T> hofT9(): (T) -> String = { a -> "hofT9:" + a }
+fun hofTNn9(): (List<String>?) -> String = { a -> "hofTNn9:" + a }

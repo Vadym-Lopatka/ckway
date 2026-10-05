@@ -243,6 +243,15 @@
                    (when receiver? (same-name-hint site (class v))))
               {:kt/wrong-class (.getName (class v))}))))
 
+(defn nn-arg
+  "`v`, or a kt error when it is nil: the parameter is a type parameter with a non-null bound (`T : Any`), so Kotlin
+  takes no nil. `site` = {:call :sig :what :bound}; the static path calls it for a nil that it could not see at compile time."
+  [site v]
+  (if (nil? v)
+    (r/fail (str "kt: " (when (:call site) (str (:call site) ": ")) "nil where Kotlin expects a non-null value of the type parameter `"
+                 (:bound site) "` (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site)))))
+    v))
+
 (defn check-obj
   "`v` if it fits the object descriptor `td` ({:k :obj :cls :text :nullable?}), else a kt error that names the
   Kotlin type and the class of `v`. `where` (optional) says which value it is, for example \"the result of the Clojure function\"."

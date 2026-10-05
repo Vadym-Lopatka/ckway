@@ -5,12 +5,20 @@
   Batch B: declarations and function values. B1: a companion `operator fun invoke` is a constructor form. B2: `invoke` on
   a class that implements a Kotlin function type. B3: the class var is the receiver of an extension on a Companion.
   B4: a Clojure function that a `kt/reify` member returns is adapted to the declared type.
+  Batch C: nil checks, type hints, one error text. C1: nil for a type parameter with a non-null bound. C2: a literal and an
+  enum entry var have a static type. C3: the tag of a function is the type of a call of it. C4: a class that was made at
+  run time as a `:<>` type argument. C5: nil for a function parameter of a Kotlin function value.
   The Kotlin shapes are in `test-fixtures/fx/Round9.kt`. Each case is tried on the static path (`eval` of the call),
   on the dynamic path (`rt/call-dyn`) and, where it matters, as a var value."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [ckway.bridge]
+            [ckway.bridge.kotlinc]
             [ckway.call-test :as ct]
             [ckway.core :as kt]
+            [ckway.resolve :as r]
             [ckway.rt :as rt]
             [ckway.set]))
 
@@ -732,3 +740,413 @@
       (is (error-has? r "got java.lang.Double 5.5") r)))
   (testing "a function that Kotlin returned goes back from a lambda unchanged"
     (is (= 15 (d/lam9 (fn [a] (d/adder9 (+ a 10))))))))
+
+;; ================================================================ Batch C: nil checks, type hints, one error text
+
+(defn- paths
+  "How the compiler takes the call `form`: {:value v-or-{:error ..} :static n :dynamic n :warned? bool}: the number of
+  calls that the static path expanded, the number that went to the dynamic path (`call-dyn`) and whether the Clojure compiler
+  printed a reflection warning. The call is compiled with `*warn-on-reflection*` on, in this namespace."
+  [form]
+  (let [n-static (atom 0) dyn (atom 0) w (java.io.StringWriter.)
+        emit r/emit dynf r/dynamic-form
+        v (with-redefs [r/emit (fn [p] (swap! n-static inc) (emit p))
+                        r/dynamic-form (fn [v parsed] (swap! dyn inc) (dynf v parsed))]
+            (binding [*warn-on-reflection* true *err* w]
+              (static form)))]
+    {:value v :static @n-static :dynamic @dyn :warned? (str/includes? (str w) "Reflection warning")}))
+
+;; ---------------------------------------------------------------- C1
+
+;; Koin: `fun <T : Any> getProperty(key: String, defaultValue: T): T`. A nil is checked against the bounds of the type
+;; parameter. `T : Any` takes no nil, plain `T`, `T?` and `T : Foo?` do.
+
+(deftest c1-nil-for-a-type-parameter-with-a-non-null-bound
+  (testing "a nil literal: a compile error on the static path"
+    (is (error-has? (static '(d/nnBound9 "k" nil)) "kt: no Kotlin declaration of `nnBound9` fits (nnBound9 \"k\" nil)"
+                    "fun <T : Any> nnBound9(key: String, d: T): String" "`nil` passed to non-nullable `d`"))
+    (is (error-has? (static '(d/tAny9 nil)) "`nil` passed to non-nullable `d`"))
+    (is (error-has? (static '(d/twoBounds9 nil)) "`nil` passed to non-nullable `d`") "several bounds, one is not nullable"))
+  (testing "the dynamic path says the same"
+    (is (error-has? (dynamic #'d/nnBound9 ["k" nil]) "no Kotlin declaration of `nnBound9` fits" "`nil` passed to non-nullable `d`"))
+    (is (error-has? (dynamic #'d/tAny9 [nil]) "`nil` passed to non-nullable `d`"))
+    (is (error-has? (as-value #'d/tAny9 nil) "`nil` passed to non-nullable `d`") "the var as a value"))
+  (testing "a nil that only the run time knows (the static path cannot see it): a kt error, not Kotlin's NullPointerException"
+    (let [r (static '(d/nnBound9 "k" (identity nil)))]
+      (is (error-has? r "kt: (d/nnBound9 \"k\" (identity nil)): nil where Kotlin expects a non-null value of the type parameter `T : Any`"
+                      "the argument `d` (T)" "Kotlin: fun <T : Any> nnBound9(key: String, d: T): String") r))
+    (let [r (static '(let [v (identity nil)] (d/tAny9 v)))]
+      (is (error-has? r "nil where Kotlin expects a non-null value of the type parameter `T : Any`") r))
+    (let [r (static '(let [v (identity nil)] (d/twoBounds9 v)))]
+      (is (error-has? r "the type parameter `T : Any`") r)))
+  (testing "a value that is not nil passes, on every path"
+    (is (= "nnBound9:v" (static '(d/nnBound9 "k" "v"))))
+    (is (= "nnBound9:v" (static '(let [v (identity "v")] (d/nnBound9 "k" v)))))
+    (is (= "nnBound9:v" (dynamic #'d/nnBound9 ["k" "v"])))
+    (is (= "tAny9:7" (static '(d/tAny9 7))))
+    (is (= "tAny9:7" (static '(let [v (identity 7)] (d/tAny9 v)))))
+    (is (= "twoBounds9:3" (static '(d/twoBounds9 3))))
+    (is (= "tAny9:7" (as-value #'d/tAny9 7)))))
+
+(deftest c1-nil-is-legal-where-the-bound-allows-it
+  (testing "plain T (the bound is Any?), T?, T : Number?"
+    (is (= "plainT9:null" (static '(d/plainT9 nil))))
+    (is (= "plainT9:null" (static '(let [v (identity nil)] (d/plainT9 v)))))
+    (is (= "plainT9:null" (dynamic #'d/plainT9 [nil])))
+    (is (= "plainT9:null" (as-value #'d/plainT9 nil)))
+    (is (= "qT9:null" (static '(d/qT9 nil))))
+    (is (= "qT9:null" (static '(let [v (identity nil)] (d/qT9 v)))))
+    (is (= "qT9:null" (dynamic #'d/qT9 [nil])))
+    (is (= "nullBound9:null" (static '(d/nullBound9 nil))))
+    (is (= "nullBound9:null" (static '(let [v (identity nil)] (d/nullBound9 v)))))
+    (is (= "nullBound9:null" (dynamic #'d/nullBound9 [nil]))))
+  (testing "T that is given as a nullable type with `:<>`"
+    (is (= "typed9:null" (static '(d/typed9 nil :<> String?))))
+    (is (= "typedNn9:null" (static '(d/typedNn9 nil :<> String)))))
+  (testing "a nullable type argument is not within the bound `T : Any`: Kotlin would not compile it, nor does kt"
+    (is (error-has? (static '(d/tAny9 nil :<> String?)) "`nil` passed to non-nullable `d`"))))
+
+(deftest c1-a-type-parameter-of-a-class
+  (testing "class Box<T : Any> { fun put(x: T) }"
+    (is (error-has? (static '(d/.put (d/BoxNn9) nil)) "no Kotlin declaration of `.put` fits" "`nil` passed to non-nullable `x`"))
+    (is (error-has? (dynamic #'d/.put [(d/BoxNn9) nil]) "`nil` passed to non-nullable `x`"))
+    (let [r (static '(d/.put (d/BoxNn9) (identity nil)))]
+      (is (error-has? r "nil where Kotlin expects a non-null value of the type parameter `T : Any`" "the argument `x` (T)") r))
+    (is (= "BoxNn9.put:1" (static '(d/.put (d/BoxNn9) 1))))
+    (is (= "BoxNn9.put:1" (dynamic #'d/.put [(d/BoxNn9) 1]))))
+  (testing "a method of such a class has its own type parameter too"
+    (is (error-has? (static '(d/.mix (d/BoxNn9) 1 nil)) "`nil` passed to non-nullable `y`"))
+    (is (error-has? (static '(d/.mix (d/BoxNn9) nil 1)) "`nil` passed to non-nullable `x`"))
+    (is (= "BoxNn9.mix" (static '(d/.mix (d/BoxNn9) 1 2)))))
+  (testing "class Box<T> and Box<T : Any> { fun put(x: T?) } take nil"
+    (is (= "BoxPl9.put:null" (static '(d/.put (d/BoxPl9) nil))))
+    (is (= "BoxPl9.put:null" (static '(d/.put (d/BoxPl9) (identity nil)))))
+    (is (= "BoxPl9.put:null" (dynamic #'d/.put [(d/BoxPl9) nil])))
+    (is (= "BoxQ9.put:null" (static '(d/.put (d/BoxQ9) nil))))
+    (is (= "BoxQ9.put:null" (dynamic #'d/.put [(d/BoxQ9) nil])))))
+
+(deftest c1-a-vararg-element
+  (testing "vararg xs: T with T : Any: a nil element is an error"
+    (is (error-has? (static '(d/varNn9 1 nil)) "no Kotlin declaration of `varNn9` fits" "`nil` passed to non-nullable `xs`"))
+    (is (error-has? (dynamic #'d/varNn9 [1 nil]) "`nil` passed to non-nullable `xs`"))
+    (let [r (static '(d/varNn9 1 (identity nil)))]
+      (is (error-has? r "nil where Kotlin expects a non-null value of the type parameter `T : Any`" "a vararg element") r))
+    (is (= "varNn9:2" (static '(d/varNn9 1 2))))
+    (is (= "varNn9:0" (static '(d/varNn9))))
+    (is (= "varNn9:2" (dynamic #'d/varNn9 [1 2]))))
+  (testing "vararg xs: T (plain T) takes a nil element (before, kt refused it)"
+    (is (= "varPl9:2" (static '(d/varPl9 1 nil))))
+    (is (= "varPl9:2" (static '(d/varPl9 1 (identity nil)))))
+    (is (= "varPl9:2" (dynamic #'d/varPl9 [1 nil]))))
+  (testing "vararg xs: T? takes a nil element"
+    (is (= "varNnList9:2" (static '(d/varNnList9 1 nil))))
+    (is (= "varNnList9:2" (dynamic #'d/varNnList9 [1 nil])))))
+
+(deftest c1-overload-selection
+  (testing "a nil does not make the candidate with T : Any applicable: the Int? overload is the only one"
+    (is (= "ovNil9-int?" (static '(d/ovNil9 nil))))
+    (is (= "ovNil9-int?" (static '(let [v (identity nil)] (d/ovNil9 v)))))
+    (is (= "ovNil9-int?" (dynamic #'d/ovNil9 [nil])))
+    (is (= "ovNil9-int?" (as-value #'d/ovNil9 nil))))
+  (testing "a value that is not nil: the usual rule (the candidate without type parameters first)"
+    (is (= "ovNil9-any" (static '(d/ovNil9 "s"))))
+    (is (= "ovNil9-any" (dynamic #'d/ovNil9 ["s"]))))
+  (testing "with no other candidate the nil is an error"
+    (is (error-has? (static '(d/ovNil9b nil)) "`nil` passed to non-nullable `x`"))))
+
+(deftest c1-nothing-else-changed
+  (testing "a nil receiver and a parameter of a plain non-null type: as before"
+    (is (error-has? (static '(d/plainStr9 nil)) "`nil` passed to non-nullable `s`"))
+    (is (error-has? (dynamic #'d/plainStr9 [nil]) "`nil` passed to non-nullable `s`"))
+    (is (= "plainStr9:a" (static '(d/plainStr9 "a")))))
+  (testing "the guard does not touch a literal: it is not wrapped, and a literal is never nil"
+    (is (= "tAny9:5" (static '(d/tAny9 5))))
+    (is (= "tAny9:x" (static '(d/tAny9 "x"))))
+    (is (= "varNn9:3" (static '(d/varNn9 1 "a" 2.5))))))
+
+;; ---------------------------------------------------------------- C2
+
+;; http4k: `(r/.bind "/health" h/Method.GET)` printed "Reflection warning ... can't be resolved statically". The string
+;; literal was never the cause: the enum entry var `h/Method.GET` had no static type. A literal has one in every position.
+
+(deftest c2-an-enum-entry-var-has-a-static-type
+  (testing "the call of the http4k shape: a string literal receiver and an enum entry var"
+    (let [r (paths '(d/.bind9 "x" d/Verb9.GET))]
+      (is (= "bind9-String:x:GET" (:value r)))
+      (is (pos? (:static r)))
+      (is (zero? (:dynamic r)) "no call-dyn in the expansion")
+      (is (not (:warned? r)) "no reflection warning")))
+  (testing "the same selection as the dynamic path and the var as a value make: the String receiver, not CharSequence"
+    (is (= "bind9-String:x:GET" (dynamic #'d/.bind9 ["x" d/Verb9.GET])))
+    (is (= "bind9-String:x:GET" (as-value #'d/.bind9 "x" d/Verb9.GET))))
+  (testing "an enum entry with a body (a subclass of the enum)"
+    (let [r (paths '(d/.bind9 "x" d/Verb9.POST))]
+      (is (= "bind9-String:x:POST" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r))))
+  (testing "an enum entry var as the receiver, and as an argument that chooses between overloads"
+    (let [r (paths '(d/.on9 d/Verb9.GET "a"))]
+      (is (= "on9-Verb:GET:a" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (let [r (paths '(d/.on9 d/Verb9.POST "a"))]
+      (is (= "on9-Verb:POST:a" (:value r)))
+      (is (and (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (let [r (paths '(d/pickV9 d/Verb9.POST))]
+      (is (= "pickV9-Verb" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (is (= "pickV9-Verb" (dynamic #'d/pickV9 [d/Verb9.GET])))))
+
+(deftest c2-a-literal-has-a-static-type-in-every-position
+  (doseq [[form want] [['(d/.ss9 "s") "ss9-String"]
+                       ['(d/.cc9 \a) "cc9:a"]
+                       ['(d/.bb9 true) "bb9:true"]
+                       ['(d/.ll9 1) "ll9-Int:1"]
+                       ['(d/.ll9 5000000000) "ll9-Long:5000000000"]
+                       ['(d/.dd9 1.5) "dd9:1.5"]
+                       ['(d/pickC9 \a) "pickC9-Char"]
+                       ['(d/pickB9 false) "pickB9-Boolean"]
+                       ['(d/pickV9 "s") "pickV9-String"]
+                       ['(d/pickO9 d/Single9) "pickO9-Single9"]]]
+    (let [r (paths form)]
+      (is (= want (:value r)) (pr-str form))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str form r)))))
+
+(deftest c2-nothing-else-changed
+  (testing "a call that was static selects the same declaration"
+    (is (= "ss9-CharSequence" (static '(let [^CharSequence s "s"] (d/.ss9 s)))))
+    (is (= "bind9-Int:x:3" (static '(d/.bind9 "x" 3)))))
+  (testing "an argument of unknown type is still the dynamic path with its warning"
+    (let [r (paths '(let [v (identity d/Verb9.GET)] (d/pickV9 v)))]
+      (is (= "pickV9-Verb" (:value r))))
+    (let [r (paths '(d/.bind9 (str "x" (rand-int 1)) d/Verb9.GET))]
+      (is (= "bind9-String:x0:GET" (:value r)))))
+  (testing "a Java static field is still untyped for kt (a call with only that argument is a run-time cast)"
+    (is (= "pickV9-Verb" (static '(d/pickV9 fx.r9.Verb9/GET))))))
+
+;; ---------------------------------------------------------------- C3
+
+;; Ktor: `(defn u ^String [s] ...)` then `(creq/.get client (u "/x"))` warned, `^String (u "/x")` did not. The Clojure
+;; compiler takes the tag of the arglist, else of the var, for a call of a var; kt does the same.
+
+(defn u9 [s] (str "u" s))
+(defn us9 ^String [s] (str "u" s))
+(defn ucs9 ^CharSequence [s] (str "u" s))
+(defn ubytes9 ^bytes [s] (byte-array 1))
+(defn ubq9 ^"[B" [s] (byte-array 1))
+(defn ul9 ^long [s] 1)
+(defn ud9 ^double [s] 1.5)
+(defn ^String uvar9 [s] (str "u" s))
+(defn ^java.lang.String ufq9 [s] (str "u" s))
+(defn uvarq9 {:tag 'java.lang.String} [s] (str "u" s))
+(defn uvar-arity9 (^String [] "a") (^String [x & more] "b"))
+(defn uarity9 (^String [x] "one") ([x y] 2))
+(defn bad9 ^String [s] 1)
+(defmacro umac9 ^String [s] `(str "u" ~s))
+
+(deftest c3-the-tag-of-a-function-is-the-static-type-of-a-call
+  (testing "the arglist tag: a direct call, no reflection warning"
+    (let [r (paths '(d/tag9 (us9 "x")))]
+      (is (= "tag9-String" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r))))
+  (testing "the tag decides like a hint that you wrote: a CharSequence tag chooses the CharSequence overload"
+    (let [r (paths '(d/tag9 (ucs9 "x")))]
+      (is (= "tag9-CharSequence" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (is (= "tag9-CharSequence" (static '(d/tag9 ^CharSequence (u9 "x")))) "the same as a hint on the form"))
+  (testing "the tag of the var, in its forms"
+    (doseq [f ['(d/tag9 (uvar9 "x")) '(d/tag9 (ufq9 "x")) '(d/tag9 (uvarq9 "x"))]]
+      (let [r (paths f)]
+        (is (= "tag9-String" (:value r)) (pr-str f))
+        (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str f r)))))
+  (testing "an array: ^bytes and ^\"[B\""
+    (doseq [f ['(d/tagB9 (ubytes9 "x")) '(d/tagB9 (ubq9 "x"))]]
+      (let [r (paths f)]
+        (is (= "tagB9-ByteArray" (:value r)) (pr-str f))
+        (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str f r)))))
+  (testing "primitives: ^long and ^double"
+    (let [r (paths '(d/tagL9 (ul9 "x")))]
+      (is (= "tagL9-Long" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (let [r (paths '(d/tagD9 (ud9 "x")))]
+      (is (= "tagD9-Double" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r))))
+  (testing "the arglist that takes this number of arguments, a variadic one included"
+    (doseq [f ['(d/tag9 (uvar-arity9)) '(d/tag9 (uvar-arity9 1 2 3)) '(d/tag9 (uarity9 1))]]
+      (let [r (paths f)]
+        (is (= "tag9-String" (:value r)) (pr-str f))
+        (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str f r))))
+    (testing "an arity without a tag has none (Clojure takes none either)"
+      (let [r (paths '(d/tag9 (uarity9 1 2)))]
+        (is (= "tag9-Int" (:value r)))
+        (is (pos? (:dynamic r)) "unknown type: the dynamic path"))))
+  (testing "the tag of a function of clojure.core (str, subs)"
+    (doseq [f ['(d/tag9 (str 1 2)) '(d/tag9 (subs "abc" 1))]]
+      (let [r (paths f)]
+        (is (= "tag9-String" (:value r)) (pr-str f))
+        (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str f r)))))
+  (testing "the tag is a type for the receiver too"
+    (let [r (paths '(d/.bind9 (us9 "x") d/Verb9.GET))]
+      (is (= "bind9-String:ux:GET" (:value r)))
+      (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))
+    (let [r (paths '(d/.bind9 (ucs9 "x") d/Verb9.GET))]
+      (is (= "bind9-CharSequence:ux:GET" (:value r)))
+      (is (and (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))))
+
+(deftest c3-nothing-else-changed
+  (testing "a function without a tag, a local function, a macro: unknown, the dynamic path"
+    (doseq [f ['(d/tag9 (u9 "x")) '(d/tag9 (umac9 "x")) '(let [g (fn [s] (str "u" s))] (d/tag9 (g "x")))]]
+      (let [r (paths f)]
+        (is (= "tag9-String" (:value r)) (pr-str f))
+        (is (pos? (:dynamic r)) (pr-str f r)))))
+  (testing "a hint on the form wins, and it was always static"
+    (let [r (paths '(d/tag9 ^CharSequence (us9 "x")))]
+      (is (= "tag9-CharSequence" (:value r)))
+      (is (and (zero? (:dynamic r)) (not (:warned? r))) (pr-str r)))))
+
+(deftest c3-a-wrong-tag-is-a-kt-error
+  (testing "a tag that is wrong: the existing `kt:` error at run time, not ClassCastException"
+    (let [r (static '(d/tag9 (bad9 "x")))]
+      (is (error-has? r "kt: (d/tag9 (bad9 \"x\")): the argument `x` (String) is java.lang.Long 1"
+                      "the Kotlin declaration that was selected needs java.lang.String" "Kotlin: fun tag9(") r)))
+  (testing "the same on another call"
+    (let [r (static '(d/tagB9 (bad9 "x")))]
+      (is (error-has? r "kt: (d/tagB9 (bad9 \"x\"))") r))))
+
+(deftest c3-the-declared-type-of-a-kt-call-flows
+  (testing "a property read, an extension function, a companion property: the Kotlin return type is the static type"
+    (doseq [[f want] [['(d/nested9 (d/path (d/Rq9 "/p" 3))) "nested9-String"]
+                      ['(d/nested9 (d/code (d/Rq9 "/p" 3))) "nested9-Int"]
+                      ['(d/nested9 (d/.pathOf9 (d/Rq9 "/p" 3))) "nested9-String"]
+                      ['(d/nested9 (d/NAME d/Holder9)) "nested9-String"]
+                      ['(d/nested9 (d/CODE d/Holder9)) "nested9-Int"]
+                      ['(let [r (d/Rq9 "/p" 3)] (d/nested9 (d/path r))) "nested9-String"]
+                      ['(d/nested9 (d/params9 ^fx.r9.RCall9 (d/RCall9))) "nested9-Int"]
+                      ['(d/nested9 (d/params9 ^fx.r9.Call9c (d/RCall9))) "nested9-String"]]]
+      (let [r (paths f)]
+        (is (= want (:value r)) (pr-str f))
+        (is (and (pos? (:static r)) (zero? (:dynamic r)) (not (:warned? r))) (pr-str f r))))))
+
+;; ---------------------------------------------------------------- C4
+
+;; Koin: `:<> spike.koin.domain.ProductStore` is the interface of a `defprotocol`. It lives in a DynamicClassLoader: the
+;; JVM has it, the Kotlin compiler cannot read it. kt stops before the compiler runs.
+
+(kt/require '[fx :as h9])
+
+(definterface Probe9 (^String foo []))
+(defprotocol ProbeP9 (probe-p9 [x]))
+(defrecord ProbeR9 [a])
+(deftype ProbeT9 [a])
+
+(deftest c4-a-class-made-at-run-time-as-a-type-argument
+  (testing "definterface, defprotocol, defrecord, deftype: a kt error that names the class, the cause and the two ways out"
+    (doseq [[form cls] [['(h9/typeOfName :<> ckway.round9_test.Probe9) "ckway.round9_test.Probe9"]
+                        ['(h9/typeOfName :<> ckway.round9_test.ProbeP9) "ckway.round9_test.ProbeP9"]
+                        ['(h9/typeOfName :<> ckway.round9_test.ProbeR9) "ckway.round9_test.ProbeR9"]
+                        ['(h9/typeOfName :<> ckway.round9_test.ProbeT9) "ckway.round9_test.ProbeT9"]]]
+      (let [r (static form)]
+        (is (error-has? r (str "kt: " (pr-str form) ": the class `" cls "` in `:<>` was made at run time")
+                        "`defprotocol`" "`definterface`" "`deftype`" "`defrecord`" "`gen-class`" "`kt/reify`"
+                        "no class file on the class path" "1. AOT-compile the namespace that defines it"
+                        "2. Use an overload that takes a `KClass`" "(kt/ref ") (pr-str form r))
+        (is (not (str/includes? (:error r) "unresolved reference")) "the compiler did not run"))))
+  (testing "a type argument inside another type argument"
+    (is (error-has? (static '(h9/typeOfName :<> (List ckway.round9_test.Probe9))) "the class `ckway.round9_test.Probe9` in `:<>`")))
+  (testing "it is found before the compiler runs: with no compiler on the class path the error is the same"
+    (with-redefs [ckway.bridge.kotlinc/compile-source (fn [& _] (throw (ex-info "the compiler ran" {})))]
+      (is (error-has? (static '(h9/typeOfName :<> ckway.round9_test.Probe9)) "was made at run time")))))
+
+(deftest c4-nothing-else-changed
+  (testing "a class with a class file (the JDK, a Kotlin class of a jar or directory) is compiled as before"
+    (is (= "String" (static '(h9/typeOfName :<> String))))
+    (is (= "UUID" (static '(h9/typeOfName :<> java.util.UUID))))
+    (is (= "Route9" (static '(h9/typeOfName :<> fx.r9.Route9))))
+    (is (= "List" (static '(h9/typeOfName :<> (List fx.r9.Route9))))))
+  (testing "a call that is not reified takes any class in `:<>`: no bridge, no compiler"
+    (is (= "typed9:null" (static '(d/typed9 nil :<> String?))))))
+
+(deftest c4-a-stored-bridge-loads-when-the-class-exists-at-run-time
+  (testing "the check runs only when the compiler is about to run: an installed bridge is used as it is"
+    (let [ran (atom 0)
+          spec {:readable "c4probe9" :identity "c4-probe-9" :stamp-classes []
+                :source (fn [cname]
+                          (let [simple (subs cname (inc (.lastIndexOf ^String cname ".")))]
+                            (str "package ckway.bridge\nclass " simple " { fun call(): String = \"c4\" }\n")))
+                :what "the C4 probe" :before-compile #(swap! ran inc)}
+          b (requiring-resolve 'ckway.bridge/kotlin-bridge-class)]
+      (is (class? (b spec)))
+      (let [first-ran @ran]
+        (is (class? (b spec)) "the second time: installed")
+        (is (= first-ran @ran) "no compilation, so no check")))))
+
+(def ^:private aot-proto-source
+  "(ns aot.proto9
+  (:require [ckway.core :as kt]))
+
+(kt/require '[fx :as f])
+
+(defprotocol Store9 (put9 [s]))
+
+(defn run [] (f/typeOfName :<> aot.proto9.Store9))
+")
+
+(deftest c4-aot-compiled-namespace-works
+  (let [root (.toFile (java.nio.file.Files/createTempDirectory "kt-c4" (make-array java.nio.file.attribute.FileAttribute 0)))
+        src (io/file root "src") classes (io/file root "classes")
+        _ (.mkdirs (io/file src "aot")) _ (.mkdirs classes)
+        _ (spit (io/file src "aot" "proto9.clj") aot-proto-source)
+        base-cp (System/getProperty "java.class.path")
+        sep java.io.File/pathSeparator
+        compile-cp (str/join sep [base-cp (.getPath src) (.getPath classes)])
+        run-cp (str/join sep [base-cp (.getPath classes)])
+        clj (fn [cp code] (clojure.java.shell/sh "clojure" "-Scp" cp "-M" "-e" code))
+        c (clj compile-cp (str "(binding [*compile-path* \"" (.getPath classes) "\"] (compile 'aot.proto9))"))]
+    (is (zero? (:exit c)) (str (:err c) (:out c)))
+    (is (.exists (io/file classes "aot" "proto9" "Store9.class")) "the protocol interface is a class file")
+    (let [r (clj run-cp "(require 'aot.proto9) (println (aot.proto9/run))")]
+      (is (zero? (:exit r)) (:err r))
+      (is (= "Store9" (str/trim (:out r)))))))
+
+;; ---------------------------------------------------------------- C5
+
+;; `->kotlin` (batch B) gives a kt error for nil where a Kotlin function VALUE (a Clojure function made by `<-kotlin`)
+;; takes a function that is not nullable. A nullable function type, a Java single-method interface, a `fun interface`
+;; and every other type pass nil as before.
+
+(deftest c5-nil-for-a-function-parameter-of-a-function-value
+  (testing "a function type that is not nullable: nil is a kt error that says which argument"
+    (let [r (top-error #((d/hofNn9) nil))]
+      (is (error-has? r "kt: argument 1 of the Kotlin function ((Int) -> Int) -> String:" "nil where Kotlin expects a non-null function ((Int) -> Int)") r))
+    (is (error-has? (top-error #((d/hofAliasNn9) nil)) "nil where Kotlin expects a non-null function ((Int) -> Int)"))
+    (is (error-has? (top-error #((d/hofSuspNn9) nil)) "nil where Kotlin expects a non-null function (suspend (Int) -> Int)"))
+    (let [r (top-error #((d/hofFiNn9) nil))]
+      (is (error-has? r "nil where Kotlin expects a non-null function") r))
+    (let [r (top-error #((d/hofJavaNn9) nil))]
+      (is (error-has? r "nil where Kotlin expects a non-null function") r)))
+  (testing "a function type that is nullable: nil passes, a function passes"
+    (is (= "hofN9:null" ((d/hofN9) nil)))
+    (is (= "hofN9:2" ((d/hofN9) (fn [x] (inc x)))))
+    (is (= "hofAliasN9:null" ((d/hofAliasN9) nil)))
+    (is (= "hofAliasN9:2" ((d/hofAliasN9) inc)))
+    (is (= "hofSuspN9:null" ((d/hofSuspN9) nil)))
+    (is (= "hofSuspN9:fn" ((d/hofSuspN9) (fn [x] x)))))
+  (testing "a nullable fun interface, a nullable Java single-method interface"
+    (is (= "hofFiN9:null" ((d/hofFiN9) nil)))
+    (is (= "hofFiN9:y2" ((d/hofFiN9) (fn [x] (str "y" x)))))
+    (is (= "hofJavaN9:null" ((d/hofJavaN9) nil)))
+    (is (= "hofJavaN9:x!" ((d/hofJavaN9) (fn [x] (str x "!")))))
+    (is (= "hofRun9:null" ((d/hofRun9) nil)))
+    (is (= "hofRun9:ran" ((d/hofRun9) (fn [] 1)))))
+  (testing "a function that is not nil passes where nil does not"
+    (is (= "hofNn9:2" ((d/hofNn9) inc)))
+    (is (= "hofAliasNn9:2" ((d/hofAliasNn9) inc)))
+    (is (= "hofSuspNn9:fn" ((d/hofSuspNn9) (fn [x] x))))
+    (is (= "hofFiNn9:y2" ((d/hofFiNn9) (fn [x] (str "y" x)))))
+    (is (= "hofJavaNn9:x!" ((d/hofJavaNn9) (fn [x] (str x "!"))))))
+  (testing "the other parameter types of a function value: as before"
+    (is (= "hofInt9:null:null" ((d/hofInt9) nil nil)))
+    (is (= "hofInt9:1:a" ((d/hofInt9) 1 "a")))
+    (is (error-has? (top-error #((d/hofIntNn9) nil "a")) "nil where Kotlin expects a non-null Int"))
+    (is (error-has? (top-error #((d/hofIntNn9) 1 nil)) "nil where Kotlin expects a non-null String"))
+    (is (= "hofAny9:null" ((d/hofAny9) nil)))
+    (is (= "hofTNn9:null" ((d/hofTNn9) nil)))
+    (is (= "hofT9:null" ((d/hofT9) nil)))))

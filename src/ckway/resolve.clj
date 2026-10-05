@@ -97,11 +97,18 @@
     (and (fn? v) (:kt/class (meta v))) {:class (class v) :companion-of (:kt/class (meta v))}
     :else {:class (class v)}))
 
+(def ^:private array-tags
+  "The tags of Clojure for an array of a primitive (`^bytes`) and for `^objects`."
+  {"ints" (Class/forName "[I") "longs" (Class/forName "[J") "floats" (Class/forName "[F")
+   "doubles" (Class/forName "[D") "chars" (Class/forName "[C") "shorts" (Class/forName "[S")
+   "bytes" (Class/forName "[B") "booleans" (Class/forName "[Z") "objects" (Class/forName "[Ljava.lang.Object;")})
+
 (defn tag->class [env-ns tag]
   (cond
     (class? tag) tag
     (string? tag) (or (prim-classes tag) (jvm-class tag))
     (symbol? tag) (or (prim-classes (name tag))
+                      (when (nil? (namespace tag)) (array-tags (name tag)))
                       (let [r (try (ns-resolve env-ns tag) (catch Exception _ nil))] (when (class? r) r)))))
 
 (defn- local-class [^Compiler$LocalBinding lb]
@@ -222,6 +229,32 @@
     (cond-> {:class clojure.lang.AFunction}
       (some some? hints) (assoc :fn-hints hints))))
 
+;; the :tag of a call of a var, as the Clojure compiler takes it (`InvokeExpr`, `sigTag`): the tag of the first arglist
+;; that takes this number of arguments (a variadic one takes any number from its `&`), else the tag of the var
+(defn- arglist-tag [arglists n]
+  (when-let [sig (first (filter (fn [sig]
+                                  (let [rest-at (.indexOf ^java.util.List sig '&)]
+                                    (or (= n (count sig)) (and (>= rest-at 0) (>= n rest-at)))))
+                                arglists))]
+    (:tag (meta sig))))
+
+(defn- call-tag-info
+  "Info for a form that calls a var that is no macro and has no inline expansion for this number of arguments, from the
+  tag that the Clojure compiler would give the call: the tag of the arglist, else of the var (`(defn u ^String [s] ...)`).
+  The user wrote it, so it is the static type of the argument, as a hint on the form is (`hinted-info`)."
+  [env form]
+  (let [head (first form)
+        v (when (and (symbol? head) (not (and (nil? (namespace head)) (contains? env head))))
+            (try (ns-resolve *ns* head) (catch Exception _ nil)))]
+    (if-not (and (var? v) (not (:macro (meta v))))
+      {}
+      (let [m (meta v) n (count (rest form))]
+        (if (and (:inline m) (or (nil? (:inline-arities m)) ((:inline-arities m) n)))
+          {}
+          (let [tag (or (arglist-tag (:arglists m) n) (:tag m))
+                c (when tag (or (tag->class (.ns ^clojure.lang.Var v) tag) (tag->class *ns* tag)))]
+            (if c (hinted-info c) {})))))))
+
 (defn form-info
   "Info for an argument form at compile time. Uses literals, :tag hints (a hint that the user wrote is the static
   type, see `hinted-info`), local binding classes (only an upper bound, unless the user hinted the local), kt class/object vars, `(long x)`-style casts, and calls of kt vars with one
@@ -244,6 +277,9 @@
           (cond
             (and (var? r) (:kt/class (meta r))) {:class clojure.lang.AFn :companion-of (:kt/class (meta r))}
             (and (var? r) (:kt/object (meta r))) (if-let [c (jvm-class (:kt/object (meta r)))] {:class c} {})
+            ;; an enum entry var holds the entry: its class is the enum class (an entry with a body is a subclass)
+            (and (var? r) (some #(= :enum-entry (:kind %)) (:kt/decls (meta r))))
+            (if-let [c (jvm-class (:owner (first (:kt/decls (meta r)))))] {:class c} {})
             ;; the :tag of a var that holds a function is the type of its RESULT (`(defn ^String f ...)`)
             (and (var? r) (not (fn-var? r)) (tag->class *ns* (:tag (meta r)))) (hinted-info (tag->class *ns* (:tag (meta r))))
             :else {})))
@@ -255,7 +291,7 @@
       (and (seq? form) (core-var? env head) (cast-classes (name head))) {:class (cast-classes (name head))}
       (and (seq? form) (ref-head? env head)) (or ((requiring-resolve 'ckway.ref/form-info) env form) {})
       (and (seq? form) (reify-head? env head)) (if-let [c ((requiring-resolve 'ckway.reify/form-info) form)] {:class c} {})
-      (seq? form) (nested-call-info env form)
+      (seq? form) (let [r (nested-call-info env form)] (if (seq r) r (call-tag-info env form)))
       :else {})))
 
 ;; ---------------------------------------------------------------- parse
@@ -469,14 +505,31 @@
   ^Class [t]
   (some-> t :value-class :class jvm-class))
 
+(defn- type-param-of
+  "The declaration of the type parameter that the type `t` names (a function's or its class's), or nil."
+  [decl t]
+  (when-let [n (:type-param t)]
+    (first (filter #(= n (:name %)) (concat (:type-params decl) (:class-type-params decl))))))
+
 (defn- nullable-type?
   "Can a Kotlin value of type `t` be null? A type parameter whose bounds are all nullable (the default
-  bound is `Any?`) can: `fun <T> echo(x: T)` takes nil."
+  bound is `Any?`) can: `fun <T> echo(x: T)` takes nil; `T : Any` does not. A bound that is itself a type parameter
+  is as nullable as that parameter (`<T, U : T>`)."
+  ([decl t] (nullable-type? decl t 0))
+  ([decl t depth]
+   (boolean (or (:nullable? t)
+                (when-let [tp (type-param-of decl t)]
+                  (and (< depth 8)
+                       (every? #(nullable-type? decl % (inc depth)) (:bounds tp))))))))
+
+(defn- nonnull-tparam
+  "The text of the non-null bound of a type parameter `t` that does not take nil (`T : Any`), or nil when `t` is no
+  such type parameter. A nil for it is a `kt:` error, as it is for a parameter of a plain non-null type."
   [decl t]
-  (boolean (or (:nullable? t)
-               (when-let [n (:type-param t)]
-                 (let [tp (first (filter #(= n (:name %)) (concat (:type-params decl) (:class-type-params decl))))]
-                   (and tp (every? :nullable? (:bounds tp))))))))
+  (when (and (:type-param t) (not (nullable-type? decl t)))
+    (let [tp (type-param-of decl t)
+          b (first (remove #(nullable-type? decl %) (:bounds tp)))]
+      (str (:type-param t) " : " (if b (meta/type-text b) "Any")))))
 
 (defn slots
   "One slot per receiver, then per parameter: {:name :class :nullable? :companion-of :adapt :kotlin-type}.
@@ -498,7 +551,7 @@
         {:name (:name p) :class (or (value-class-of t) (jvm-class (:jvm-type p))) :nullable? (nullable-type? decl t)
          :vararg? (:vararg? p) :default? (:default? p)
          :elem-class (value-class-of (:vararg-elem p))
-         :elem-nullable? (:nullable? (:vararg-elem p))
+         :elem-nullable? (when-let [et (:vararg-elem p)] (nullable-type? decl et))
          :elem-type (:vararg-elem p)
          :adapt (adapter-spec t (:jvm-type p) (:signature decl))
          :kotlin-type t})))))
@@ -1816,13 +1869,15 @@
                   (:omitted it) {:zero (:jvm-type p)}
                   (:vararg it) (cond-> {:vararg (:vararg it) :jvm-type (:jvm-type p)}
                                  (elem-conv p) (assoc :elem-vc (elem-conv p))
+                                 (nonnull-tparam decl (:vararg-elem p)) (assoc :elem-nn (nonnull-tparam decl (:vararg-elem p)))
                                  (:elem-jvm p) (assoc :elem-jvm (:elem-jvm p)))
                   (:vararg-coll it) (cond-> {:vararg-coll (:vararg-coll it) :jvm-type (:jvm-type p)}
                                       (elem-conv p) (assoc :elem-vc (elem-conv p)))
                   :else (let [ad (adapter-spec (:type p) (:jvm-type p) (:signature decl))
                               vc (arg-conv (:type p) (:jvm-type p) (:name p))]
                           (cond-> {:entry it :jvm-type (:jvm-type p) :pname (:name p) :ptext (meta/type-text (:type p))}
-                            ad (assoc :adapt ad) vc (assoc :vc vc)))))
+                            ad (assoc :adapt ad) vc (assoc :vc vc)
+                            (nonnull-tparam decl (:type p)) (assoc :nn (nonnull-tparam decl (:type p)))))))
         nmask (max 1 (quot (+ (count params) 31) 32))
         masks (for [m (range nmask)]
                 {:mask (unchecked-int (reduce (fn [acc i] (bit-or acc (bit-shift-left 1 (- i (* 32 m)))))
@@ -2047,8 +2102,11 @@
         from-arg (fn [a]
                    (cond
                      (:entry a) [[(companion-entry (:entry a)) (:jvm-type a) (:adapt a) (:vc a)
-                                  (if (:pname a) (str "the argument `" (:pname a) "` (" (:ptext a) ")") "the receiver")]]
-                     (:vararg a) (map (fn [e] [e (or (:elem-jvm a) (elem (:jvm-type a))) nil (:elem-vc a)]) (:vararg a))
+                                  (if (:pname a) (str "the argument `" (:pname a) "` (" (:ptext a) ")") "the receiver")
+                                  (:nn a)]]
+                     (:vararg a) (map (fn [e] [e (or (:elem-jvm a) (elem (:jvm-type a))) nil (:elem-vc a)
+                                               nil (:elem-nn a)])
+                                      (:vararg a))
                      (:vararg-coll a) [[(:vararg-coll a) nil]]))
         target (:target p)]
     (concat (when target [[(companion-entry target) (:class p) nil nil "the receiver"]])
@@ -2201,6 +2259,22 @@
          `(let [~g ~form] (if (ckway.rt/adapt? ~g ~(symbol iface)) ~build (ckway.rt/own ~g))))
        jt])))
 
+(defn- known-non-nil?
+  "Is the argument sure not to be nil? A literal, a number cast or a trusted entry is; a hint, a class that Clojure
+  inferred and a call are not."
+  [info]
+  (boolean (or (:trusted info)
+               (and (:class info) (not (:upper info)) (not (:static info))))))
+
+(defn- nn-guard
+  "The entry `e`, whose argument form is wrapped in a check for nil when the parameter is a type parameter with the
+  non-null bound `nn` (`T : Any`) and the argument may be nil: a nil that is only known at run time is a `kt:` error,
+  as the nil that is known at compile time is, not the NullPointerException of Kotlin."
+  [e nn what p]
+  (if (and nn (not (known-non-nil? (:info e))))
+    (update e :arg (fn [f] `(ckway.rt/nn-arg '~{:call (:call-text p) :sig (:sig p) :what (or what "a vararg element") :bound nn} ~f)))
+    e))
+
 (defn emit
   "Form for a plan. Arguments are bound once, in written order, with exact tags."
   [p]
@@ -2209,8 +2283,9 @@
         entries (->> pe
                      (reduce (fn [m [e jt ad :as x]] (if (contains? m (:idx e)) m (assoc m (:idx e) x))) {})
                      (sort-by key) (map val))
-        binds (for [[e jt ad vc what] entries
+        binds (for [[e0 jt ad vc what nn] entries
                     :let [site (when (and what (:call-text p)) (assoc (:site p) :what what :call (:call-text p) :sig (:sig p)))
+                          e (nn-guard e0 nn what p)
                           [f tag] (cond ad (adapter-form ad jt (:arg e))
                                         vc [(unbox-form vc (:arg e)) (when-not (contains? prim-classes jt) jt)]
                                         jt (conv-form jt (:arg e) (:info e) site what)
@@ -2391,6 +2466,31 @@
                  "and Kotlin resolves a context argument by its type, so every such parameter would get the same value. "
                  "Kotlin has no syntax to pass them apart, so kt cannot make this call.\n  Kotlin signature: " (:signature decl))))))
 
+(defn- type-classes
+  "The JVM classes that the type `t` names, its type arguments included (a class that is not found is left out)."
+  [t]
+  (concat (when-let [c (and (:class t) (not (:type-param t)) (types/jvm-class t))] [c])
+          (mapcat type-classes (:args t))
+          (when-let [f (:fn-type t)] (mapcat type-classes (concat (:args f) [(:return f)])))))
+
+(defn- check-class-files!
+  "The error for a class in `targs` that exists in this JVM but has no class file on the class path: Clojure made it at run
+  time (`defprotocol`, `definterface`, `deftype`, `defrecord`, a `gen-class` that is not compiled, an earlier `kt/reify`),
+  and the Kotlin compiler of the bridge cannot read it (it would say \"unresolved reference\"). A class of the JDK
+  or of another loader that is no part of the class path is not asked for. Called before the compiler runs, only when a
+  bridge has to be compiled: a stored bridge (AOT, disk cache) loads as it is."
+  [form targs]
+  (doseq [^Class c (distinct (mapcat type-classes targs))
+          :let [l (.getClassLoader c)]
+          :when (and l (not= l (ClassLoader/getPlatformClassLoader)) (not (.isArray c)) (not (.isPrimitive c))
+                     (not (meta/class-file-on-classpath? (.getName c))))]
+    (fail (str "kt: " (short-form form) ": the class `" (.getName c) "` in `:<>` was made at run time (a `defprotocol`, "
+               "`definterface`, `deftype`, `defrecord`, a `gen-class` that is not compiled yet, or an earlier `kt/reify`). "
+               "It exists in this JVM only, with no class file on the class path, so the Kotlin compiler that compiles "
+               "this call cannot read it.\n  Ways out:\n"
+               "    1. AOT-compile the namespace that defines it and put the classes directory on the class path.\n"
+               "    2. Use an overload that takes a `KClass`, if the library has one: `(kt/ref " (last (str/split (.getName c) #"[.$]")) " class)`."))))
+
 (defn- expand-reified
   "[bridge-decl items] for the call of the reified `decl`: compiles (or loads) the Kotlin bridge."
   [form decl items targs]
@@ -2403,6 +2503,7 @@
         spec (assoc (build decl targs supplied) :targs targs)
         bc (try (bridge/kotlin-bridge-class (assoc (select-keys spec [:readable :identity :stamp-classes])
                                                    :source #(source spec %)
+                                                   :before-compile #(check-class-files! form targs)
                                                    :what (str "the call `" (short-form form) "`")))
                 (catch clojure.lang.ExceptionInfo e (throw (compile-failure form decl targs e))))]
     [(bridge-decl decl spec bc) (vec (map #(nth items (:slot %)) (:params spec)))]))

@@ -216,6 +216,16 @@ A constructor parameter counts as a property when the class has a public propert
 * `:<>` needs the static path. A receiver of unknown type with several candidates is a compile error ("add a type
   hint"); a var used as a value cannot take `:<>`.
 * Reified properties (`inline val <reified T> T.name`) are not supported.
+* A class that Clojure made at run time cannot be a `:<>` argument of a call that needs a compiled bridge. A `defprotocol`
+  or `definterface` interface, a `deftype` or `defrecord` class, a `gen-class` that is not AOT-compiled yet and a class
+  of an earlier `kt/reify` live in a `DynamicClassLoader`: the JVM has the class, but no class file is on the class path
+  for the Kotlin compiler to read (it would only say "unresolved reference 'domain'"). `kt` checks it before the compiler
+  runs: for each class in `:<>` (type arguments included) that is not a JDK class, there must be a class file in a
+  directory or jar of the class path. If not, the call is a `kt:` error that names the class, says that it was made at run
+  time, and gives two ways out: AOT-compile the namespace that defines it and put the classes directory on the class
+  path (then the file exists), or use an overload that takes a `KClass` (`(kt/ref X class)`), if the library has one. No stub
+  is generated. The check runs only when a bridge has to be compiled: a stored bridge (AOT class, disk cache) loads as it is,
+  also when the class exists only at run time.
 * Two context parameters of the same type on a reified function are refused: Kotlin binds a context argument by type, so
   both would get the same value (a hand-written `with(x) { with(y) { both<Int>() } }` returns `"y|y"`). A function that is
   not reified is called directly and binds each parameter.
@@ -314,6 +324,11 @@ class, with a reflection warning (`*warn-on-reflection*`). A type hint or a loca
 (let [c (f/Other)] (f/.count c))                ; static: the class var tells the type of `c`
 ```
 
+A call of a function that has a return tag is not like this: `(defn u ^String [s] ...)` makes `(f/.get c (u "/x"))` static,
+because the Clojure compiler gives the call the tag of its arglist (else of the var), and `kt` takes the same tag (see below). A
+literal and an enum entry var have a static type too, as the receiver as well. What is still untyped: a var that holds a value
+(`(def c (f/Other))` without a hint), a local that the compiler could not infer, the result of a function without a tag.
+
 A correct call on an untyped receiver costs one `instance?` check on top of the call. A wrong receiver says which
 call, which Kotlin declaration was selected, the actual class and, if that class has a property or function of the same
 name, how to write it: "`weigh` is a property of fx.Cart2: write (f/weigh cart)".
@@ -340,6 +355,15 @@ A type hint that you write is the static type of the argument, as the declared t
 (In case 2 a value of the wrong class is a `kt:` error at run time, with the candidates.) A hint that the static path
 trusts and that is wrong at run time is a `kt:` error too, never the JVM's `ClassCastException`: it names the call, the
 parameter, the Kotlin declaration and the actual class. A correct call costs one `instance?` check.
+The tag of a call of a var is a hint that you wrote. `kt` reads it as the Clojure compiler does (`InvokeExpr`): the tag of the
+arglist that takes this number of arguments (a variadic arglist takes any number from its `&`), else the tag of the var; it
+resolves the class name in the namespace of the var, then in yours (`^String`, `^java.util.List`, `^"[B"` or `^bytes`, `^long`,
+`^double`). A primitive is only an upper bound. A macro, and a function with an `:inline` expansion for that number of
+arguments, have no tag. A tag that is wrong is a `kt:` error at run time, as any hint is; and note that a tag decides like any
+hint: `(defn ^CharSequence cs [] "x")` makes `(f/tag (cs))` the `CharSequence` overload, where the class of the value would choose `String`.
+Write the tag on the arglist (`(defn u ^String [s] ...)`) or the var (`(defn ^String u [s] ...)`); `^long` before the name is
+evaluated by Clojure to the function `long`, which is no tag.
+
 A type that only the Clojure compiler inferred (a `loop` variable that is a `Number`, the element of a `doseq`) is an upper
 bound: the class of the value decides at run time. `^Object` says nothing. One exception: `^Number` for an argument that
 goes to an integer parameter (`Int`, `Long`...) is not a width, so the class of the value decides, as for an inferred type.

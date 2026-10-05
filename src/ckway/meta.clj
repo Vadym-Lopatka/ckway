@@ -293,6 +293,18 @@
          second
          with-manifest-class-paths)))
 
+(defn class-file-on-classpath?
+  "Is there a class file for the class `binary` (\"a.b.C$D\") in a directory or jar of `classpath-files`, which is what
+  the Kotlin compiler of a bridge reads? A class that Clojure made at run time (`defprotocol`, `deftype`, `kt/reify`...)
+  lives in a `DynamicClassLoader` and has none."
+  [^String binary]
+  (let [rel (str (str/replace binary "." "/") ".class")]
+    (boolean (some (fn [^File f]
+                     (if (.isDirectory f)
+                       (.isFile (File. f rel))
+                       (try (with-open [jf (JarFile. f)] (some? (.getEntry jf rel))) (catch Exception _ false))))
+                   (classpath-files)))))
+
 (defn- package-roots
   "The classpath entries (Files: directories and jars) that can hold the package `pkg`: `classpath-files`, and what
   the class loaders say about the resources `pkg/` (a loader that is no URLClassLoader, an entry the property
