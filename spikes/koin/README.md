@@ -17,6 +17,7 @@ Use the `-jvm` artifact: tools.deps does not read the Gradle metadata of `koin-c
 | `src/spike/koin/core.clj` | `start!`, `stop!`, the Catalog operations, `-main`. |
 | `test/spike/koin/core_test.clj` | The application: operations, config, lifecycle, override. |
 | `test/spike/koin/forms_test.clj` | Each Koin form, called directly. |
+| `test/spike/koin/interop_test.clj` | Pins the ckway fixes (trailing lambda, protocol error, nil for `T : Any`, hints). |
 | `test/spike/koin/global_test.clj` | `startKoin` / `stopKoin` (the only global state, stopped in `finally`). |
 
 ## What it shows
@@ -52,18 +53,18 @@ Every alias sets `-Dckway.cache.dir=target/cache`, so the bridge cache of the us
 
 | Kotlin | Clojure |
 |---|---|
-| `module { ... }` | `(dsl/module :moduleDeclaration (fn [^Module m] ...))` |
-| `single<T> { "x" }` | `(m/.single m :definition (fn [_ _] "x") :<> T)` |
-| `single<T>(named("a")) { }` | `(m/.single m :qualifier (q/named "a") :definition f :<> T)` |
-| `factory<T> { }` | `(m/.factory m :definition f :<> T)` |
-| `single<ProductStore> { }` (a protocol) | not possible. Use `(di/single-of m store-class f)` |
-| `single { } bind ProductStore::class` | `(-> (m/.single m :definition f :<> Object) (dsl/.bind store-class))` |
+| `module { ... }` | `(dsl/module (fn [m] ...))` |
+| `single<T> { "x" }` | `(m/.single m (fn [_ _] "x") :<> T)` |
+| `single<T>(named("a")) { }` | `(m/.single m (q/named "a") f :<> T)` |
+| `factory<T> { }` | `(m/.factory m f :<> T)` |
+| `single<ProductStore> { }` (a protocol) | a `kt:` error unless the namespace is AOT-compiled (see "With AOT"). Use `(di/single-of m store-class f)` |
+| `single { } bind ProductStore::class` | `(-> (m/.single m f :<> Object) (dsl/.bind store-class))` |
 | `ProductStore::class` | `(kt/ref ProductStore class)` or `(kjvm/kotlin (:on-interface ProductStore))` (`kjvm` = `kotlin.jvm`) |
 | `get<T>()` in a definition | `(sc/.get scope :<> T)` |
 | `get(ProductStore::class, named("a"))` in a definition | `(sc/.get scope store-class (q/named "a"))` |
 | `definition onClose { }` | `(dsl/.onClose definition f)` |
-| `scope(named("s")) { scoped<T> { } }` | `(m/.scope m (q/named "s") (fn [^ScopeDSL s] (dsl/.scoped s :definition f :<> T)))` |
-| `koinApplication { modules(a, b) }` | `(dsl/koinApplication (fn [^KoinApplication app] (k/.modules app ^java.util.List [a b])))` |
+| `scope(named("s")) { scoped<T> { } }` | `(m/.scope m (q/named "s") (fn [s] (dsl/.scoped s f :<> T)))` |
+| `koinApplication { modules(a, b) }` | `(dsl/koinApplication (fn [app] (k/.modules app [a b])))` (a vector built in code needs `^java.util.List`) |
 | `properties(mapOf("a" to "b"))` | `(k/.properties app {"a" "b"})` |
 | `app.koin` | `(k/koin app)` |
 | `koin.get<T>()` | `(k/.get koin :<> T)` |
@@ -82,8 +83,17 @@ Every alias sets `-Dckway.cache.dir=target/cache`, so the bridge cache of the us
 | `koin.getAll<T>()` | `(k/.getAll koin :<> T)` |
 | `app.close()` / `koin.close()` | `(k/.close app)` / `(k/.close koin)` |
 | `allowOverride(false)` | `(k/.allowOverride app false)` |
-| `startKoin { ... }` / `stopKoin()` | `(ctx/startKoin (fn [^KoinApplication a] ...))` / `(ctx/stopKoin)` |
+| `startKoin { ... }` / `stopKoin()` | `(ctx/startKoin (fn [a] ...))` / `(ctx/stopKoin)` |
 | `GlobalContext.get()` | `(ctx/.get ctx/GlobalContext)` |
+
+## Naming the lambda
+
+The trailing lambda has a Clojure form now: when the last parameter takes a function and has no default, the last positional argument goes to it.
+So `(dsl/module f)`, `(m/.single m f :<> T)`, `(dsl/.scoped s f :<> T)` and `(dsl/koinApplication f)` need no names. Write `:<>` last, after all positional arguments.
+A name is still needed where the lambda parameter has a default: `(k/.get koin :parameters f :<> T)`.
+The lambda parameters of a `fn` at a Kotlin function type have a static type, so they need no hint.
+A hint is still needed for a value that only the run time knows (the result of `into`, a map lookup): `^java.util.List`, `^org.koin.core.KoinApplication`, `^String`.
+A return hint on a `defn` is used: `(defn- store-qualifier ^org.koin.core.qualifier.Qualifier [x] ...)`.
 
 ## Why `single-of` is acceptable
 
@@ -105,6 +115,7 @@ For a real deployment, run once with `:kotlinc`, or AOT-compile the namespaces (
 
 ## With AOT (an experiment, not used by the design)
 
+Without AOT, a protocol as `:<>` type is a clear `kt:` error before the compiler runs. It names the class and gives two ways out: AOT, or a `KClass` overload.
 If the interface of the protocol is a class file, the reified call works for it: `single<ProductStore> { }` and `koin.get<ProductStore>()` with `:<> spike.koin.domain.ProductStore`.
 Make the class file, then run with the alias `:aot`:
 

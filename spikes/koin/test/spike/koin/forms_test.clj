@@ -27,8 +27,7 @@
   `bindings` is [koin-sym module ...]. The properties are optional, as a map."
   [[sym props & modules] & body]
   `(let [app# (dsl/koinApplication
-               :appDeclaration
-               (fn [^org.koin.core.KoinApplication a#]
+                              (fn [a#]
                  (k/.modules a# ^java.util.List (vector ~@modules))
                  (let [props# ~props]
                    (when (some? props#) (k/.properties a# ^java.util.Map props#)))))
@@ -36,15 +35,15 @@
      (try ~@body (finally (k/.close app#)))))
 
 (defmacro module [& body]
-  `(dsl/module :moduleDeclaration (fn [~(with-meta 'm {:tag 'org.koin.core.module.Module})] ~@body)))
+  `(dsl/module (fn [~(with-meta 'm {:tag 'org.koin.core.module.Module})] ~@body)))
 
 ;; -------------------------------------------------------------------------------------------------
 ;; Reified calls: `single<T> { }`, `get<T>()`, `getOrNull<T>()`, `inject<T>()`
 
 (deftest reified-single-and-get
   ;; Kotlin: val mod = module { single<String> { "hello" } ; factory<StringBuilder> { StringBuilder("x") } }
-  (let [mod (module (m/.single m :definition (fn [_ _] "hello") :<> String)
-                    (m/.factory m :definition (fn [_ _] (StringBuilder. "x")) :<> StringBuilder))]
+  (let [mod (module (m/.single m (fn [_ _] "hello") :<> String)
+                    (m/.factory m (fn [_ _] (StringBuilder. "x")) :<> StringBuilder))]
     (with-koin [koin nil mod]
       ;; Kotlin: koin.get<String>()
       (is (= "hello" (k/.get koin :<> String)))
@@ -64,7 +63,7 @@
         (is (not (identical? (k/.get koin :<> StringBuilder) (k/.get koin :<> StringBuilder))))))))
 
 (deftest non-reified-twins-take-a-kclass
-  (let [mod (module (m/.single m :definition (fn [_ _] "hello") :<> String))]
+  (let [mod (module (m/.single m (fn [_ _] "hello") :<> String))]
     (with-koin [koin nil mod]
       ;; Kotlin: koin.get(String::class)
       (is (= "hello" (k/.get koin string-class)))
@@ -79,8 +78,8 @@
 (deftest get-inside-a-definition
   ;; Kotlin: module { single<String>(named("name")) { "Ann" }
   ;;                  single<Int>   { get<String>(named("name")).length } }
-  (let [mod (module (m/.single m :qualifier (q/named "name") :definition (fn [_ _] "Ann") :<> String)
-                    (m/.single m :definition (fn [^org.koin.core.scope.Scope s _]
+  (let [mod (module (m/.single m (q/named "name") (fn [_ _] "Ann") :<> String)
+                    (m/.single m (fn [s _]
                                                ;; Kotlin: get<String>(named("name")).length
                                                (count (sc/.get s (q/named "name") :<> String)))
                                :<> Int))]
@@ -114,20 +113,19 @@
   (when-not (aot-interface?) ; with AOT it compiles: see the last test
    (let [msg (try (eval '(do (ckway.core/require '[org.koin.core.module :as m])
                             (m/.single (org.koin.dsl.ModuleDSLKt/module false (fn [_] nil))
-                                       :definition (fn [_ _] nil)
+                                       (fn [_ _] nil)
                                        :<> spike.koin.domain.ProductStore)))
                  (catch Throwable e (ex-message (or (ex-cause e) e))))]
-    (if (compiler-present?)
-      (do (is (re-find #"Kotlin compiler rejected" (str msg)))
-          (is (re-find #"unresolved reference 'domain'" (str msg))))
-      ;; no compiler (the run without :kotlinc): a new `:<>` call cannot be compiled at all
-      (is (re-find #"needs the Kotlin compiler" (str msg)))))))
+    ;; the error comes before the compiler runs, so it is the same with and without :kotlinc
+    (is (re-find #"the class `spike.koin.domain.ProductStore` in `:<>` was made at run time" (str msg)))
+    (is (re-find #"1\. AOT-compile the namespace" (str msg)))
+    (is (re-find #"2\. Use an overload that takes a `KClass`" (str msg))))))
 
 (deftest any-plus-bind-is-the-public-api-route
   ;; Kotlin: single<Any> { store } bind ProductStore::class
   ;; Reified `Any` is fine. `bind` takes a KClass, so the protocol is a secondary type.
   (let [store (d/memory-store)
-        mod (module (-> (m/.single m :definition (fn [_ _] store) :<> Object)
+        mod (module (-> (m/.single m (fn [_ _] store) :<> Object)
                         (dsl/.bind store-class)))]
     (with-koin [koin nil mod]
       (is (identical? store (k/.get koin store-class)))
@@ -141,16 +139,15 @@
   ;; two definitions in two modules, it does. This is why `di/single-of` keys by the protocol itself.
   (let [store (d/memory-store)
         other (reify Runnable (run [_]))
-        mod-a (module (-> (m/.single m :definition (fn [_ _] store) :<> Object) (dsl/.bind store-class)))
-        mod-b (module (-> (m/.single m :definition (fn [_ _] other) :<> Object) (dsl/.bind (kt/ref Runnable class))))]
+        mod-a (module (-> (m/.single m (fn [_ _] store) :<> Object) (dsl/.bind store-class)))
+        mod-b (module (-> (m/.single m (fn [_ _] other) :<> Object) (dsl/.bind (kt/ref Runnable class))))]
     (with-koin [koin nil mod-a mod-b]
       (is (identical? store (k/.get koin store-class)))
       (is (identical? other (k/.get koin (kt/ref Runnable class))))
       (is (identical? other (k/.get koin :<> Object)) "the last one won the key Any"))
     (is (thrown? DefinitionOverrideException
                  (dsl/koinApplication
-                  :appDeclaration
-                  (fn [^org.koin.core.KoinApplication a]
+                                    (fn [a]
                     (k/.allowOverride a false)
                     (k/.modules a ^java.util.List [mod-a mod-b])))))))
 
@@ -159,8 +156,8 @@
 
 (deftest named-qualifiers
   ;; Kotlin: module { single<String>(named("a")) { "A" }; single<String>(named("b")) { "B" } }
-  (let [mod (module (m/.single m :qualifier (q/named "a") :definition (fn [_ _] "A") :<> String)
-                    (m/.single m :qualifier (q/named "b") :definition (fn [_ _] "B") :<> String))]
+  (let [mod (module (m/.single m (q/named "a") (fn [_ _] "A") :<> String)
+                    (m/.single m (q/named "b") (fn [_ _] "B") :<> String))]
     (with-koin [koin nil mod]
       ;; Kotlin: koin.get<String>(named("a"))
       (is (= "A" (k/.get koin (q/named "a") :<> String)))
@@ -175,12 +172,12 @@
 (deftest definition-parameters
   ;; Kotlin: module { factory<StringBuilder> { params -> StringBuilder("Hello " + params.get<String>() + " " + params.get<Int>()) } }
   ;; (Not `factory<String>`: Koin gives back a parameter that has the type that was asked for.)
-  (let [mod (module (m/.factory m :definition (fn [_ ^org.koin.core.parameter.ParametersHolder ps]
+  (let [mod (module (m/.factory m (fn [_ ^org.koin.core.parameter.ParametersHolder ps]
                                                 ;; Kotlin: params.get<String>() ; params.get<Int>()
                                                 (StringBuilder. (str "Hello " (p/.get ps :<> String) " " (p/.get ps :<> Int))))
                                 :<> StringBuilder)
-                    (m/.factory m :qualifier (q/named "idx")
-                                :definition (fn [_ ^org.koin.core.parameter.ParametersHolder ps]
+                    (m/.factory m (q/named "idx")
+                                (fn [_ ^org.koin.core.parameter.ParametersHolder ps]
                                               ;; Kotlin: params[0]
                                               (StringBuilder. (str "first=" (p/.get ps 0) " size=" (p/.size ps))))
                                 :<> StringBuilder))]
@@ -213,7 +210,7 @@
 
 (deftest properties-inside-a-definition
   ;; Kotlin: module { single<String> { getProperty("greeting") + "!" } }
-  (let [mod (module (m/.single m :definition (fn [^org.koin.core.scope.Scope s _]
+  (let [mod (module (m/.single m (fn [s _]
                                                (str (sc/.getProperty s "greeting") "!"))
                                :<> String))]
     (with-koin [koin {"greeting" "hi"} mod]
@@ -226,8 +223,8 @@
   ;; Kotlin: module { scope(named("s")) { scoped<StringBuilder> { StringBuilder() } } }
   (let [sname (q/named "s")
         mod (module (m/.scope m sname
-                              (fn [^org.koin.dsl.ScopeDSL s]
-                                (dsl/.scoped s :definition (fn [_ _] (StringBuilder.)) :<> StringBuilder))))]
+                              (fn [s]
+                                (dsl/.scoped s (fn [_ _] (StringBuilder.)) :<> StringBuilder))))]
     (with-koin [koin nil mod]
       ;; Kotlin: val s1 = koin.createScope("s1", named("s"))
       (let [s1 (k/.createScope koin "s1" sname)
@@ -256,10 +253,10 @@
 (deftest on-close-callback
   ;; Kotlin: module { single<String> { "x" } onClose { closed += it } }
   (let [closed (atom [])
-        mod (module (di/on-close (m/.single m :definition (fn [_ _] "x") :<> String)
+        mod (module (di/on-close (m/.single m (fn [_ _] "x") :<> String)
                                  (fn [v] (swap! closed conj v))))]
     ;; Kotlin: val app = koinApplication { modules(mod) }
-    (let [app (dsl/koinApplication :appDeclaration (fn [^org.koin.core.KoinApplication a] (k/.modules a ^org.koin.core.module.Module mod)))
+    (let [app (dsl/koinApplication (fn [a] (k/.modules a ^org.koin.core.module.Module mod)))
           koin (k/koin app)]
       (k/.get koin :<> String)
       (is (= [] @closed))
@@ -269,7 +266,7 @@
 
 (deftest close-on-koin-itself
   ;; Kotlin: koin.close()
-  (let [app (dsl/koinApplication :appDeclaration (fn [^org.koin.core.KoinApplication a] (k/.modules a ^org.koin.core.module.Module (module))))
+  (let [app (dsl/koinApplication (fn [a] (k/.modules a ^org.koin.core.module.Module (module))))
         koin (k/koin app)]
     (k/.close koin)
     (is (thrown? ClosedScopeException (k/.get koin :<> String)))
@@ -278,9 +275,9 @@
 (deftest on-close-is-called-also-for-an-instance-never-made
   ;; Koin calls the onClose of every single when the container closes; the instance is then null.
   (let [closed (atom [])
-        mod (module (di/on-close (m/.single m :definition (fn [_ _] "x") :<> String)
+        mod (module (di/on-close (m/.single m (fn [_ _] "x") :<> String)
                                  (fn [v] (swap! closed conj v))))
-        app (dsl/koinApplication :appDeclaration (fn [^org.koin.core.KoinApplication a] (k/.modules a ^org.koin.core.module.Module mod)))]
+        app (dsl/koinApplication (fn [a] (k/.modules a ^org.koin.core.module.Module mod)))]
     (k/.close app)
     (is (= [nil] @closed))))
 
@@ -294,10 +291,9 @@
   ;; Only with the alias :aot and `(compile 'spike.koin.domain)` into target/classes. Skipped otherwise.
   (when (and (aot-interface?) (compiler-present?))
     (is (= :ok (binding [*ns* (the-ns 'spike.koin.forms-test)] (eval '(let [store (d/memory-store)
-                            mod (dsl/module :moduleDeclaration
-                                            (fn [^org.koin.core.module.Module m]
-                                              (m/.single m :definition (fn [_ _] store) :<> spike.koin.domain.ProductStore)))
-                            app (dsl/koinApplication (fn [^org.koin.core.KoinApplication a]
+                            mod (dsl/module                                             (fn [m]
+                                              (m/.single m (fn [_ _] store) :<> spike.koin.domain.ProductStore)))
+                            app (dsl/koinApplication (fn [a]
                                                        (k/.modules a ^org.koin.core.module.Module mod)))]
                         (try (when (identical? store (k/.get (k/koin app) :<> spike.koin.domain.ProductStore)) :ok)
                              (finally (k/.close app))))))))))

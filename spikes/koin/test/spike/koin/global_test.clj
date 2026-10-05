@@ -16,7 +16,7 @@
 (deftest start-and-stop-the-global-container
   (try
     ;; Kotlin: startKoin { modules(appModule) }
-    (let [app (ctx/startKoin (fn [^org.koin.core.KoinApplication a]
+    (let [app (ctx/startKoin (fn [a]
                                (k/.modules a ^org.koin.core.module.Module (modules/app-module core/defaults))
                                (k/.properties a {"catalog.page-size" 10})))
           ;; Kotlin: GlobalContext.get()
@@ -26,7 +26,7 @@
         (is (= "Tea" (:name (catalog/add-product! svc {:name "Tea" :price 1}))))
         (is (= 1 (count (catalog/list-products svc nil)))))
       (is (thrown? KoinApplicationAlreadyStartedException
-                   (ctx/startKoin (fn [^org.koin.core.KoinApplication _a] nil)))))
+                   (ctx/startKoin (fn [_a] nil)))))
     (finally
       ;; Kotlin: stopKoin()
       (ctx/stopKoin)))

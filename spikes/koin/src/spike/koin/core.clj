@@ -44,8 +44,7 @@
          request-module (modules/request-module)
          ;; Kotlin: koinApplication { modules(appModule, requestModule, *extra); properties(mapOf(...)) }
          app (dsl/koinApplication
-              :appDeclaration
-              (fn [^org.koin.core.KoinApplication app]
+                            (fn [app]
                 (k/.modules app ^java.util.List (into [app-module request-module] extra-modules))
                 (k/.properties app {"app.name" (:app-name config)
                                     "catalog.page-size" (long (:page-size config))})))]

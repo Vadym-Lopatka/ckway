@@ -173,8 +173,7 @@
 
 (defn- test-module [calls]
   ;; Kotlin: val testModule = module { single<ProductStore>(named("memory")) { FakeStore() } }
-  (dsl/module :moduleDeclaration
-              (fn [^org.koin.core.module.Module mdl]
+  (dsl/module               (fn [mdl]
                 (di/single-of mdl modules/store-class (q/named "memory") (fn [_ _] (fake-store calls))))))
 
 (deftest override-one-definition-with-a-test-module
@@ -189,8 +188,7 @@
   ;; Kotlin: koinApplication { allowOverride(false); modules(appModule, testModule) }
   (let [calls (atom [])
         e (try (dsl/koinApplication
-                :appDeclaration
-                (fn [^org.koin.core.KoinApplication app]
+                                (fn [app]
                   (k/.allowOverride app false)
                   (k/.modules app ^java.util.List [(modules/app-module (merge core/defaults {}))
                                                    (test-module calls)])))
