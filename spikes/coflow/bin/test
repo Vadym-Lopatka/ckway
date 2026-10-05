@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs the tests of the coflow spike. Exit non-zero on failure.
+# The bridge cache of ckway is an empty directory under target/ (mode 700: ckway refuses a cache that others can write).
+# The spike calls no `:<>` (reified) function, so the Kotlin compiler (alias :kotlinc) is not needed: one run is enough.
+# Extra arguments go to the test runner, for example: bin/test -n spike.coflow.chan-test
+cd "$(dirname "$0")/.." || exit 1
+rm -rf target/cache && mkdir -p target && mkdir -m 700 target/cache
+exec clojure -M:test "$@"
