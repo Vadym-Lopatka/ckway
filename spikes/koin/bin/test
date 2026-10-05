@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run the tests of the Koin spike. Exit non-zero on failure.
+cd "$(dirname "$0")/.." || exit 1
+# The bridge cache is a directory under target/. The user's own cache is never touched.
+# (mode 700: ckway refuses a cache directory that the group or others can write)
+rm -rf target/cache && mkdir -p target && mkdir -m 700 target/cache
+# 1. With the Kotlin compiler: the `:<>` calls compile their bridges into target/cache.
+clojure -M:test:kotlinc || exit 1
+# 2. Without the compiler: the same tests must pass with the stored bridges only.
+echo "--- again, without the :kotlinc alias (stored bridges only) ---"
+clojure -M:test || exit 1
