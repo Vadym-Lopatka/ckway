@@ -184,9 +184,20 @@
         run-all (fn []
                   (doseq [^Job j proc-jobs] (co/.join j))
                   (doseq [p internals] (chan/close-quiet! p))
-                  (let [skip (set (mapcat chan/pump-jobs kept))]
-                    (doseq [^Job j (children-of job) :when (not (contains? skip j))] (co/.join j)))
-                  true)]
+                  (if (empty? kept)
+                    (doseq [^Job j (children-of job)] (co/.join j))
+                    ;; A launcher that is not ours reads its ports (kept open) until its own thread ends. The pump
+                    ;; coroutines of those ports stay parked, so they are not waited for; look again every 50 ms for the
+                    ;; user code that is left (the pump of a port may be started a moment after we looked).
+                    (loop []
+                      (let [skip (set (mapcat chan/pump-jobs kept))
+                            pending (remove #(contains? skip %) (filter #(.isActive ^Job %) (children-of job)))]
+                        (when (seq pending)
+                          (co/withTimeoutOrNull 50 (fn [_] (co/.join ^Job (first pending)) true))
+                          (recur)))))
+                  true)
+        ;; the scope is completed (cancelled) only if no launcher that is not ours may still read its parked ports
+        finish (fn [] (when (empty? kept) (co/.cancelAndJoin job)))]
     ;; Kotlin: GlobalScope.launch(Dispatchers.Default) { withTimeoutOrNull(grace) { ... join ... }; close; job.cancelAndJoin() }
     (co/.launch co/GlobalScope :context (co/Default co/Dispatchers)
                 :block (fn [_]
@@ -195,7 +206,7 @@
                                (doseq [p internals] (chan/close-quiet! p))
                                (co/.cancelAndJoin job))
                            ;; every coroutine of the scope is done: complete its job (nothing is interrupted)
-                           (do (run-all) (co/.cancelAndJoin job)))))))
+                           (do (run-all) (finish)))))))
 
 (defn create-flow
   "see lib ns for docs"
