@@ -7,7 +7,7 @@ This file shows the state on ckway at `fix/spike-findings` d446567 (now on `main
 ckway and kotlinx.coroutines fit this port well. The whole machinery of `clojure.core.async.flow` (process loops, control, routing, back-pressure, pause and resume, ping, inject, compute workloads) runs on Kotlin `Channel`s, `select`, one `CoroutineScope` for each flow, and dispatchers, written in Clojure with plain `kt` forms. No Kotlin glue is needed, and no `:<>` call, so no Kotlin compiler.
 For a user the port works as the original: the same flow definition, the same step functions, the same keywords and message shapes. The same user code runs against the original (the oracle) and the port in differential scenarios and in tests of 11 invariants; the results are equal.
 Price: throughput is about 2 to 2.5 times lower than the original (200 000 messages through 3 procs: about 0.9 to 1.0 s against 0.4 s).
-The orchestrator ran `bin/test` again, idle and under CPU load: 81 tests (about 4390 assertions) with the oracle, and 36 tests in the drop-in JVM, 0 failures in both.
+`bin/test` was run again in review, idle and under CPU load: 81 tests (about 4390 assertions) with the oracle, and 36 tests in the drop-in JVM, 0 failures in both.
 
 ## Three ways to use it
 
@@ -63,7 +63,7 @@ These were bugs of the spike, not of ckway. Each has a test that failed first.
 | A flow that has a proc from another `ProcLauncher` leaves its parked pump coroutines alive after `stop`. | The port cannot know when that launcher's thread ends. |
 | Throughput is about 2 to 2.5 times lower. | One coroutine and one virtual thread for each proc, and locks at the core.async boundary. |
 
-The oracle is core.async 1.10.874-alpha3 from Maven Central. The local checkout `../core.async` (v1.9.865) has an older flow API; its `examples/ex-flow.clj` and `examples/my-flow.clj` do not run on the released flow either, and the tests assert the same failure on both sides.
+The oracle is core.async 1.10.874-alpha3 from Maven Central.
 
 ## License
 

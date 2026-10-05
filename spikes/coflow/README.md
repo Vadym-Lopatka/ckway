@@ -13,8 +13,8 @@ same report and error maps, same invariants.
   `flow.clj` is the original file with the implementation namespace replaced (docstrings, names and arglists are the
   original's, because the API must be the same). `impl.clj` keeps the structure and the logic of the original `impl.clj`;
   the channels, loops, mults and executors are rewritten.
-* `test/orig/ex-flow.clj`, `test/orig/my-flow.clj` and `test/orig/flow_test_original.txt` are copies of files of
-  clojure/core.async (EPL 1.0), unchanged.
+* `test/orig/flow_test_original.txt` is a copy of a file of clojure/core.async (branch `dev-flow-test`, EPL 1.0),
+  unchanged.
 * The other files (`chan.clj`, `ext.clj`, `takeover.clj`, `demo.clj`, `dropin/`, tests) are new and use the licence of this
   repository (MIT). `dropin/clojure/core/async/flow.clj` copies no code of the original.
 * core.async is a normal dependency (`deps.edn`), not copied.
