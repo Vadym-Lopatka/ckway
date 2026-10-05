@@ -1517,3 +1517,46 @@
       (is (str/includes? m "is ambiguous. Candidates:"))
       (is (str/includes? m "val fx.r9.Route9.routes9")))))
 
+;; ---------------------------------------------------------------- D5
+
+;; Ktor `embeddedServer(factory, port = 80, host = ..., watchPaths = ..., module)` and `embeddedServer(factory, environment = ...,
+;; configure = ..., module = ...)`. `(serve9 "f" (:port m) (:host m) (fn ...))`: the types of `(:port m)` are unknown. The
+;; second declaration fits by the usual binding (its parameters would take the three values), the first only with a trailing
+;; lambda. The static path took the second: a `kt:` error at run time. When the types do not decide, the VALUES do.
+
+(def ^:private m5 {:port 8 :host "h" :env (d/Env9 "e")})
+
+(deftest d5-unknown-types-the-values-choose-the-trailing-lambda-too
+  (testing "port and host from a map, the module last: the first declaration, by the trailing lambda"
+    (is (= "serve9-port:f:8:h:m" (static '(let [m {:port 8 :host "h"}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))))
+    (is (= "serve9-port:f:8:h:m" (dynamic #'d/serve9 ["f" 8 "h" (fn [] "m")]))))
+  (testing "an environment from a map: the second declaration, by the usual binding"
+    (is (= "serve9-env:f:e:cfg:m"
+           (static '(let [m {:env (ckway.round9-test/env5)}] (d/serve9 "f" (:env m) (fn [] "cfg") (fn [] "m"))))))
+    (is (= "serve9-env:f:e:cfg:mod" (static '(let [m {:env (ckway.round9-test/env5)}] (d/serve9 "f" (:env m) (fn [] "cfg")))))))
+  (testing "the literals and the typed arguments: as before"
+    (is (= "serve9-port:f:0:h:m" (static '(d/serve9 "f" 0 "h" (fn [] "m")))))
+    (is (= "serve9-port:f:8:h:m" (static '(let [m {:port 8 :host "h"}] (d/serve9 "f" (long (:port m)) ^String (:host m) (fn [] "m"))))))
+    (is (= "serve9-env:f:e:cfg:m" (static '(d/serve9 "f" (d/Env9 "e") (fn [] "cfg") (fn [] "m"))))))
+  (testing "the reflection warning says that the call is dynamic, and the typed calls have none"
+    (is (str/includes? (reflection-warnings '(let [m {:port 8 :host "h"}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))
+                       "can't be resolved statically"))
+    (is (not (str/includes? (reflection-warnings '(let [m {:port 8 :host "h"}] (d/serve9 "f" (long (:port m)) ^String (:host m) (fn [] "m"))))
+                            "Reflection warning")))
+    (is (not (str/includes? (reflection-warnings '(d/serve9 "f" 0 "h" (fn [] "m"))) "Reflection warning")))))
+
+(defn env5 [] (d/Env9 "e"))
+
+(deftest d5-the-error-of-the-run-time-selection
+  (testing "values that fit no declaration: the usual no-fit error"
+    (is (error-has? (static '(let [m {:port "x" :host 1}] (d/serve9 "f" (:port m) (:host m) (fn [] "m"))))
+                    "no Kotlin declaration of `serve9` fits"))))
+
+(deftest d5-nothing-else-changed
+  (testing "two overloads that both fit the usual binding: the values choose (the dynamic path, as before)"
+    (is (= "pickU9-String" (static '(let [m {:a "s"}] (d/pickU9 (:a m) 1)))))
+    (is (= "pickU9-Env" (static '(let [m {:a (ckway.round9-test/env5)}] (d/pickU9 (:a m) 1)))))
+    (is (= "pickU9-Env" (static '(d/pickU9 (d/Env9 "e") 1)))))
+  (testing "a trailing lambda with known types: the same as in A2"
+    (is (= "serve9-port:f:80:0.0.0.0:m" (static '(d/serve9 "f" (fn [] "m")))))))
+

@@ -532,3 +532,13 @@ fun ovNn9(x: Int): String = "ovNn9-Int"
 fun varStrNn9(vararg xs: String): String = "varStrNn9:" + xs.size
 fun defNn9(a: String = "d", b: String): String = "defNn9:$a:$b"
 fun sNn9(): String = "sNn9"
+
+// ---- D5: positional arguments with no static type, and a trailing lambda (Ktor `embeddedServer`)
+class Env9(val name: String)
+fun serve9(factory: String, port: Int = 80, host: String = "0.0.0.0", watch: List<String> = emptyList(), module: () -> String): String =
+    "serve9-port:$factory:$port:$host:${module()}"
+fun serve9(factory: String, env: Env9 = Env9("default"), configure: () -> String = { "cfg" }, module: () -> String = { "mod" }): String =
+    "serve9-env:$factory:${env.name}:${configure()}:${module()}"
+// two overloads that both fit the usual binding: only the values choose
+fun pickU9(a: String, b: Int): String = "pickU9-String"
+fun pickU9(a: Env9, b: Int): String = "pickU9-Env"

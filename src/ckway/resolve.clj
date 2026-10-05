@@ -1672,8 +1672,11 @@
           ;; member, also when the arguments do not fit it (`Two : A<Int>` with `f(x: Int)`: `A<T>.f(x: T)` is gone)
           overridden (overridden-ids (filter receiver-fits? checked))
           viable (remove #(or (no-reason %) (contains? overridden (meta/jvm-member-id (:decl %)))) checked)
-          ;; a candidate that fits by the usual binding always wins over one that fits only with a trailing lambda
-          viable (if (some (complement :trailing) viable) (remove :trailing viable) viable)]
+          ;; a candidate that fits by the usual binding for sure always wins over one that fits only with a trailing
+          ;; lambda. One that only could fit (unknown types at compile time) does not: the run time decides (`choose`)
+          viable (if (some #(and (not (:trailing %)) (every? (fn [c] (= :ok (first c))) (:checks %))) viable)
+                   (remove :trailing viable)
+                   (if (and (some (complement :trailing) viable) (not compile?)) (remove :trailing viable) viable))]
       (when (empty? viable)
         (fail (reasons-text var-name args (concat (map #(hash-map :decl (:decl %) :reason (:error %)) failed)
                                                   (map #(hash-map :decl (:decl %) :reason (no-reason %)) checked)))
@@ -1800,7 +1803,14 @@
   A call that this fails for may still be one with a trailing lambda (`bind`): that binding is tried only then, so a call
   that is selected without it is never changed. Its error is the first one, except an ambiguity between candidates."
   [var-name decls parsed compile?]
-  (try (choose-hinted var-name decls parsed compile? false)
+  (try (let [r (choose-hinted var-name decls parsed compile? false)]
+         ;; the usual binding selected a candidate whose types only COULD fit (unknown at compile time), and another
+         ;; declaration fits with a trailing lambda: the values decide at run time, which can try both
+         (if (and compile? (not (:dynamic? r)) (seq (:positional parsed)) (some trailing-lambda? decls)
+                  (some #(not= :ok (first %)) (:checks r)))
+           (let [r2 (try (choose-hinted var-name decls parsed compile? true) (catch clojure.lang.ExceptionInfo _ nil))]
+             (if (:dynamic? r2) r2 r))
+           r))
        (catch clojure.lang.ExceptionInfo e
          (if (and (:kt/error (ex-data e)) (seq (:positional parsed)) (some trailing-lambda? decls))
            (try (choose-hinted var-name decls parsed compile? true)

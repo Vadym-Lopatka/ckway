@@ -147,7 +147,7 @@ Positional arguments bind in sequence; a keyword literal names the parameter of 
 
 Example 02.
 A var that you pass as a value (`(apply s/joinLabel xs)`, `(map s/welcome names)`) takes positional arguments only; a keyword in `xs` is an ordinary value. Named arguments need the written form.
-A trailing lambda: when this binding leaves the last parameter without an argument, and that parameter takes a function (a function type, a `fun interface` or a Java single-method interface) and has no default, the last positional argument goes to it and the others are bound again without it. A skipped parameter takes its default, a `vararg` takes what is left. A call that fits by the usual binding is never changed, and a name still works (`(s/cart :build (fn [c] ...))`).
+A trailing lambda: when this binding leaves the last parameter without an argument, and that parameter takes a function (a function type, a `fun interface` or a Java single-method interface) and has no default, the last positional argument goes to it and the others are bound again without it. A skipped parameter takes its default, a `vararg` takes what is left. A call that fits by the usual binding for sure is never changed, and a name still works (`(s/cart :build (fn [c] ...))`). When the types of the arguments are not known (a map lookup, a local), and another declaration fits only with the trailing lambda, the values choose at run time (the dynamic path, with the usual reflection warning): Ktor `(eng/embeddedServer cio/CIO (:port m) (:host m) (fn [app] ...))`.
 
 ```clojure
 ;; Kotlin: cart { add(tea) }   -- `owner` is skipped
