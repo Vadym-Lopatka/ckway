@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run the tests of the http4k spike. The bridge cache is a directory under target/, never the user's cache.
+set -e
+cd "$(dirname "$0")/.."
+mkdir -p target
+mkdir -p -m 700 target/cache
+chmod 700 target/cache
+exec clojure -M:test "$@"
