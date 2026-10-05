@@ -198,6 +198,7 @@ A Clojure function goes where Kotlin wants a function type or a `fun interface`;
 ```
 
 Example 06.
+A class that implements a function type (`interface Handler : (Request) -> Response`) has the member `invoke(p1, ...): R`, with the type arguments of that supertype: `(h/.invoke handler req)`. A suspend function type gives the result as other suspend calls do. An object of a class that the package does not know (`RoutingHttpHandler` of another package) is called with the generic `invoke` of `Function1`, whose argument types are not checked (`doc/limits.md`, 10).
 A Clojure function also goes where a Java interface with exactly one abstract method is expected (`Function`, `Predicate`, `Runnable`, `Comparator`, ...), as Kotlin converts a lambda there (example 14).
 
 ### 7. No guess

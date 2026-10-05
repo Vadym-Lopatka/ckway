@@ -179,6 +179,50 @@ object NoInv9 { fun plain(): String = "noinv" }
 object ObjExt9
 operator fun ObjExt9.invoke(x: String): String = "objext-invoke:$x"
 
+// ---- B2: a class that implements a Kotlin function type
+typealias Handler9 = (String) -> String
+
+interface Router9 : Handler9 {
+    val name: String
+}
+
+fun router9(name: String): Router9 = object : Router9 {
+    override val name = name
+    override fun invoke(p1: String): String = "routed:$p1:$name"
+}
+
+// no `invoke` in the metadata of the class itself, a function type with two parameters and an Int
+abstract class Calc9 : (Int, Int) -> Int
+fun calc9(): Calc9 = object : Calc9() { override fun invoke(p1: Int, p2: Int): Int = p1 * p2 }
+fun calcCall9(c: Calc9, a: Int, b: Int): Int = c(a, b)
+
+// a function type that returns a function type, and one with no parameter that returns Unit
+interface Curry9 : (String) -> (String) -> String
+fun curry9(): Curry9 = object : Curry9 { override fun invoke(p1: String): (String) -> String = { p2 -> "curry:$p1:$p2" } }
+interface Eff9 : () -> Unit
+fun eff9(log: StringBuilder): Eff9 = object : Eff9 { override fun invoke() { log.append("eff;") } }
+
+// a function type that takes a function
+interface Apply9 : ((String) -> String) -> String
+fun apply9(): Apply9 = object : Apply9 { override fun invoke(p1: (String) -> String): String = p1("in") }
+
+// a suspend function type as the supertype
+interface SRouter9 : suspend (String) -> String
+fun sRouter9(): SRouter9 = object : SRouter9 { override suspend fun invoke(p1: String): String = "s-routed:$p1" }
+
+// another `invoke` of the package fits as well
+class Doer9 { operator fun invoke(x: String): String = "doer:$x" }
+fun doer9(): Doer9 = Doer9()
+operator fun Router9.invoke(x: Int): String = "ext-int:$x"
+operator fun Doer9.invoke(x: Int, y: Int): String = "doer-ext:$x$y"
+
+// a value class in the type argument is no problem
+@JvmInline value class Id9(val v: Int)
+interface IdFn9 : (Id9) -> Id9
+fun idFn9(): IdFn9 = object : IdFn9 { override fun invoke(p1: Id9): Id9 = Id9(p1.v + 1) }
+fun idOf9(i: Int): Id9 = Id9(i)
+fun idInt9(i: Id9): Int = i.v
+
 // ---- B3: the class var as the receiver of an extension property on a Companion (http4k: `Filter.NoOp`)
 class Prop9(val tag: String = "p") {
     companion object

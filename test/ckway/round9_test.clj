@@ -422,6 +422,103 @@
   (testing "an object without an invoke: the old error"
     (is (error-has? (static '(d/NoInv9 1)) "`NoInv9` is an object, not a function: it cannot be called"))))
 
+;; ---------------------------------------------------------------- B2
+
+;; `interface Router9 : (String) -> String`: the class inherits `operator fun invoke(p1: String): String`.
+
+(kt/require '[fx.r9b :as b9])
+
+(def ^:private router (d/router9 "r"))
+(def ^:private calc (d/calc9))
+
+(defn- reflection-warnings
+  "What the compiler says about reflection while it compiles `form`."
+  [form]
+  (let [w (java.io.StringWriter.)]
+    (binding [*err* w *warn-on-reflection* true] (eval-here form))
+    (str w)))
+
+(deftest b2-invoke-on-a-class-that-implements-a-function-type
+  (testing "an unhinted value: the dynamic path"
+    (is (= "routed:x:r" (d/.invoke router "x")))
+    (is (= "routed:x:r" (dynamic #'d/.invoke [router "x"])))
+    (is (= "routed:x:r" (as-value #'d/.invoke router "x")))
+    (is (= "routed:y:r" (apply d/.invoke [router "y"]))))
+  (testing "a hint, or a call that gives the class: the static path"
+    (is (= "routed:h:r" (eval-here '(d/.invoke ^fx.r9.Router9 ckway.round9-test/r9router "h"))))
+    (is (= "routed:z:x" (eval-here '(let [r (d/router9 "x")] (d/.invoke r "z")))))
+    (is (= "routed:z:x" (eval-here '(d/.invoke (d/router9 "x") "z"))))
+    (is (not (str/includes? (reflection-warnings '(let [r (d/router9 "x")] (d/.invoke r "z"))) "Reflection warning"))))
+  (testing "two parameters, and an Int that a Clojure integer gives (the width is the one of the declared type)"
+    (is (= 42 (d/.invoke calc 6 7) (dynamic #'d/.invoke [calc 6 7]) (eval-here '(d/.invoke (d/calc9) 6 7)))))
+  (testing "a function type that returns a function: a Clojure function"
+    (let [f (d/.invoke (d/curry9) "a")]
+      (is (fn? f))
+      (is (= "curry:a:b" (f "b")))))
+  (testing "a function type that returns Unit: nil"
+    (let [log (StringBuilder.)]
+      (is (nil? (d/.invoke (d/eff9 log))))
+      (is (= "eff;" (str log)))))
+  (testing "a suspend function type: the call gives the result"
+    (is (= "s-routed:s" (d/.invoke (d/sRouter9) "s") (dynamic #'d/.invoke [(d/sRouter9) "s"])))
+    (is (= "s-routed:s" (eval-here '(d/.invoke (d/sRouter9) "s")))))
+  (testing "a function argument is adapted, and a value class is the box itself"
+    (is (= "w:in" (d/.invoke (d/apply9) (fn [s] (str "w:" s)))))
+    (is (= 5 (d/idInt9 (d/.invoke (d/idFn9) (d/idOf9 4)))))))
+
+(deftest b2-a-class-of-another-package
+  ;; The package of the var has no class that implements this function type: the generic `invoke(p1: P1): R` of `Function1`
+  ;; is the member (its type arguments are not seen: a Clojure integer for an `Int` stays a Long, as everywhere at a type parameter)
+  (let [far (b9/far9)]
+    (is (= "far:x" (d/.invoke far "x") (dynamic #'d/.invoke [far "x"]) (b9/.invoke far "x")))
+    (is (= "far:x" (eval-here '(d/.invoke (fx.r9b.Far9.) "x")))))
+  (testing "an object of a class that is in no package"
+    (let [f (reify kotlin.jvm.functions.Function1 (invoke [_ x] (str "r:" x)))]
+      (is (= "r:x" (d/.invoke f "x") (dynamic #'d/.invoke [f "x"])))))
+  (testing "a function that Kotlin returned, wrapped as a Clojure function: the call still goes to the Kotlin function"
+    (let [g (d/adder9 10)]
+      (is (= 11 (d/.invoke g (int 1))))))
+  (testing "a receiver that is no function"
+    (is (error-has? (dynamic #'d/.invoke ["s" "x"]) "no Kotlin declaration of `.invoke` fits"))))
+
+(deftest b2-the-usual-argument-checks
+  (testing "the number of arguments"
+    (is (error-has? (dynamic #'d/.invoke [router "a" "b"]) "no Kotlin declaration of `.invoke` fits"))
+    (is (error-has? (dynamic #'d/.invoke [calc 3]) "no Kotlin declaration of `.invoke` fits")))
+  (testing "nil for a non-null parameter, a value of another class"
+    (let [r (dynamic #'d/.invoke [router nil])]
+      (is (error-has? r "no Kotlin declaration of `.invoke` fits" "`nil` passed to non-nullable `p1`") r))
+    (let [r (dynamic #'d/.invoke [router 1.5])]
+      (is (error-has? r "operator fun fx.r9.Router9.invoke(p1: String): String" "`p1` is String but got Double") r)))
+  (testing "a value class parameter takes the object, not the underlying value"
+    (is (error-has? (dynamic #'d/.invoke [(d/idFn9) 4]) "`p1` is Id9 but got Long")))
+  (testing "a receiver that is no function"
+    (is (error-has? (dynamic #'d/.invoke ["s" "x"]) "no Kotlin declaration of `.invoke` fits"))))
+
+(deftest b2-the-declaration-is-listed
+  (let [sigs (map :signature (filter :fn-supertype (:kt/decls (meta #'d/.invoke))))]
+    (is (some #(str/includes? % "operator fun fx.r9.Router9.invoke(p1: String): String  [from (String) -> String]") sigs))
+    (is (some #(str/includes? % "operator suspend fun fx.r9.SRouter9.invoke(p1: String): String  [from suspend (String) -> String]") sigs))
+    (is (some #(str/includes? % "operator fun fx.r9.Calc9.invoke(p1: Int, p2: Int): Int  [from (Int, Int) -> Int]") sigs))
+    (is (some #(str/includes? % "operator fun fx.r9.Eff9.invoke(): Unit  [from () -> Unit]") sigs))))
+
+(deftest b2-nothing-else-changed
+  (testing "another invoke of the package fits as well: a member, an extension, and one for another class"
+    (is (= "doer:x" (d/.invoke (d/doer9) "x") (dynamic #'d/.invoke [(d/doer9) "x"])))
+    (is (= "doer-ext:12" (d/.invoke (d/doer9) 1 2)))
+    (is (= "ext-int:5" (d/.invoke router 5) (dynamic #'d/.invoke [router 5])) "the extension of Router9 with an Int")
+    (is (= "routed:5:r" (d/.invoke router "5")) "the inherited member with a String"))
+  (testing "companion invokes are still members of the same var"
+    (is (= "GET /a" (.getText (d/.invoke d/Req9 "GET" "/a"))))
+    (is (= "obj-invoke:1" (d/.invoke d/Obj9 1))))
+  (testing "a class that writes its own override: the same call"
+    (is (= "routed:o:r" (d/.invoke router "o"))))
+  (testing "a package that no class declares an invoke in has no `.invoke` var"
+    (kt/require '[fx.r5far :as far5])
+    (is (nil? (ns-resolve (the-ns 'ckway.pkg.fx.r5far) (symbol ".invoke"))))))
+
+(def r9router router)
+
 ;; ---------------------------------------------------------------- B3
 
 ;; `val Prop9.Companion.zero9`, `var Prop9.Companion.level9`: the class var is the receiver, as it is for the members of a

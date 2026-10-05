@@ -1515,6 +1515,11 @@
   (let [fit (filter lambda-hints-fit? best)]
     (if (and (seq fit) (some (fn [b] (some (comp :fn-hints :info) (:items b))) best)) (vec fit) best)))
 
+(defn- generic-function-invoke?
+  "Is `d` the `invoke(p1: P1, ...): R` that the JVM interface `kotlin.jvm.functions.FunctionN` declares?"
+  [d]
+  (boolean (and (= "invoke" (:name d)) (some? (re-matches #"kotlin\.jvm\.functions\.Function\d+" (str (:owner d)))))))
+
 (defn- choose*
   "Pick exactly one declaration (rule 7). `trailing?` allows the binding of a trailing lambda (`bind`).
   => {:decl d :items items :checks checks [:tform form]}      one candidate
@@ -1549,6 +1554,12 @@
               (reasons-text var-name args (map #(hash-map :decl (:decl %) :reason (:error %)) failed)))
             {:kt/candidates (map :signature decls)}))
     (let [checked (for [b ok :let [sl (slots (:decl b))]] (assoc b :checks (check-items sl (:items b))))
+          ;; the generic `Function1.invoke(p1: P1)` of a class that implements a function type is for the objects of the classes
+          ;; that have no `invoke` of their own with the types of the supertype (`ckway.meta/function-type-invoke`): where
+          ;; the receiver fits one of those, the arguments are checked against the types of the supertype, not as `P1`
+          checked (if (some #(and (:fn-supertype (:decl %)) (= :ok (first (first (:checks %))))) checked)
+                    (remove #(generic-function-invoke? (:decl %)) checked)
+                    checked)
           no-reason (fn [b] (some #(when (= :no (first %)) (second %)) (:checks b)))
           ;; a member that the class of the receiver overrides is no candidate for that receiver: the override is the
           ;; member, also when the arguments do not fit it (`Two : A<Int>` with `f(x: Int)`: `A<T>.f(x: T)` is gone)
