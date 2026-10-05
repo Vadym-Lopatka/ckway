@@ -43,25 +43,44 @@
 (defn- static-field-value [cname fname]
   (.get (.getField ^Class (resolve/jvm-class cname) ^String fname) nil))
 
+(defn- companion-invokes
+  "The `operator fun invoke` declarations that Kotlin calls for `Name(...)` when the class `Name` has no constructor that
+  fits: the members of its companion object, and the extensions on its Companion that the package declares. The
+  declarations of the same package only. Only for a class var."
+  [all-invokes decls]
+  (when-let [owner (:owner (first (filter #(and (= :class (:kind %)) (not (:alias (:flags %)))) decls)))]
+    (vec (for [d all-invokes
+               :let [rs (:receivers d)]
+               :when (and (= :function (:kind d)) (contains? (:flags d) :operator) (= 1 (count rs))
+                          (= owner (:companion-of (first rs))))]
+           d))))
+
 (defn- var-meta
   "The metadata of a var. A type alias (`:kind :alias` among the declarations) is a name that the package declares:
   the var means the target. Its calls are the constructors of the target class (the declarations that the index
   adds after the alias), `:kt/alias` ({:params :type}) is what a type form expands it to (`ckway.types`)."
-  [pkg nsym var-name all-decls]
+  [pkg nsym var-name all-decls all-invokes]
   (let [alias (first (filter #(= :alias (:kind %)) all-decls))
         decls (vec (remove #(= :alias (:kind %)) all-decls))
         cls (first (filter #(and (= :class (:kind %)) (not (:alias (:flags %)))) decls))
-        obj (first (filter #(= :object (:kind %)) decls))]
+        obj (first (filter #(= :object (:kind %)) decls))
+        invokes (companion-invokes all-invokes decls)]
     (cond-> {:doc (doc-text pkg all-decls)
              :arglists (list* (distinct (map arglist decls)))
              :kt/decls decls :kt/package pkg :kt/cache (rt/new-cache)}
       alias (assoc :kt/alias (:alias alias))
       cls (assoc :kt/class (:owner cls))
       obj (assoc :kt/object (:owner obj))
+      (seq invokes) (assoc :kt/invokes invokes)
       (= :fn (kind-of decls))
       (assoc :inline (fn [& args] `(ckway.resolve/kt-call (var ~(symbol (str nsym) var-name)) ~@args)))
       ;; an object or an enum entry is a value, not a function: calling it is a compile error that says so
-      (= :value (kind-of decls))
+      ;; an object that has an `operator fun invoke` (its own, inherited, or an extension of the package) is called as in
+      ;; Kotlin: `Foo(1)` is `Foo.invoke(1)`
+      (and obj (resolve/object-invoke? obj all-invokes))
+      (assoc :inline (fn [& args]
+                       `(ckway.resolve/kt-call (var ~(symbol (str nsym) ".invoke")) ~(resolve/var-form (ns-resolve nsym (symbol var-name))) ~@args)))
+      (and (not (and obj (resolve/object-invoke? obj all-invokes))) (= :value (kind-of decls)))
       (assoc :inline (fn [& args]
                        (resolve/fail (str "kt: `" var-name "` is "
                                           (if (= :object (:kind (first decls))) "an object" "an enum entry")
@@ -121,7 +140,7 @@
       ;; a name that the namespace already refers to as a class (java.lang.Exception, for the alias
       ;; `kotlin.Exception`) is replaced by the var, without Clojure's warning
       (when (class? (get (ns-map the-ns) (symbol var-name))) (ns-unmap the-ns (symbol var-name)))
-      (let [^clojure.lang.Var v (intern the-ns (with-meta (symbol var-name) (var-meta pkg nsym var-name (with-factories idx all-decls))))]
+      (let [^clojure.lang.Var v (intern the-ns (with-meta (symbol var-name) (var-meta pkg nsym var-name (with-factories idx all-decls) (get idx ".invoke"))))]
         (.bindRoot v (var-root v (:kt/decls (meta v))))
         (when (instance? ckway.rt.FailedObject (.getRawRoot v)) (alter-meta! v assoc :kt/failed true))))
     nsym))

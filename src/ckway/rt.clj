@@ -114,7 +114,7 @@
        "char" (to-char what v)
        "boolean" (to-bool what v)
        ("java.lang.Integer" "java.lang.Long" "java.lang.Short" "java.lang.Byte" "java.lang.Double"
-        "java.lang.Float" "java.lang.Character") (box what n v)
+                            "java.lang.Float" "java.lang.Character") (box what n v)
        v))))
 
 (defn ->array
@@ -243,6 +243,15 @@
                    (when receiver? (same-name-hint site (class v))))
               {:kt/wrong-class (.getName (class v))}))))
 
+(defn nn-arg
+  "`v`, or a kt error when it is nil: the parameter is a type parameter with a non-null bound (`T : Any`), so Kotlin
+  takes no nil. `site` = {:call :sig :what :bound}; the static path calls it for a nil that it could not see at compile time."
+  [site v]
+  (if (nil? v)
+    (r/fail (str "kt: " (when (:call site) (str (:call site) ": ")) "nil where Kotlin expects a non-null value of the type parameter `"
+                 (:bound site) "` (" (:what site) ")" (when (:sig site) (str "\n  Kotlin: " (:sig site)))))
+    v))
+
 (defn check-obj
   "`v` if it fits the object descriptor `td` ({:k :obj :cls :text :nullable?}), else a kt error that names the
   Kotlin type and the class of `v`. `where` (optional) says which value it is, for example \"the result of the Clojure function\"."
@@ -282,9 +291,9 @@
 (def ^:private fn-invoke-method
   "Documented cache: arity -> the invoke Method of kotlin.jvm.functions.FunctionN."
   (mt/memo ::fn-invoke-method
-   (fn [n]
-     (.getMethod ^Class (r/jvm-class (str "kotlin.jvm.functions.Function" n)) "invoke"
-                 ^"[Ljava.lang.Class;" (into-array Class (repeat n Object))))))
+           (fn [n]
+             (.getMethod ^Class (r/jvm-class (str "kotlin.jvm.functions.Function" n)) "invoke"
+                         ^"[Ljava.lang.Class;" (into-array Class (repeat n Object))))))
 
 (defn- fn-iface-arity
   "Arity of the JVM FunctionN that a function descriptor stands for (a suspend function takes the Continuation too)."
@@ -349,7 +358,7 @@
            ~@(for [k (range (inc max-reify-arity))]
                `(~'invoke [~'_ ~@(vars k)] (invoke-wrapped ~g ~td ~(vars k))))
            (~'invoke [~'_ ~@(vars max-reify-arity) ~more]
-            (invoke-wrapped ~g ~td (into ~(vars max-reify-arity) (seq ~more))))
+             (invoke-wrapped ~g ~td (into ~(vars max-reify-arity) (seq ~more))))
            (~'applyTo [~'_ args#] (invoke-wrapped ~g ~td (vec (seq args#))))
            (~'call [~'_] (invoke-wrapped ~g ~td []))
            (~'run [~'_] (invoke-wrapped ~g ~td []) nil)
@@ -359,7 +368,7 @@
 (def ^:private wrapper-factory
   "Documented cache: JVM arity -> (fn [g td] wrapper), compiled once with `eval` (like `adapter-factory`)."
   (mt/memo ::wrapper-factory
-   (fn [m] (binding [*ns* (the-ns 'ckway.rt)] (eval (wrapper-form m))))))
+           (fn [m] (binding [*ns* (the-ns 'ckway.rt)] (eval (wrapper-form m))))))
 
 (deftype KtFn [g td]
   InvocationHandler
@@ -409,6 +418,24 @@
         (ifn? g) true
         :else (r/fail (str "kt: expected a function for a parameter of type " (.getName iface) ", got " (.getName (class g))))))
 
+(defn result-error
+  "The error for the value that a Clojure function returned where Kotlin expects another one: `e`, a kt error of the
+  conversion (`->kotlin`, `adapt?`, the check of a value class), now says where it came from: `what` names the member of
+  a `kt/reify`. Any other exception, and an error that already says it, is returned unchanged."
+  [^clojure.lang.ExceptionInfo e what]
+  (let [d (ex-data e)]
+    (if (and (:kt/error d) (not (:kt/result d)))
+      (ex-info (str "kt: the result of " what " is wrong: " (let [m (ex-message e)] (if (.startsWith ^String m "kt: ") (subs m 4) m)))
+               (assoc d :kt/result what) e)
+      e)))
+
+(defn nil-result
+  "nil that a `kt/reify` member returned where Kotlin expects a function: it is a value of a nullable type only."
+  [nullable? text]
+  (when-not nullable?
+    (r/fail (str "kt: expected a function (" text "), got nil: the Kotlin type is not nullable")))
+  nil)
+
 (defn arity-error
   "The error for a Clojure function of the wrong arity that Kotlin called. `e` is the
   ArityException, `g` the Clojure function, `text` what Kotlin called (a Kotlin function type or
@@ -429,10 +456,10 @@
   real class: a checked exception that the Clojure function throws reaches Kotlin as itself
   (a java.lang.reflect.Proxy would wrap it in UndeclaredThrowableException)."
   (mt/memo ::adapter-factory
-   (fn [spec]
-     (let [g (gensym "g")]
-       (binding [*ns* (the-ns 'ckway.rt)]
-         (eval `(fn [~g] ~((case (:kind spec) :fn r/fn-reify :fi r/fi-reify) spec g {}))))))))
+           (fn [spec]
+             (let [g (gensym "g")]
+               (binding [*ns* (the-ns 'ckway.rt)]
+                 (eval `(fn [~g] ~((case (:kind spec) :fn r/fn-reify :fi r/fi-reify) spec g {}))))))))
 
 (defn adapt-arg
   "Value for a parameter of a function type or fun interface (`spec`, see
@@ -460,6 +487,8 @@
       (= :unit k) kotlin.Unit/INSTANCE
       (nil? v) (cond (and (kind-names k) (not (:nullable? td)))
                      (r/fail (str "kt: nil where Kotlin expects a non-null " (kind-names k)))
+                     (and (#{:fn :fi} k) (not (:nullable? td)))
+                     (r/fail (str "kt: nil where Kotlin expects a non-null function" (when-let [t (:text td)] (str " (" t ")"))))
                      (= :obj k) (check-obj td v)
                      :else nil)
       :else
@@ -525,17 +554,17 @@
 (def ^:private find-member
   "Documented cache: [class name desc] -> reflective member."
   (mt/memo ::find-member
-   (fn [cname mname desc]
-     (let [^Class c (r/jvm-class cname)
-           m (cond
-               (= "<init>" mname)
-               (first (filter #(= desc (descriptor Void/TYPE (.getParameterTypes ^Constructor %))) (.getDeclaredConstructors c)))
-               :else
-               (first (filter #(and (= mname (.getName ^Method %))
-                                    (= desc (descriptor (.getReturnType ^Method %) (.getParameterTypes ^Method %))))
-                              (.getDeclaredMethods c))))]
-       (or (some-> ^java.lang.reflect.AccessibleObject m (doto (.trySetAccessible)))
-           (r/fail (str "kt: JVM member not found: " cname "." mname desc)))))))
+           (fn [cname mname desc]
+             (let [^Class c (r/jvm-class cname)
+                   m (cond
+                       (= "<init>" mname)
+                       (first (filter #(= desc (descriptor Void/TYPE (.getParameterTypes ^Constructor %))) (.getDeclaredConstructors c)))
+                       :else
+                       (first (filter #(and (= mname (.getName ^Method %))
+                                            (= desc (descriptor (.getReturnType ^Method %) (.getParameterTypes ^Method %))))
+                                      (.getDeclaredMethods c))))]
+               (or (some-> ^java.lang.reflect.AccessibleObject m (doto (.trySetAccessible)))
+                   (r/fail (str "kt: JVM member not found: " cname "." mname desc)))))))
 
 (defn- unboxer
   "Function that gives the underlying value of a value-class object (conversion `{:vc :nullable? :name}`)."
@@ -745,17 +774,57 @@
     (loop [i (count pos) s (seq named)] (when s (aset a i (val (first s))) (recur (inc i) (next s))))
     a))
 
+(defn- collection? [x] (or (sequential? x) (set? x) (instance? java.util.Collection x)))
+
+(defn- elements
+  "The infos (`r/value-info`) of the elements of the collection `x`, for the selection of a `vararg` that takes it as a
+  whole; nil for anything that is no collection with elements."
+  [x]
+  (when (collection? x) (some->> (seq x) (mapv r/value-info))))
+
+(declare prepare-call)
+
+(defn- element-call
+  "The prepared call for a selection that the elements of a collection passed as a whole to a `vararg` decide (`choose*`:
+  `:kt/elements-needed`). The classes of the values do not decide it, so the call of the cache is this function, which
+  selects again for each call, and keeps what it selected under the classes of the ELEMENTS (at most `cache-bound`)."
+  [v decls n names lits]
+  (let [cache (new-cache)]
+    (fn [^objects a]
+      (let [pos (vec (take n a))
+            named (mapv vector names (drop n a))
+            key (mapv (fn [[_ x]] (when (collection? x) (into #{} (map arg-part) (seq x)))) named)
+            call (cached cache key #(prepare-call v decls pos named lits true))]
+        (call a)))))
+
 (defn- prepare-call
-  "Select and plan the call of the var `v` for the values `pos`/`named` (as in `call-dyn`), prepare it."
-  [^clojure.lang.Var v decls pos named lits]
-  (let [var-name (str (.sym v))
-        n (count pos)
-        info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k) :val x)))
-        parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
-                :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (info k x) :idx (+ n i)}]) named))}
-        {:keys [decl items checks]} (r/choose var-name decls parsed false)]
-    (r/check-supported! decl checks)
-    (prepare (r/plan decl items))))
+  "Select and plan the call of the var `v` for the values `pos`/`named` (as in `call-dyn`), prepare it. `elems?`: the
+  elements of a collection that is passed as a whole to a `vararg` are looked at (see `element-call`)."
+  ([v decls pos named lits] (prepare-call v decls pos named lits false))
+  ([^clojure.lang.Var v decls pos named lits elems?]
+   (let [var-name (str (.sym v))
+         n (count pos)
+         info (fn [k x] (cond-> (r/value-info x) (and (contains? lits k) (some? x)) (assoc :lit (get lits k) :val x)))
+         parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
+                 :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (cond-> (info k x) elems? (as-> inf (if-let [es (elements x)] (assoc inf :elems es) inf))) :idx (+ n i)}]) named))
+                 :strict-elems elems?}]
+     (try (let [invokes (:kt/invokes (meta v))
+                root (when (seq invokes) (.getRawRoot v))
+                {:keys [decl items checks via-invoke]}
+                (r/choose-call var-name decls invokes parsed #(r/with-class-first % (r/var-form v) (r/value-info root)) false)]
+            (r/check-supported! decl checks)
+            (let [call (prepare (r/plan decl items))]
+              ;; the class var is the receiver of the companion `invoke`: the first value
+              (if via-invoke
+                (fn [^objects a] (let [b (object-array (inc (alength a)))]
+                                   (aset b 0 root)
+                                   (System/arraycopy a 0 b 1 (alength a))
+                                   (call b)))
+                call)))
+          (catch clojure.lang.ExceptionInfo e
+            (if (and (not elems?) (:kt/elements-needed (ex-data e)))
+              (element-call v decls n (mapv first named) lits)
+              (throw e)))))))
 
 (declare call-dyn)
 
