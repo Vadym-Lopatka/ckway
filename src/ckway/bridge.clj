@@ -374,9 +374,10 @@
 
 (defn kotlin-bridge-class
   "The Class of the Kotlin bridge described by `spec` {:readable :identity :source (fn [cname] text)
-  :stamp-classes [binary ...] :what text-for-errors}. See the namespace docstring. The first of
-  :stamp-classes is the class of the declaration (it decides the JVM target)."
-  ^Class [{:keys [readable identity source stamp-classes what]}]
+  :stamp-classes [binary ...] :what text-for-errors :before-compile (fn [])}. See the namespace docstring. The first of
+  :stamp-classes is the class of the declaration (it decides the JVM target). `:before-compile` is called when the
+  compiler is about to run (no stored bridge was found): it may throw."
+  ^Class [{:keys [readable identity source stamp-classes what before-compile]}]
   (let [cname (class-name "K" readable identity)]
     (cond
       (and (not *compile-files*) (get @installed cname)) (get @installed cname)
@@ -403,7 +404,8 @@
                              (cache/discard! dir cname base cv)
                              nil)))]
             (or hit
-                (let [compile-source (requiring-resolve 'ckway.bridge.kotlinc/compile-source)
+                (let [_ (when before-compile (before-compile))
+                      compile-source (requiring-resolve 'ckway.bridge.kotlinc/compile-source)
                       r (try (compile-source what (str (subs cname (inc (.lastIndexOf ^String cname "."))) ".kt") text {:jvm-target target})
                              (catch clojure.lang.ExceptionInfo e
                                (throw (if (:kt/compile-failed (ex-data e))

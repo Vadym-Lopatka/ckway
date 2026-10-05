@@ -213,9 +213,11 @@
     (is (= "k1" (f/useStrFn (fn [k] (str "k" k))))))
   (testing "a kt/reify member"
     (let [o (kt/reify f/VcBoth (.adjust [this u] nil))]
-      (is (= "kt: nil where Kotlin expects a non-null fx.Meters" (ex-message (thrown #(f/useBoth o (m 1)))))))
+      ;; the error names the member (round9-test B4)
+      (is (= "kt: the result of the kt/reify member `VcBoth.adjust` (fx.Meters) is wrong: nil where Kotlin expects a non-null fx.Meters"
+             (ex-message (thrown #(f/useBoth o (m 1)))))))
     (let [o (kt/reify f/StrFn (.text [this k] 7))]
-      (is (str/starts-with? (ex-message (thrown #(f/useStrFn o))) "kt: expected String"))))
+      (is (str/starts-with? (ex-message (thrown #(f/useStrFn o))) "kt: the result of the kt/reify member `StrFn.text` (String) is wrong: expected String"))))
   (testing "a generic position (T) is left alone"
     (is (= 2 (f/useConvT (fn [x] (inc x)) 1)))))
 

@@ -183,8 +183,19 @@
     (when (= (count jts) (count ks))
       (mapv (fn [k jt] (assoc k :jvm-type jt)) ks jts))))
 
+(defn- own-and-function-type [^Class c]
+  ;; `Filter : (Handler) -> Handler` has the `invoke` of its function type: with the types of the supertype, which the
+  ;; generic `invoke` of `Function1` that the chain also holds does not know. A value class is the box in a generic position.
+  (concat (meta/own-declarations c)
+          (for [d (meta/function-type-decls c)]
+            (update d :params (fn [ps] (mapv #(if (:value-class? (:type %))
+                                                (assoc % :type {:class "kotlin/Any" :nullable? true :args [] :value-class? false
+                                                                :fun-interface? false :fn-type nil :alias nil :type-param nil})
+                                                %)
+                                             ps))))))
+
 (defn- kotlin-members [^Class c]
-  (for [d (meta/own-declarations c)
+  (for [d (own-and-function-type c)
         :when (and (#{:function :property} (:kind d)) (some #(= :dispatch (:role %)) (:receivers d)))
         m (case (:kind d)
             :function
@@ -440,29 +451,62 @@
     :java (:ret-jvm m)
     (:return (meta/desc-types (:desc (:jvm m))))))
 
-(defn- result-form
-  "The form that converts the value of `body` to what the JVM method of `m` returns (as function adapters do)."
-  [m body]
+(defn- member-text
+  "The member as an error says it: the kt/reify member `Gen9.fn1`, with its Kotlin type."
+  [m]
+  (str "the kt/reify member `" (simple-name (:iface m)) "." (str/replace (:key m) #"^\." "") "`"
+       (when-let [t (:ret m)] (str " (" (meta/type-text t) ")"))))
+
+(defn- java-sam?
+  "Is the JVM class `jt` an interface with one abstract method (`Runnable`, `java.util.function.Supplier`)?"
+  [^String jt]
+  (boolean (when-let [^Class c (r/jvm-class jt)] (and (.isInterface c) (r/sam-of jt)))))
+
+(defn- convert-form
+  "The form that converts the value in the local `r` to what the JVM method of `m` returns (as function adapters do), or
+  `r` itself when nothing is converted."
+  [m r]
   (let [jt (ret-jvm-name m)]
     (case (:kind m)
-      :set `(do ~body nil)
-      :java (cond (= "void" jt) `(do ~body nil)
-                  (r/jvm-descriptor jt) `(ckway.rt/->kotlin ~(r/jvm-descriptor jt) ~body)
-                  :else body)
+      :set `(do ~r nil)
+      :java (cond (= "void" jt) `(do ~r nil)
+                  (r/jvm-descriptor jt) `(ckway.rt/->kotlin ~(r/jvm-descriptor jt) ~r)
+                  ;; a Java single-method interface: a Clojure function is adapted, as at a parameter (nil is a value: a
+                  ;; Java type says nothing about null)
+                  (java-sam? jt) `(if (nil? ~r) nil ~(first (r/adapter-form (r/fi-spec jt jt) jt r)))
+                  :else r)
       (let [t (:ret m)
             td (r/type-descriptor t)
             vc (when-not (:suspend? m) (r/vc-conv t jt))]
         (cond
-          vc (r/unbox-form (assoc vc :name "result" :result? true) body)
+          vc (r/unbox-form (assoc vc :name "result" :result? true) r)
           (#{:fn :fi} (:k td))
           (let [iface (if (:fn-type t)
                         (str "kotlin.jvm.functions.Function" (cond-> (:arity td) (:suspend? td) inc))
                         (:class td))]
-            (first (r/adapter-form (r/adapter-spec t iface (:signature m)) iface body)))
-          (= :unit (:k td)) `(do ~body kotlin.Unit/INSTANCE)
-          (number-kinds (:k td)) `(ckway.rt/->kotlin ~td ~body)
-          (r/check-result? td (:suspend? m)) `(ckway.rt/->kotlin ~td ~body)
-          :else body)))))
+            ;; nil is a value only for a nullable type; a value that is no function is a kt error (`ckway.rt/adapt?`)
+            `(if (nil? ~r)
+               (ckway.rt/nil-result ~(boolean (:nullable? td)) ~(:text td (meta/type-text t)))
+               ~(first (r/adapter-form (r/adapter-spec t iface (:signature m)) iface r))))
+          (= :unit (:k td)) `(do ~r kotlin.Unit/INSTANCE)
+          (number-kinds (:k td)) `(ckway.rt/->kotlin ~td ~r)
+          (r/check-result? td (:suspend? m)) `(ckway.rt/->kotlin ~td ~r)
+          :else r)))))
+
+(defn- result-form
+  "The form that converts the value of `body` to what the JVM method of `m` returns (as function adapters do). A value
+  that cannot be the declared type is a kt error that names the member (`ckway.rt/result-error`), at the point of return."
+  [m body]
+  (let [r (gensym "r")
+        conv (convert-form m r)]
+    (cond
+      (= conv r) body
+      (or (= :set (:kind m)) (and (= :java (:kind m)) (= "void" (ret-jvm-name m)))) `(do ~body nil)
+      (and (:ret m) (= :unit (:k (r/type-descriptor (:ret m))))) `(do ~body kotlin.Unit/INSTANCE)
+      :else `(let [~r (clojure.core/identity ~body)]
+               (try ~conv
+                    (catch clojure.lang.ExceptionInfo e#
+                      (throw (ckway.rt/result-error e# ~(member-text m)))))))))
 
 (defn- bind-symbol
   "The user's parameter symbol with the Kotlin type as a hint when the user wrote none. A primitive hint

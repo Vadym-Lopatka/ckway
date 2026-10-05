@@ -266,10 +266,14 @@
   (is (= "Int:0" (r3/sp :d (int-array 0)))))
 
 (deftest vararg-collection-whose-elements-cannot-be-seen-says-so
-  (doseq [m [(compile-error '(clojure.core/let [xs (clojure.core/vec (clojure.core/identity ["a" "b"]))] (r3/sp :d xs)))
-             (dyn-message #'r3/sp [] {"d" ["a" "b"]})]]
+  ;; the elements of a collection that the compiler knows nothing about are seen at run time (round9_test, A3)
+  (is (= (r3/kSpStrs) (r3/sp :d (clojure.core/vec (clojure.core/identity ["a" "b"])))))
+  (is (= (r3/kSpStrs) (rt/call-dyn #'r3/sp [] {"d" ["a" "b"]} {})))
+  ;; an empty collection has no element to see
+  (doseq [m [(compile-error '(clojure.core/let [xs (clojure.core/vec (clojure.core/identity []))] (r3/sp :d xs)))
+             (dyn-message #'r3/sp [] {"d" []})]]
     (is (str/includes? m "ambiguous") m)
-    (is (str/includes? m "element type of the collection") m)
+    (is (str/includes? m "an empty collection") m)
     (is (str/includes? m "positionally") m)
     (is (str/includes? m "typed array") m)
     (is (not (str/includes? m "Add a type hint")) m)))
