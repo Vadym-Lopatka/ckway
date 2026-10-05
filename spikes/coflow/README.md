@@ -114,6 +114,7 @@ handler is no longer free when the value arrives (an `alts!!` took another branc
 the next take gets it first, so it is never lost or reordered. The stash counts as one slot of the capacity for the sliding
 and dropping ports (the flow's own report and error channels are sliding): when buffer plus stash is full, a sliding port drops
 the stash (the oldest) and a dropping port drops the new value.
+**Open (found under CPU load, 1 failure in about 10 runs of `item-3-abandoned-takes-never-lose-or-reorder-and-add-no-capacity`):** on a sliding port, a send that races the pump's receive can leave the port with its capacity plus one (101 values instead of the newest 100). Order and "nothing lost" hold. Cause: the count of the Kotlin channel is decremented after the pump's receive returns, so a send in between sees a stale count. Not fixed.
 **What is left:** a *fixed-buffer* port that a user builds with `chan/port` can hold one value more than its capacity in this case.
 Why it cannot go: a Kotlin `Channel` has no peek, so a value has to leave the channel before a handler can be offered it; to count
 it we would have to make the suspending `send` of the Kotlin channel refuse while the stash is full, and `Channel.send` has no

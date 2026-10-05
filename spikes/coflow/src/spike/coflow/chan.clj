@@ -126,7 +126,8 @@
                 ^ConcurrentLinkedQueue putters
                 ^AtomicBoolean putting
                 ^AtomicReference put-job
-                ^Channel put-wake]                 ;; conflated: room may exist now (a receive happened), or the port closed
+                ^Channel put-wake
+                ^AtomicBoolean recv-active]       ;; the pump is in (or just out of) its receive: a take! must not receive in parallel (order)                 ;; conflated: room may exist now (a receive happened), or the port closed
   impl/ReadPort
   (take! [p handler]
     (let [^Lock h handler]
@@ -143,6 +144,12 @@
 
             (.get drained)
             (do (commit-now h) (box nil))
+
+            ;; the pump may hold or receive a value right now: wait in the queue, so that values go out in order
+            (and (.get recv-active) (impl/blockable? h))
+            (do (.add takers h)
+                (kch/.trySend wake true)
+                nil)
 
             :else
             (do
@@ -246,7 +253,8 @@
              (AtomicReference. nil)
              (ConcurrentLinkedQueue.) (AtomicBoolean. false) (AtomicReference. nil)
              ;; Kotlin: Channel<Unit>(Channel.CONFLATED)
-             (kch/Channel (kch/CONFLATED kch/Channel))))))
+             (kch/Channel (kch/CONFLATED kch/Channel))
+             (AtomicBoolean. false)))))
 
 ;; --- writing from Clojure (internal use of the flow, and helpers) -------------------------------------------
 
@@ -388,7 +396,7 @@
               (if first?
                 ;; the value is in our hand: a waiting taker gets it, else it becomes the stash. One lock, so
                 ;; raw-try-send! never sees a stash that is only on its way to a taker.
-                (if-let [cb (next-taker-cb (.-takers p))]
+                (if-let [cb (do (.set ^AtomicBoolean (.-recv-active p) false) (next-taker-cb (.-takers p)))]
                   [cb v]
                   (do (.set ^AtomicReference (.-stash p) [v]) :wait))
                 (let [st (.get ^AtomicReference (.-stash p))]
@@ -438,7 +446,7 @@
   (loop []
     (let [what (with-plock p
                  (cond
-                   (has-active-taker? (.-takers p)) :go
+                   (has-active-taker? (.-takers p)) (do (.set ^AtomicBoolean (.-recv-active p) true) :go)
                    (kch/isClosedForSend (.-ch p)) (do (.set ^AtomicBoolean (.-pumping p) false) :exit)
                    :else :wait))]
       (case what
@@ -447,9 +455,10 @@
         :wait (do (kch/.receive (.-wake p)) (recur))
         :go (let [v (pump-recv p)]
               (cond
-                (identical? v ::wake) (recur)
+                (identical? v ::wake) (do (with-plock p (.set ^AtomicBoolean (.-recv-active p) false)) (recur))
                 (identical? v ::closed)
                 (let [cbs (with-plock p
+                            (.set ^AtomicBoolean (.-recv-active p) false)
                             (.set ^AtomicBoolean (.-drained p) true)
                             (loop [acc []]
                               (if-let [cb (next-taker-cb (.-takers p))] (recur (conj acc cb)) acc)))]
