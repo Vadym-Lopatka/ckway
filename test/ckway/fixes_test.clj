@@ -166,7 +166,10 @@
     (is (= 3 (f/lenOf "abc")))
     (is (= 2.5 (f/half 5)))
     (is (true? (f/flip false)))
-    (is (instance? NullPointerException (thrown #(f/.weigh nilv))) "nil receiver: unchanged")))
+    ;; (D3) a nil that only the run time knows at a receiver that is not nullable is a kt error, not a NullPointerException
+    (let [msg (ex-message (thrown #(f/.weigh nilv)))]
+      (is (str/includes? msg "nil where Kotlin expects a non-null") msg)
+      (is (str/includes? msg "(the receiver)") msg))))
 
 (deftest known-types-emit-no-check
   (testing "a literal: no instance? check in the expansion"

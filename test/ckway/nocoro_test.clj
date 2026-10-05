@@ -26,6 +26,14 @@
   (testing "the same on the dynamic path"
     (is (= "plainboom" (ex-message (thrown #(rt/call-dyn #'p/plainFail [] {})))))))
 
+(deftest a-suspend-call-that-returns-a-value-class-without-kotlinx
+  ;; a call that suspended gives the object, a call that returned at once the underlying value: both give the object
+  (is (= "fxs.PlainVc" (.getName (class (p/plainVcAsync "a")))))
+  (is (= "fxs.PlainVc" (.getName (class (p/plainVcSync "a")))))
+  (is (= "a" (p/plainVcValue (p/plainVcSync "a"))))
+  (is (= "a" (p/plainVcValue (rt/call-dyn #'p/plainVcAsync ["a"] {}))))
+  (is (= "a" (p/plainVcValue (rt/call-dyn #'p/plainVcSync ["a"] {})))))
+
 (deftest adapters-without-kotlinx
   (testing "a Clojure function as a suspend function type; the body runs on a virtual thread"
     (is (= 3 (p/runPlain (fn [x] (p/plainAsync (p/plainAsync x))))))
