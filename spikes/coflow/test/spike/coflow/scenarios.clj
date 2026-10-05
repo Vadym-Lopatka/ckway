@@ -482,16 +482,16 @@
       {:accepted-before-block accepted :seen out})))
 
 (defn backpressure-sliding []
-  (let [gate (promise) seen (atom [])
+  (let [gate (promise) seen (atom []) entered (promise)
         step (flow/map->step
               {:describe (fn [] {:ins {:in ""}})
                :init (fn [_] {})
-               :transform (fn [s _ m] (deref gate T nil) (swap! seen conj m) [s nil])})
+               :transform (fn [s _ m] (deliver entered true) (deref gate T nil) (swap! seen conj m) [s nil])})
         [g report error] (mk {:procs {:p {:proc (flow/process step) :chan-opts {:in {:buf-or-n (a/sliding-buffer 2)}}}} :conns []})]
     (flow/resume g)
     @(flow/inject g [:p :in] [0])
     ;; give the proc the time to take 0 (it blocks in the step on the gate)
-    (let [ping (flow/ping-proc g :p :timeout-ms 5000)]
+    (let [_ (deref entered T nil)]
       (doseq [i (range 1 10)] (deref (flow/inject g [:p :in] [i]) 1000 ::blocked))
       (deliver gate true)
       (await-count seen 3 T)
@@ -500,15 +500,15 @@
         {:seen out}))))
 
 (defn backpressure-dropping []
-  (let [gate (promise) seen (atom [])
+  (let [gate (promise) seen (atom []) entered (promise)
         step (flow/map->step
               {:describe (fn [] {:ins {:in ""}})
                :init (fn [_] {})
-               :transform (fn [s _ m] (deref gate T nil) (swap! seen conj m) [s nil])})
+               :transform (fn [s _ m] (deliver entered true) (deref gate T nil) (swap! seen conj m) [s nil])})
         [g report error] (mk {:procs {:p {:proc (flow/process step) :chan-opts {:in {:buf-or-n (a/dropping-buffer 2)}}}} :conns []})]
     (flow/resume g)
     @(flow/inject g [:p :in] [0])
-    (let [ping (flow/ping-proc g :p :timeout-ms 5000)]
+    (let [_ (deref entered T nil)]
       (doseq [i (range 1 10)] (deref (flow/inject g [:p :in] [i]) 1000 ::blocked))
       (deliver gate true)
       (await-count seen 3 T)

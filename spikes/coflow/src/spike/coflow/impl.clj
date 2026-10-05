@@ -178,13 +178,14 @@
   every other coroutine of the scope (a running transform, an inject) is done. No time limit, as in the original
   (user code is never interrupted). Only if a grace time is set (option or property) is the scope cancelled after it.
   So `stop` does not wait. Returns the Job of the reaper."
-  ^Job [^CoroutineScope scope proc-jobs internals opt-grace]
+  ^Job [^CoroutineScope scope proc-jobs internals kept opt-grace]
   (let [job (scope-job scope)
         grace (grace-ms opt-grace)
         run-all (fn []
                   (doseq [^Job j proc-jobs] (co/.join j))
                   (doseq [p internals] (chan/close-quiet! p))
-                  (doseq [^Job j (children-of job)] (co/.join j))
+                  (let [skip (set (mapcat chan/pump-jobs kept))]
+                    (doseq [^Job j (children-of job) :when (not (contains? skip j))] (co/.join j)))
                   true)]
     ;; Kotlin: GlobalScope.launch(Dispatchers.Default) { withTimeoutOrNull(grace) { ... join ... }; close; job.cancelAndJoin() }
     (co/.launch co/GlobalScope :context (co/Default co/Dispatchers)
@@ -260,6 +261,7 @@
             (let [scope (new-scope)
                   jobs (atom [])
                   taps (atom [])
+                  kept (atom [])
                   control-chan (chan/port scope 10)
                   control-taps (mult scope control-chan)
                   report-chan (chan/port scope (chan/sliding 100))
@@ -323,15 +325,20 @@
                             control-tap (chan/port scope 10)]
                         (tap! control-taps control-tap)
                         (swap! taps conj control-tap)
-                        (let [job (spi/start proc {:pid pid :args (assoc args ::flow/pid pid)
+                        (let [ins-map (assoc (chan-map ins in-chans)
+                                             ::flow/control control-tap
+                                             ::flow/casts (-> pid castees :chan))
+                              outs-map (assoc (chan-map outs out-chans)
+                                              ::flow/error error-chan
+                                              ::flow/report report-chan)
+                              job (spi/start proc {:pid pid :args (assoc args ::flow/pid pid)
                                                    :resolver resolver :cast cast
-                                                   :ins (assoc (chan-map ins in-chans)
-                                                               ::flow/control control-tap
-                                                               ::flow/casts (-> pid castees :chan))
-                                                   :outs (assoc (chan-map outs out-chans)
-                                                                ::flow/error error-chan
-                                                                ::flow/report report-chan)})]
-                          (when (instance? Job job) (swap! jobs conj job))))
+                                                   :ins ins-map :outs outs-map})]
+                          (if (instance? Job job)
+                            (swap! jobs conj job)
+                            ;; a launcher that is not ours (an original ProcLauncher with its own thread): we can not
+                            ;; wait for it, and it may read its ports until its thread ends, so the cleanup leaves its ports open
+                            (swap! kept into (filter chan/port? (concat (vals ins-map) (vals outs-map)))))))
                       (catch Throwable ex
                         (try (chan/send! control-chan #::flow{:command ::flow/stop :to ::flow/all})
                              (catch Throwable _))
@@ -345,6 +352,7 @@
                              :report report-chan, :error error-chan
                              :ins in-chans, :outs out-chans
                              :scope scope :jobs jobs
+                                                          :kept kept
                              :internals #(vec (distinct (concat @taps (map :chan (vals castees)) (vals in-chans)
                                                                 (filter some? (vals out-chans)))))})
               {:report-chan report-chan :error-chan error-chan}))
@@ -352,7 +360,7 @@
       (stop [_]
         (.lock lock)
         (try
-          (when-let [{:keys [report error scope control jobs internals]} @chans]
+          (when-let [{:keys [report error scope control jobs internals kept]} @chans]
             (send-command ::flow/stop ::flow/all)
             ;; the control channel is internal: closing it ends its mult coroutine (the buffered stop is still delivered)
             (chan/close! control)
@@ -361,7 +369,7 @@
             (reset! chans nil)
             ;; Same as the original: stop returns at once. Structured cleanup runs in a reaper coroutine that is not
             ;; part of the flow's scope.
-            (swap! reapers #(conj (filterv (fn [^Job j] (.isActive j)) %) (start-reaper scope @jobs (internals) @grace)))
+            (swap! reapers #(conj (filterv (fn [^Job j] (.isActive j)) %) (start-reaper scope @jobs (remove (set @kept) (internals)) @kept @grace)))
             true)
           (finally (.unlock lock))))
       (pause [_] (send-command ::flow/pause ::flow/all))

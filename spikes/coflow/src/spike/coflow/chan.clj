@@ -214,6 +214,11 @@
 
 (def ^{:doc "Alias of `kotlin-channel`."} ->kotlin kotlin-channel)
 
+(defn pump-jobs
+  "The Jobs of the pump coroutines of a port (the take pump and the put pump) that were started."
+  [^KPort p]
+  (keep identity [(.get ^AtomicReference (.-pump-job p)) (.get ^AtomicReference (.-put-job p))]))
+
 (defn port?
   [x] (instance? KPort x))
 

@@ -8,7 +8,8 @@
             [spike.coflow.arms :as arms]
             [spike.coflow.chan :as cc]
             [spike.coflow.flow :as flow]
-            [spike.coflow.ext :as ext])
+            [spike.coflow.ext :as ext]
+            [clojure.core.async.flow])
   (:import [java.lang.management ManagementFactory]))
 
 (set! *warn-on-reflection* true)
@@ -220,7 +221,23 @@
         (is (nil? (a/poll! p)))))
     (flow/stop g)))
 
-;; --- review item 5 and 6 -----------------------------------------------------------------------------------------------
+(deftest a-proc-of-the-original-in-a-port-flow-does-not-spin-after-stop
+  ;; A ProcLauncher that is not ours (here: the original `process`, with core.async threads) is not a coroutine Job: the
+  ;; cleanup can not wait for it and must not close its ports, else its `alts!!` sees a closed control channel and loops
+  ;; (found when the idle-CPU test ran after api-test: one core busy for the rest of the JVM).
+  (let [g (flow/create-flow {:procs {:a {:proc (clojure.core.async.flow/process (clojure.core.async.flow/lift1->step inc))}}
+                             :conns []})]
+    (flow/start g) (flow/resume g)
+    (flow/stop g)
+    (is (true? (ext/await-stopped g 10000)))
+    (deref (promise) 500 nil)
+    (let [c0 (process-cpu-ms)
+          _ (deref (promise) 1500 nil)
+          used (- (process-cpu-ms) c0)]
+      (println (format "[idle CPU] 1500 ms after a stop with an original-launcher proc: %.0f ms CPU" used))
+      (is (< used 500.0)))))
+
+;; --- review item 5 and 6-----------------------------------------------------------------------------------------------
 
 (deftest item-5-compute-timeout-is-not-interrupted
   (scenario-in-all-arms :compute-timeout-no-interrupt
