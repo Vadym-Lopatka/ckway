@@ -95,6 +95,8 @@ only keeps its text).
 
 A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtual thread (JDK 21+ needed).
 
+  returned at once.
+
 * A plain `ThreadLocal` is not visible in the body. A `ThreadContextElement` of the coroutine context is.
   `(.set tl "x") (f/runIt (fn [_] (.get tl)))` gives `nil`.
 * `set!` on a var that was bound OUTSIDE the body fails: `Can't set!: *v* from non-binding thread`. Reading it works,
@@ -258,6 +260,14 @@ A constructor parameter counts as a property when the class has a public propert
   a function type: nothing checks the types of the arguments (a position of a type parameter, see 1: a Clojure integer for an
   `Int` is a `Long` there, say `(int 1)`), and a result of a function type is not a Clojure function. A package with no class
   that implements a function type, and no `operator fun invoke`, has no `.invoke` var.
+* A class that declares its own `invoke` with the arity of the function type (http4k `interface LensExtractor<in IN, out OUT> :
+  (IN) -> OUT { override operator fun invoke(target: IN): OUT }`) has no synthesized `invoke`: the declared one OVERRIDES the one of
+  the function type, they are one member, and it keeps its own parameter names and types (`(l/.invoke lens req)`, before: "ambiguous").
+  It holds when the class that declares it is a supertype (an abstract class in between, `Lens`, `BiDiLens`, `PathLens`), also for a
+  `suspend` function type and a generic class. A subclass that declares `invoke` takes the place of the synthesized `invoke` of the
+  supertype for its objects. Another `invoke` of another arity is another member. A `fun interface` that extends a function type
+  and redeclares `invoke` with narrower types cannot take a Clojure function yet (the adapter is not written for the two JVM
+  methods).
 * A class with no public constructor (`Duration`), an interface, an abstract, sealed or enum class: the error says
   which, and lists the entries of an enum or the companion functions that return the class.
 * A declaration that Kotlin source cannot call is no var: one that is not `public` (`internal`, also with

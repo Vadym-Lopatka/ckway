@@ -6,3 +6,8 @@ class Far9 : (String) -> String {
     override fun invoke(p1: String): String = "far:$p1"
 }
 fun far9(): Far9 = Far9()
+
+// Batch D (D1): the declared override of the `invoke` of a function type, in another package than the call
+interface ExtFar9<in IN, out OUT> : (IN) -> OUT { override operator fun invoke(target: IN): OUT }
+class ExtFarImpl9 : ExtFar9<String, String> { override fun invoke(target: String): String = "ext-far:$target" }
+fun extFar9(): ExtFarImpl9 = ExtFarImpl9()

@@ -1150,3 +1150,105 @@
     (is (= "hofAny9:null" ((d/hofAny9) nil)))
     (is (= "hofTNn9:null" ((d/hofTNn9) nil)))
     (is (= "hofT9:null" ((d/hofT9) nil)))))
+
+;; ================================================================ Batch D: one regression of B2, and findings of the second round of spikes
+
+;; ---------------------------------------------------------------- D1
+
+;; http4k: `interface LensExtractor<in IN, out OUT> : (IN) -> OUT { override operator fun invoke(target: IN): OUT }`. The
+;; declared `invoke` OVERRIDES the one of the function type: one member, with its own parameter names and types. B2 gave
+;; both, and `(l/.invoke lens req)` was "ambiguous". A class with no `invoke` of its own keeps the synthesized one.
+
+(def ^:private ext-path (d/extPath9))
+(def ^:private ext-bi (d/extBi9))
+(def ^:private ext-int (d/extD9))
+(def ^:private sub-only (d/subOnly9))
+(def ^:private sub-none (d/subNone9))
+(def ^:private gen-own (d/genOwn9))
+(def ^:private gen-none (d/genNone9))
+(def ^:private fi-own (d/fiOwn9))
+(def ^:private ext-far (b9/extFar9))
+
+(defn- sigs-of [v owner]
+  (->> (:kt/decls (meta v)) (filter #(= owner (:owner %))) (filter #(= "invoke" (:name %))) (map :signature)))
+
+(deftest d1-declared-override-in-the-same-interface
+  (testing "the object of an anonymous class: the dynamic path"
+    (is (= 3 (d/.invoke ext-int "abc")))
+    (is (= 3 (dynamic #'d/.invoke [ext-int "abc"])))
+    (is (= 3 (as-value #'d/.invoke ext-int "abc"))))
+  (testing "a hint on the interface: the static path"
+    (is (= 3 (eval-here '(d/.invoke ^fx.r9.ExtD9 (d/extD9) "abc"))))
+    (is (= 3 (eval-here '(let [e (d/extD9)] (d/.invoke e "abc")))))
+    (is (not (str/includes? (reflection-warnings '(let [e (d/extD9)] (d/.invoke e "abc"))) "Reflection warning"))))
+  (testing "one declaration of `invoke` for the interface: the declared one, with its own parameter name"
+    (let [s (sigs-of #'d/.invoke "fx.r9.ExtD9")]
+      (is (= 1 (count s)) (pr-str s))
+      (is (str/includes? (first s) "invoke(target: IN): OUT") (pr-str s))
+      (is (not-any? #(str/includes? % "[from") s)))))
+
+(deftest d1-override-in-a-subclass-and-through-the-hierarchy
+  (testing "abstract class in between, an override with a more specific JVM signature (and its bridge)"
+    (is (= "path:x" (d/.invoke ext-path "x") (dynamic #'d/.invoke [ext-path "x"])))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtPath9 (d/extPath9) "x"))))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtBaseD9 (d/extPath9) "x"))))
+    (is (= "path:x" (eval-here '(d/.invoke ^fx.r9.ExtD9 (d/extPath9) "x")))))
+  (testing "a subclass that adds another `invoke` of another arity (http4k BiDiLens)"
+    (is (= "bi:x" (d/.invoke ext-bi "x") (eval-here '(d/.invoke ^fx.r9.ExtBi9 (d/extBi9) "x"))))
+    (is (= "inject:v:t" (d/.invoke ext-bi "v" "t") (eval-here '(d/.invoke ^fx.r9.ExtBi9 (d/extBi9) "v" "t")))))
+  (testing "the plain interface keeps the invoke of its function type, a subclass with its own `invoke` has that one"
+    (is (= "sub-none:a" (d/.invoke sub-none "a") (eval-here '(d/.invoke ^fx.r9.PlainD9 (d/subNone9) "a"))))
+    (is (= "sub-only:a" (d/.invoke sub-only "a") (dynamic #'d/.invoke [sub-only "a"])
+           (eval-here '(d/.invoke ^fx.r9.SubOnly9 (d/subOnly9) "a"))))
+    (is (= "sub-only:a" (eval-here '(d/.invoke ^fx.r9.PlainD9 (d/subOnly9) "a"))))
+    (is (some #(str/includes? % "PlainD9.invoke(p1: String): String  [from (String) -> String]") (sigs-of #'d/.invoke "fx.r9.PlainD9")))
+    (let [s (sigs-of #'d/.invoke "fx.r9.SubOnly9")]
+      (is (= 1 (count s)) (pr-str s))
+      (is (str/includes? (first s) "invoke(name: String): String") (pr-str s)))))
+
+(deftest d1-generic-class-and-fun-interface
+  (testing "type parameters in the function type: an own invoke, none"
+    (is (= "gen-own:5" (d/.invoke gen-own "5") (dynamic #'d/.invoke [gen-own "5"])))
+    (is (= "gen-own:5" (eval-here '(d/.invoke ^fx.r9.GenOwn9 (d/genOwn9) "5"))))
+    (is (= "gen-own:5" (eval-here '(d/.invoke ^fx.r9.GenD9 (d/genOwn9) "5"))))
+    (is (= "gen-none:6" (d/.invoke gen-none "6") (eval-here '(d/.invoke ^fx.r9.GenD9 (d/genNone9) "6")))))
+  (testing "the declaration of the abstract class that declares none keeps the function type's invoke"
+    (is (some #(str/includes? % "fx.r9.GenD9.invoke(p1: Any?): Any?  [from (IN) -> OUT]") (sigs-of #'d/.invoke "fx.r9.GenD9"))
+        (pr-str (sigs-of #'d/.invoke "fx.r9.GenD9")))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.GenOwn9")))))
+  (testing "a fun interface that extends a function type and declares the member"
+    (is (= 30 (d/.invoke fi-own "abc") (dynamic #'d/.invoke [fi-own "abc"]) (eval-here '(d/.invoke ^fx.r9.FiOwn9 (d/fiOwn9) "abc"))))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.FiOwn9"))))
+    (is (str/includes? (first (sigs-of #'d/.invoke "fx.r9.FiOwn9")) "invoke(text: String): Int"))))
+
+(deftest d1-suspend-function-type-with-an-own-override
+  (let [s (d/sExt9)]
+    (is (= "s-ext:q" (d/.invoke s "q") (dynamic #'d/.invoke [s "q"]) (eval-here '(d/.invoke ^fx.r9.SExt9 (d/sExt9) "q"))))
+    (is (= 1 (count (sigs-of #'d/.invoke "fx.r9.SExt9"))))
+    (is (str/includes? (first (sigs-of #'d/.invoke "fx.r9.SExt9")) "suspend operator fun fx.r9.SExt9<IN, OUT>.invoke(target: IN): OUT"))))
+
+(deftest d1-another-package
+  (testing "the package of the class has the declared member"
+    (is (= "ext-far:x" (b9/.invoke ext-far "x") (eval-here '(b9/.invoke ^fx.r9b.ExtFarImpl9 (b9/extFar9) "x")))))
+  (testing "a package that does not know the class: the generic `Function1.invoke`, as in B2"
+    (is (= "ext-far:x" (d/.invoke ext-far "x") (dynamic #'d/.invoke [ext-far "x"])))))
+
+(deftest d1-nothing-else-changed
+  (testing "a class with no own invoke: the synthesized member and the generic one, as in B2"
+    (is (= "routed:x:r" (d/.invoke router "x")))
+    (is (= 42 (d/.invoke calc 6 7)))
+    (is (error-has? (dynamic #'d/.invoke [router 1.5]) "`p1` is String but got Double")))
+  (testing "the checks of the declared member: the declared parameter type"
+    (is (error-has? (dynamic #'d/.invoke [sub-only 1.5]) "`name` is String but got Double"))))
+
+(deftest d1-kt-reify-member-with-a-function-parameter
+  ;; Rule 6: a Kotlin function value that Clojure gets is a Clojure function. The parameter `nxt` of a `kt/reify` member is
+  ;; a Clojure function (also when the member is inherited from a function type): `(nxt x)` works.
+  (let [seen (atom nil)
+        m (kt/reify d/Mw9 (.invoke [_ nxt] (reset! seen nxt) (fn [s] (str "mw:" (nxt s)))))]
+    (is (= "mw:core:q" (d/runMw9 m "q")))
+    (is (fn? @seen))
+    (is (instance? clojure.lang.IFn @seen))
+    (is (= "core:z" (@seen "z")))
+    (is (= "mw:core:q" (d/runMw9 (kt/reify d/Mw9 (.invoke [_ nxt] (fn [s] (str "mw:" (d/.invoke nxt s))))) "q"))
+        "`.invoke` of the parameter: the dynamic path (a function type has no class for the static path)")))

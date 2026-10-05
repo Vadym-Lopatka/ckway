@@ -410,3 +410,50 @@ fun hofIntNn9(): (Int, String) -> String = { a, b -> "hofIntNn9:" + a + ":" + b 
 fun hofAny9(): (Any?) -> String = { a -> "hofAny9:" + a }
 fun <T> hofT9(): (T) -> String = { a -> "hofT9:" + a }
 fun hofTNn9(): (List<String>?) -> String = { a -> "hofTNn9:" + a }
+
+// ================================================================ Batch D
+
+// ---- D1: a class that declares its own `invoke` and also implements a function type (http4k `LensExtractor`)
+// The declared `invoke` overrides the one of the function type: one member, with its own names and types.
+interface ExtD9<in IN, out OUT> : (IN) -> OUT {
+    override operator fun invoke(target: IN): OUT
+    fun meta9(): String = "ext-meta"
+}
+abstract class ExtBaseD9<IN, OUT>(val tag: String) : ExtD9<IN, OUT>              // an abstract class in between: no invoke
+open class ExtPath9<OUT>(private val f: (String) -> OUT) : ExtBaseD9<String, OUT>("path") {
+    override fun invoke(target: String): OUT = f(target)                      // a more specific JVM signature, and the bridge
+}
+class ExtBi9<OUT>(private val f: (String) -> OUT) : ExtPath9<OUT>(f) {
+    operator fun <R : CharSequence> invoke(value: OUT, into: R): String = "inject:$value:$into"   // another arity
+}
+fun extPath9(): ExtPath9<String> = ExtPath9 { s -> "path:$s" }
+fun extBi9(): ExtBi9<String> = ExtBi9 { s -> "bi:$s" }
+fun extD9(): ExtD9<String, Int> = object : ExtD9<String, Int> { override fun invoke(target: String): Int = target.length }
+
+// the override is in a subclass only; the interface has the function type's own `invoke`
+interface PlainD9 : (String) -> String
+class SubOnly9 : PlainD9 { override operator fun invoke(name: String): String = "sub-only:$name" }
+class SubNone9 : PlainD9 { override fun invoke(p1: String): String = "sub-none:$p1" }
+fun subOnly9(): SubOnly9 = SubOnly9()
+fun subNone9(): PlainD9 = SubNone9()
+
+// a generic class that has the type parameters in the function type
+abstract class GenD9<IN, OUT> : (IN) -> OUT
+class GenOwn9<IN, OUT>(private val f: (IN) -> OUT) : GenD9<IN, OUT>() {
+    override operator fun invoke(value: IN): OUT = f(value)
+}
+fun genOwn9(): GenOwn9<String, String> = GenOwn9 { n -> "gen-own:$n" }
+fun genNone9(): GenD9<String, String> = object : GenD9<String, String>() { override fun invoke(p1: String): String = "gen-none:$p1" }
+
+// a fun interface that extends a function type and declares the member
+fun interface FiOwn9 : (String) -> Int { override operator fun invoke(text: String): Int }
+fun fiOwn9(): FiOwn9 = FiOwn9 { t -> t.length * 10 }
+fun runFiOwn9(f: FiOwn9, s: String): Int = f(s)
+
+// a suspend function type with its own override
+interface SExt9<in IN, out OUT> : suspend (IN) -> OUT { override suspend operator fun invoke(target: IN): OUT }
+fun sExt9(): SExt9<String, String> = object : SExt9<String, String> { override suspend fun invoke(target: String): String = "s-ext:$target" }
+
+// reify: a function-typed parameter of an inherited member
+interface Mw9 : (Handler9) -> Handler9
+fun runMw9(m: Mw9, s: String): String = m.invoke { x -> "core:$x" }(s)

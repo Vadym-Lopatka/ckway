@@ -803,7 +803,7 @@
       :owner owner :receivers rcvs :params params :return ret
       :type-params tp :flags flags :jvm jvm
       :signature (str (str/join (for [[k m] [[:suspend "suspend "] [:inline "inline "] [:infix "infix "] [:operator "operator "]]
-                                       :when (k flags)] m))
+                                      :when (k flags)] m))
                       (sig-text :function name rcvs params ret tp))}
       (seq class-tparams) (assoc :class-type-params class-tparams))))
 
@@ -1118,7 +1118,7 @@
   (atom {}))
 (register-reset! ::declared-members-cache #(reset! declared-members-cache {}))
 
-(declare finish-decls inherited-members)
+(declare finish-decls inherited-members overridden-function-type-invokes)
 
 (defn- declared-members
   "The members that the Kotlin class declares itself, overrides included: THE declaration of each of them. Everything
@@ -1134,7 +1134,12 @@
             ds (->> (container-decls (member-ctx binary internal km) km)
                     (map (fn [d]
                            (let [os (originals (override-key d nil))
-                                 ids (into #{} (comp (mapcat #(cons (jvm-member-id %) (:overrides %))) (filter vector?)) os)]
+                                 ids (into #{} (comp (mapcat #(cons (jvm-member-id %) (:overrides %))) (filter vector?)) os)
+                                 ;; a declared `invoke` overrides the `invoke` that a supertype gets from its function type
+                                 ids (if (and (= :function (:kind d)) (= "invoke" (:name d)) (empty? (:type-params d))
+                                              (not-any? #(not= :dispatch (:role %)) (:receivers d)))
+                                       (into ids (overridden-function-type-invokes km (count (:params d)) (contains? (:flags d) :suspend)))
+                                       ids)]
                              (cond-> (with-inherited-defaults d os)
                                (seq ids) (assoc :overrides ids)))))
                     (finish-decls binary)
@@ -1231,14 +1236,66 @@
                          (str/join ", " (map #(str (:name %) ": " (type-text (:type %))) params)) "): " (type-text ret)
                          "  [from " ft-text "]")}))))
 
+(defn- reaches-function-type?
+  "Does the class `c` implement, directly or through its supertypes, a function type of `n` parameters (`suspend?`)?"
+  [^KmClass c n suspend? seen]
+  (and (not (seen (.getName c)))
+       (boolean (some (fn [[sn _ ft]]
+                        (if ft
+                          (and (= n (count (:args ft))) (= (boolean suspend?) (boolean (:suspend? ft))))
+                          (when-let [sk (:km (kotlin-class sn))] (reaches-function-type? sk n suspend? (conj seen (.getName c))))))
+                      (supertypes c nil)))))
+
+(defn- declares-invoke?
+  "Does the class `c` declare a public `invoke` with `n` parameters (and no receiver of its own)?"
+  [^KmClass c n]
+  (boolean (some (fn [^KmFunction f]
+                   (and (= "invoke" (.getName f)) (visible? (Attributes/getVisibility f))
+                        (nil? (.getReceiverParameterType f)) (= n (count (.getValueParameters f)))))
+                 (.getFunctions c))))
+
+(defn- invoke-declared-on-path?
+  "Does the class `k`, or a class between it and a function type of `ft`'s arity (and suspend-ness) that it implements,
+  declare its own public `invoke` with that many parameters? Such a declaration OVERRIDES the `invoke` of the function type
+  (`interface LensExtractor<in IN, out OUT> : (IN) -> OUT { override operator fun invoke(target: IN): OUT }`): they are one
+  member, and the declared one, with its own names and types, is the member that `k` shows."
+  [^KmClass k {:keys [args suspend?]}]
+  (let [n (count args)
+        walk (fn walk [^KmClass c seen]
+               (and (not (seen (.getName c)))
+                    (or (and (reaches-function-type? c n suspend? #{}) (declares-invoke? c n))
+                        (some (fn [[sn _ ft]]
+                                (when-let [sk (:km (when-not ft (kotlin-class sn)))]
+                                  (walk sk (conj seen (.getName c)))))
+                              (supertypes c nil)))))]
+    (boolean (walk k #{}))))
+
+(defn- overridden-function-type-invokes
+  "The `jvm-member-id`s of the synthesized `invoke` (`function-type-invoke`) of every supertype of `k` that implements a
+  function type of `n` parameters: a declared `invoke` of `k` with that arity overrides them all (`GenOwn9 : Gen9<IN, OUT>`,
+  `abstract class Gen9<IN, OUT> : (IN) -> OUT`: the `invoke` of `Gen9` is gone for an object of `GenOwn9`)."
+  [^KmClass k n suspend?]
+  (let [jn (cond-> n suspend? inc)
+        desc (str "(" (apply str (repeat jn "Ljava/lang/Object;")) ")Ljava/lang/Object;")
+        fcls (str "kotlin.jvm.functions.Function" jn)]
+    (loop [queue (seq (supertypes k nil)) seen #{} out #{}]
+      (if-let [[sn _ ft] (first queue)]
+        (let [sk (:km (when-not ft (kotlin-class sn)))
+              hit? (and sk (not (seen sn)) (reaches-function-type? sk n suspend? #{}))]
+          (recur (if sk (concat (rest queue) (supertypes sk nil)) (rest queue))
+                 (conj seen sn)
+                 (cond-> out hit? (conj [fcls "invoke" desc (internal->binary sn)]))))
+        out))))
+
 (defn function-type-decls
   "The `invoke` declarations (`function-type-invoke`) that the Kotlin class `c` (a Class) gets from its direct supertypes that
-  are function types: `fun interface Filter : (Handler) -> Handler`. nil for a class that has no Kotlin class metadata."
+  are function types: `fun interface Filter : (Handler) -> Handler`. None for a class that declares or overrides `invoke`
+  itself (`invoke-declared-on-path?`). nil for a class that has no Kotlin class metadata."
   [^Class c]
   (let [m (read-meta c)]
     (when (instance? KotlinClassMetadata$Class m)
       (let [k (.getKmClass ^KotlinClassMetadata$Class m)]
-        (seq (for [[_ _ ft] (supertypes k nil) :when ft :let [d (function-type-invoke k ft)] :when d] d))))))
+        (seq (for [[_ _ ft] (supertypes k nil) :when ft :let [d (when-not (invoke-declared-on-path? k ft) (function-type-invoke k ft))] :when d] d))))))
 
 (defn- inherited-members
   "[declaration env] for the public members that the Kotlin supertypes of `k` declare, transitively (superclass and
@@ -1257,7 +1314,7 @@
                  (kotlin-class (if (and fn-type (not (:suspend? fn-type)))
                                  (str "kotlin/jvm/functions/" (subs n (inc (.lastIndexOf ^String n "/"))))
                                  n)))
-            invoke (when (and fn-type (not (seen n))) (function-type-invoke k fn-type))
+            invoke (when (and fn-type (not (seen n)) (not (invoke-declared-on-path? k fn-type))) (function-type-invoke k fn-type))
             ^KmClass sk (:km sc)
             env (when sc
                   (let [names (map #(.getName ^KmTypeParameter %) (.getTypeParameters sk))]
@@ -1371,11 +1428,11 @@
   [binary ds]
   (let [refl (atom {}) miss (atom {})
         reflectable? (fn [cn] (if-let [e (find @refl cn)] (val e)
-                                (let [r (if-let [c (load-class cn)]
-                                          (try (.getDeclaredMethods c) (.getDeclaredFields c) (.getDeclaredConstructors c) (.getMethods c) true
-                                               (catch LinkageError _ false))
-                                          true)]
-                                  (swap! refl assoc cn r) r)))
+                                      (let [r (if-let [c (load-class cn)]
+                                                (try (.getDeclaredMethods c) (.getDeclaredFields c) (.getDeclaredConstructors c) (.getMethods c) true
+                                                     (catch LinkageError _ false))
+                                                true)]
+                                        (swap! refl assoc cn r) r)))
         missing (fn [cn] (if-let [e (find @miss cn)] (val e) (let [r (unloadable cn)] (swap! miss assoc cn r) r)))
         mark1 (fn [m] (cond-> m (and (:class m) (not (reflectable? (:class m)))) (assoc :partial? true)))
         mark (fn [m] (when m (cond-> (mark1 m) (:default m) (update :default mark1))))]
