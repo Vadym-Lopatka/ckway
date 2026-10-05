@@ -1252,3 +1252,120 @@
     (is (= "core:z" (@seen "z")))
     (is (= "mw:core:q" (d/runMw9 (kt/reify d/Mw9 (.invoke [_ nxt] (fn [s] (str "mw:" (d/.invoke nxt s))))) "q"))
         "`.invoke` of the parameter: the dynamic path (a function type has no class for the static path)")))
+
+;; ---------------------------------------------------------------- D2
+
+;; kotlinx.coroutines: `suspend fun receiveCatching(): ChannelResult<E>` (`ChannelResult` is a value class over `Any?`). The
+;; JVM result is `Object`: the object when the call suspended and was resumed, the underlying value when it returned at once
+;; (a class over a reference type). The result of a suspend call is the value-class object, as for a non-suspend call.
+
+(def ^:private host (d/SvHost9 3))
+
+(defn- sv-cls [x] (some-> x class .getName))
+
+(deftest d2-a-suspend-member-gives-the-value-class-object
+  (testing "over a primitive, a reference type and Any?; suspended and not; the dynamic path"
+    (is (= ["fx.r9.SvInt9" 5] [(sv-cls (d/.int9 host 2)) (d/intOf9 (d/.int9 host 2))]))
+    (is (= "fx.r9.SvInt9" (sv-cls (d/.intNow9 host 2))))
+    (is (= "fx.r9.SvDbl9" (sv-cls (d/.dbl9 host))))
+    (is (= "fx.r9.SvStr9" (sv-cls (d/.str9 host))))
+    (is (= "str:host3" (d/.plain9 (d/.str9 host))))
+    (is (= "fx.r9.SvAny9" (sv-cls (d/.any9 host "a"))))
+    (is (= "a" (d/anyOf9 (d/.any9 host "a"))))
+    (is (nil? (d/anyOf9 (d/.any9 host nil))))
+    (is (= "fx.r9.SvNn9" (sv-cls (d/.nn9 host "z"))))
+    (is (= 15 (d/intOf9 (d/.withDef9 host))) "a default value (the `$default` synthetic)")
+    (is (= 6 (d/intOf9 (d/.withDef9 host 2))))))
+
+(deftest d2-the-static-path
+  (testing "a hint on the receiver: a direct call, the result has its static type"
+    (is (= 1005 (eval-here '(d/.plain9 (d/.int9 ^fx.r9.SvHost9 ckway.round9-test/sv-host 2)))))
+    (is (= "str:host3" (eval-here '(d/.plain9 (d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host)))))
+    (is (= "any:q" (eval-here '(d/.plain9 (d/.extAny9 ^fx.r9.SvHost9 ckway.round9-test/sv-host "q")))))
+    (is (= "any:x" (eval-here '(d/.plain9 (d/topAny9 "x")))))
+    (is (= 1004 (eval-here '(d/.plain9 (d/top9 4)))))
+    (is (= "fx.r9.SvStr9" (sv-cls (eval-here '(d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host)))))
+    (is (not (str/includes? (reflection-warnings '(d/.plain9 (d/.str9 ^fx.r9.SvHost9 ckway.round9-test/sv-host))) "Reflection warning")))))
+
+(def sv-host host)
+
+(deftest d2-an-extension-and-a-top-level-function
+  (is (= 301 (d/intOf9 (d/.ext9 host 1))))
+  (is (= "fx.r9.SvAny9" (sv-cls (d/.extAny9 host "q"))))
+  (is (= "q" (d/anyOf9 (d/.extAny9 host "q"))))
+  (is (= 4 (d/intOf9 (d/top9 4))))
+  (is (= "x" (d/anyOf9 (d/topAny9 "x"))))
+  (is (= 4 (d/intOf9 (dynamic #'d/top9 [4]))))
+  (is (= "x" (d/anyOf9 (dynamic #'d/topAny9 ["x"]))))
+  (is (= "fx.r9.SvStr9" (sv-cls (as-value #'d/.str9 host)))))
+
+(deftest d2-nullable-results
+  (is (nil? (d/.nIntOrNull9 host false)))
+  (is (= 3 (d/intOf9 (d/.nIntOrNull9 host true))))
+  (is (nil? (d/.nStrOrNull9 host false)))
+  (is (= "fx.r9.SvStr9" (sv-cls (d/.nStrOrNull9 host true))))
+  (is (nil? (d/.nAnyOrNull9 host false)))
+  (testing "a box over a null is not nil"
+    (let [r (d/.nAnyOrNull9 host true)]
+      (is (some? r))
+      (is (nil? (d/anyOf9 r)))))
+  (is (nil? (d/topNull9)))
+  (is (nil? (eval-here '(d/.nStrOrNull9 ^fx.r9.SvHost9 ckway.round9-test/sv-host false))))
+  (is (= "fx.r9.SvStr9" (sv-cls (eval-here '(d/.nStrOrNull9 ^fx.r9.SvHost9 ckway.round9-test/sv-host true))))))
+
+(deftest d2-a-generic-result-is-not-boxed-twice
+  (testing "a type parameter in the result: the object that went in comes out, nothing is added"
+    (let [v (d/SvInt9 1)]
+      (is (identical? v (d/sId9 v)))
+      (is (= 1 (d/intOf9 (d/sId9 v)))))
+    (let [v (d/SvAny9 "w")]
+      (is (identical? v (d/sIdNow9 v)))
+      (is (= "w" (d/anyOf9 (d/sIdNow9 v)))))
+    (is (= 5 (d/sId9 5)))
+    (is (= "s" (d/sIdNow9 "s")))
+    (is (= 1 (d/sFirst9 [1 2])))
+    (is (= "fx.r9.SvStr9" (sv-cls (d/sIdNow9 (d/SvStr9 "q")))))
+    (is (= "fx.r9.SvInt9" (sv-cls (eval-here '(d/sIdNow9 (d/SvInt9 2) :<> fx.r9.SvInt9)))))))
+
+(deftest d2-kotlin-result-and-duration
+  (is (true? (d/resultOk9 (d/sResult9 true))))
+  (is (false? (d/resultOk9 (d/sResult9 false))))
+  (is (= "kotlin.Result" (sv-cls (d/sResult9 false))))
+  (is (= "kotlin.Result" (sv-cls (d/sResultStr9))) "a Success that returned at once is unboxed on the JVM")
+  (is (= "kotlin.Result" (sv-cls (d/sResultN9 true))))
+  (is (nil? (d/sResultN9 false)))
+  (is (= "kotlin.time.Duration" (sv-cls (d/sDur9))))
+  (is (= "kotlin.time.Duration" (sv-cls (d/sDurN9 true))))
+  (is (nil? (d/sDurN9 false)))
+  (is (= "kotlin.Result" (sv-cls (dynamic #'d/sResult9 [true])))))
+
+(deftest d2-the-other-way-a-suspend-lambda-written-in-clojure
+  (testing "the lambda returns the object: the call that runs it unboxes as Kotlin expects"
+    (is (= 4 (d/runSvInt9 (fn [n] (d/SvInt9 n)))))
+    (is (= "got:4" (d/runSvAny9 (fn [n] (d/SvAny9 n)))))
+    (is (= "got:null" (d/runSvAny9 (fn [n] (d/SvAny9 nil)))))
+    (is (= "got:4" (d/runSvIntN9 (fn [n] (d/SvInt9 n)))))
+    (is (= "got:null" (d/runSvIntN9 (fn [n] nil))))
+    (is (= 2000 (d/runSvDur9 (fn [] (d/sDur9)))))
+    (is (= "ok:7" (d/runSvRes9 (fn [] (d/sResult9 true)))))
+    (is (= "fail:res-boom" (d/runSvRes9 (fn [] (d/sResult9 false))))))
+  (testing "a value that is the underlying value is a kt error"
+    (is (error-has? (top-error #(d/runSvInt9 (fn [n] n))) "fx.r9.SvInt9" "A value class is always the object"))
+    (is (error-has? (top-error #(d/runSvAny9 (fn [n] n))) "fx.r9.SvAny9" "A value class is always the object"))
+    (is (error-has? (top-error #(d/runSvInt9 (fn [n] nil))) "nil where Kotlin expects a non-null fx.r9.SvInt9")))
+  (testing "a suspend function value of Kotlin, called from Clojure and passed back"
+    (is (= 6 (d/runSvInt9 (fn [n] (d/top9 (+ n 2))))))))
+
+(deftest d2-a-kt-reify-member-that-returns-a-value-class
+  (let [i (kt/reify d/SvIface9
+            (.give9 [_ n] (d/SvAny9 (* n 2)))
+            (.giveN9 [_ n] (when (pos? n) (d/SvInt9 n))))]
+    (is (= "give:6:1:null" (d/useSvIface9 i)))))
+
+(deftest d2-nothing-else-changed
+  (testing "a non-suspend call that returns a value class: boxed as before"
+    (is (= "fx.r9.SvInt9" (sv-cls (d/SvInt9 1))))
+    (is (= 2 (d/intOf9 (d/.plusOne9 (d/SvInt9 1)))))
+    (is (= 1001 (d/.plain9 (d/SvInt9 1)))))
+  (testing "a suspend function that returns no value class"
+    (is (= 11 (d/sId9 11)))))

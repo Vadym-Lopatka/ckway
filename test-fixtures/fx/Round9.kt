@@ -457,3 +457,55 @@ fun sExt9(): SExt9<String, String> = object : SExt9<String, String> { override s
 // reify: a function-typed parameter of an inherited member
 interface Mw9 : (Handler9) -> Handler9
 fun runMw9(m: Mw9, s: String): String = m.invoke { x -> "core:$x" }(s)
+
+// ---- D2: a suspend function that returns a value class (kotlinx.coroutines `receiveCatching(): ChannelResult<E>`)
+@JvmInline value class SvInt9(val v: Int)
+@JvmInline value class SvDbl9(val d: Double)
+@JvmInline value class SvStr9(val s: String)
+@JvmInline value class SvAny9(val a: Any?)           // like ChannelResult: the underlying type is Any?
+@JvmInline value class SvNn9(val a: Any)
+class SvHost9(val base: Int) {
+    suspend fun int9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base + n) }
+    suspend fun intNow9(n: Int): SvInt9 = SvInt9(base + n)                     // no suspension
+    suspend fun dbl9(): SvDbl9 { kotlinx.coroutines.delay(1); return SvDbl9(base + 0.5) }
+    suspend fun str9(): SvStr9 = SvStr9("host$base")
+    suspend fun any9(x: Any?): SvAny9 { kotlinx.coroutines.delay(1); return SvAny9(x) }
+    suspend fun nn9(x: Any): SvNn9 = SvNn9(x)
+    suspend fun nIntOrNull9(yes: Boolean): SvInt9? { kotlinx.coroutines.delay(1); return if (yes) SvInt9(base) else null }
+    suspend fun nStrOrNull9(yes: Boolean): SvStr9? = if (yes) SvStr9("s") else null
+    suspend fun nAnyOrNull9(yes: Boolean): SvAny9? = if (yes) SvAny9(null) else null
+    suspend fun withDef9(n: Int = 5): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base * n) }
+}
+suspend fun SvHost9.ext9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(base * 100 + n) }
+suspend fun SvHost9.extAny9(x: Any?): SvAny9 = SvAny9(x)
+suspend fun top9(n: Int): SvInt9 { kotlinx.coroutines.delay(1); return SvInt9(n) }
+suspend fun topAny9(x: Any?): SvAny9 { kotlinx.coroutines.delay(1); return SvAny9(x) }
+suspend fun topNull9(): SvAny9? = null
+fun SvInt9.plain9(): Int = v + 1000
+fun SvAny9.plain9(): String = "any:" + a
+fun SvStr9.plain9(): String = "str:" + s
+fun SvInt9.plusOne9(): SvInt9 = SvInt9(v + 1)
+fun anyOf9(a: SvAny9): Any? = a.a
+fun intOf9(a: SvInt9): Int = a.v
+// generic result: the call site decides the type argument; the object is boxed once
+suspend fun <T> sId9(x: T): T { kotlinx.coroutines.delay(1); return x }
+suspend fun <T> sIdNow9(x: T): T = x
+suspend fun <T : Any> sIdNn9(x: T): T = x
+suspend fun <T> sFirst9(xs: List<T>): T? = xs.firstOrNull()
+// kotlin.Result and kotlin.time.Duration (value classes of the standard library) from a suspend function
+suspend fun sResult9(ok: Boolean): Result<Int> { kotlinx.coroutines.delay(1); return if (ok) Result.success(7) else Result.failure(IllegalStateException("res-boom")) }
+suspend fun sResultStr9(): Result<String> = Result.success("fine")
+suspend fun sResultN9(ok: Boolean): Result<Int>? = if (ok) Result.success(1) else null
+suspend fun sDur9(): kotlin.time.Duration { kotlinx.coroutines.delay(1); return kotlin.time.Duration.parse("2s") }
+suspend fun sDurN9(yes: Boolean): kotlin.time.Duration? = if (yes) kotlin.time.Duration.parse("3s") else null
+fun resultOk9(r: Result<Int>): Boolean = r.isSuccess
+// a suspend lambda: a Clojure function returns the underlying value or the object, Kotlin wants the object
+fun runSvInt9(f: suspend (Int) -> SvInt9): Int = kotlinx.coroutines.runBlocking { f(4).v }
+fun runSvAny9(f: suspend (Int) -> SvAny9): String = kotlinx.coroutines.runBlocking { "got:" + f(4).a }
+fun runSvIntN9(f: suspend (Int) -> SvInt9?): String = kotlinx.coroutines.runBlocking { "got:" + f(4)?.v }
+fun runSvRes9(f: suspend () -> Result<Int>): String = kotlinx.coroutines.runBlocking { f().fold({ "ok:$it" }, { "fail:${it.message}" }) }
+fun runSvDur9(f: suspend () -> kotlin.time.Duration): Long = kotlinx.coroutines.runBlocking { f().inWholeMilliseconds }
+fun runBlock9(block: suspend () -> Any?): Any? = kotlinx.coroutines.runBlocking { block() }
+// a suspend member of an interface, written by kt/reify, that returns a value class
+interface SvIface9 { suspend fun give9(n: Int): SvAny9; suspend fun giveN9(n: Int): SvInt9? }
+fun useSvIface9(i: SvIface9): String = kotlinx.coroutines.runBlocking { "give:" + i.give9(3).a + ":" + i.giveN9(1)?.v + ":" + i.giveN9(0)?.v }

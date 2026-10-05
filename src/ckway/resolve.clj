@@ -822,8 +822,10 @@
   ([decl called]
    (cond
      (and (= :class (:kind decl)) (:value-class decl)) {:vc (:value-class decl) :nullable? false}
-     ;; the JVM result of a suspend function is Object: a value class is the object itself
-     (:suspend (:flags decl)) nil
+     ;; the JVM result of a suspend function is Object: the box when the call suspended and was resumed, the underlying
+     ;; value when it returned at once (a class over a reference type), the box again over a primitive. Either way the
+     ;; result is the value-class object (`:suspend?`: `box-form`, `ckway.rt/suspend-boxer`)
+     (:suspend (:flags decl)) (some-> (vc-conv (:return decl) "java.lang.Object") (assoc :suspend? true))
      :else (let [jt (or (some-> (:desc called) meta/desc-types :return) (return-jvm-name decl))]
              (when-not (and called (= "java.lang.Object" jt)
                             (not= "java.lang.Object" (:jvm-underlying (:value-class (:return decl)))))
@@ -2065,13 +2067,24 @@
        ~(if (and nullable? (not (contains? prim-classes raw))) `(when ~v ~un) un))))
 
 (defn box-form
-  "Form that gives the value-class object for the underlying value `x` (a form that returns it)."
-  [{:keys [vc nullable?]} x]
+  "Form that gives the value-class object for the underlying value `x` (a form that returns it). The result of a suspend
+  call (`:suspend?`) is the object already, or the underlying value (`Object` in the JVM signature): the object stays."
+  [{:keys [vc nullable? suspend?]} x]
   (let [raw (:jvm-underlying vc)
-        b (bridge-sym (:box vc))]
-    (if (and nullable? (not (contains? prim-classes raw)))
+        b (bridge-sym (:box vc))
+        cls (symbol (:class vc))]
+    (cond
+      suspend? (let [o (gensym "o")
+                     arg (if (contains? prim-classes raw)
+                           `(~(symbol "clojure.core" (case raw "char" "char" "boolean" "boolean" raw)) ~o)
+                           (with-meta o {:tag raw}))]
+                 `(let [~o ~x]
+                    (if (or (instance? ~cls ~o) ~(and nullable? `(nil? ~o)))
+                      ~o
+                      (. ~b (~'call ~arg)))))
+      (and nullable? (not (contains? prim-classes raw)))
       (let [r (with-meta (gensym "r") {:tag raw})] `(let [~r ~x] (when ~r (. ~b (~'call ~r)))))
-      `(. ~b (~'call ~x)))))
+      :else `(. ~b (~'call ~x)))))
 
 (defn- arg-form [bindings-by-idx a]
   (cond

@@ -95,6 +95,11 @@ only keeps its text).
 
 A Clojure function that Kotlin runs as a `suspend` lambda runs on its own virtual thread (JDK 21+ needed).
 
+* The result of a `suspend` call that is a value class is the object, as for a call that is not `suspend` (`(kch/.getOrNull
+  (kch/.receiveCatching ch))`, `ChannelResult` is a value class over `Any?`). The JVM gives `Object`: the object when the call
+  suspended and was resumed, the underlying value when it returned at once (a class over a reference type). `kt` boxes the
+  second. `kotlin.Result` and `Duration` are the same, `nil` of a nullable result stays `nil`, and a generic result (`T`) is
+  left as it is. One case is not told apart: a class over `Any?` whose value is an object of that same class and that
   returned at once.
 
 * A plain `ThreadLocal` is not visible in the body. A `ThreadContextElement` of the coroutine context is.

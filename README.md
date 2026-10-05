@@ -302,7 +302,7 @@ Example 04.
 
 ### Note: suspend
 
-A `suspend` function is a usual var; the call gives its result when it is ready; a Clojure function passed as a suspend lambda runs on a virtual thread.
+A `suspend` function is a usual var; the call gives its result when it is ready; a Clojure function passed as a suspend lambda runs on a virtual thread. A result that is a value class is the object (`ChannelResult`, `Result`, `Duration`), as for any call.
 
 ```clojure
 ;; Kotlin: slowSum(1, 2)    -- a suspend function with delay(5)

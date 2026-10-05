@@ -576,14 +576,17 @@
         (when (some? x) (.invoke m x no-args))))))
 
 (defn- boxer
-  "Function that gives the value-class object for the underlying value (conversion `{:vc :nullable?}`)."
-  [{:keys [vc nullable?]}]
+  "Function that gives the value-class object for the underlying value (conversion `{:vc :nullable?}`). The result of
+  a suspend call (`:suspend?`) is the object already, or the underlying value: the object stays."
+  [{:keys [vc nullable? suspend?]}]
   (let [prim? (.isPrimitive ^Class (r/jvm-class (:jvm-underlying vc)))
+        c (r/jvm-class (:class vc))
         ^Method m (find-member (:class vc) (:name (:box vc)) (:desc (:box vc)))]
     (fn [raw]
-      (if (and nullable? (nil? raw) (not prim?))
-        nil
-        (.invoke m nil (object-array [raw]))))))
+      (cond
+        (and nullable? (nil? raw) (not prim?)) nil
+        (and suspend? (.isInstance ^Class c raw)) raw
+        :else (.invoke m nil (object-array [raw]))))))
 
 (defn- zero [^String jt]
   (case jt
