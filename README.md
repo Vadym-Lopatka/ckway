@@ -17,8 +17,8 @@ ckway is a git dependency. Add it to the `deps.edn` of your own project:
 ```edn
 {:deps
  {io.github.vadym-lopatka/ckway {:git/url "https://github.com/Vadym-Lopatka/ckway"
-                                 :git/tag "v0.1.0"
-                                 :git/sha "4f215cc"}
+                                 :git/tag "v0.2.0"
+                                 :git/sha "1398acc"}
 
   ;; Only if your Kotlin code uses kotlinx.coroutines (a `suspend` function that calls `delay`, a `Flow`, ...).
   org.jetbrains.kotlinx/kotlinx-coroutines-core-jvm {:mvn/version "1.10.2"}}
