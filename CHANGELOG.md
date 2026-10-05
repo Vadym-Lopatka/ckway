@@ -4,9 +4,9 @@ All notable changes to this project are in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is alpha: the API may change before 1.0.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-05
 
-Fixes after the spikes with http4k, Koin and Ktor. Batch A: argument binding and overload selection. Batch B: declarations and function values. Batch C: nil checks, type hints, one error text.
+Fixes after the spikes with http4k, Koin, Ktor and core.async.flow (the directory `spikes/`): argument binding, overload selection, declarations, function values, nil checks, type hints and error texts.
 
 * A property no longer wins silently over a function of the same name. `(r/routes h)` with `routes(vararg ...)` and `val H.routes` was the property; it is now an "ambiguous" error that lists both and gives the ways out (`(r/routes :list [h])` for the function, `((kt/ref X routes) h)` for the property). It is the same for a member property and a top-level function, on the static and the dynamic path.
 * Trailing lambda (rule 4): when the usual binding leaves the last parameter without an argument and it takes a function (function type, `fun interface`, Java single-method interface) and has no default, the last positional argument goes to it. `(dsl/module f)` for `module(createdAtStart = false, declaration: ...)` and `(sp/.status cfg code f)` after a `vararg` now work. A call that fits by the usual binding is never changed. The error "missing required parameter" says "name it" where a positional argument cannot reach the parameter.
@@ -84,4 +84,5 @@ Also in this release (the fixes of the reviews before it):
 * A Clojure persistent collection is read-only: a `Mutable*` parameter is a conversion for it, so `iv(x: Iterable<Int>)` is taken before `iv(x: MutableList<Int>)` for `[1]`, and `(kc/.asReversed [1 2 3])` is `List.asReversed`. With only a `Mutable*` candidate the call is made and a change throws `UnsupportedOperationException`.
 * Declarations with `@Deprecated(level = ERROR)` (also by `@DeprecatedSinceKotlin(errorSince = ...)`) are no vars, as Kotlin refuses a call of them: `MutableList.sort(comparison)`, `String.toUpperCase()`, `appendln`.
 
+[0.2.0]: https://github.com/Vadym-Lopatka/ckway/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Vadym-Lopatka/ckway/releases/tag/v0.1.0
