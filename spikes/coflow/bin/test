@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs the tests of the coflow spike. Exit non-zero on failure.
+# The bridge cache of ckway is an empty directory under target/ (mode 700: ckway refuses a cache that others can write).
+# The spike calls no `:<>` (reified) function, so the Kotlin compiler (alias :kotlinc) is not needed.
+# Run 1: everything, with the original clojure.core.async.flow as the oracle (the :dropin tests are excluded).
+# Run 2: a separate JVM with `dropin` first on the class path: `clojure.core.async.flow` IS the port there, and the
+#        tests that have concrete expected values run once (no oracle).
+# Extra arguments go to the test runner of run 1 only, for example: bin/test -n spike.coflow.chan-test
+cd "$(dirname "$0")/.." || exit 1
+rm -rf target/cache && mkdir -p target && mkdir -m 700 target/cache
+clojure -M:test -e :dropin "$@" || exit 1
+[ $# -eq 0 ] || exit 0
+clojure -M:test:dropin -n spike.coflow.dropin-test -n spike.coflow.invariants-test -n spike.coflow.fixes-test -n spike.coflow.orig-test
