@@ -195,6 +195,21 @@
   #{"kotlin/collections/Iterable" "kotlin/collections/Collection" "kotlin/collections/List" "kotlin/collections/Set"
     "kotlin/collections/Map"})
 
+(defn- non-nil-result?
+  "Is the result of a call of `decl` sure not to be nil? Its Kotlin type is not nullable (a type parameter whose bounds are
+  nullable can be), and is no `Unit` or `Nothing` (`Unit` is nil here). A property read is a call too."
+  [decl]
+  (let [t (:return decl)]
+    (boolean (or (and (= :class (:kind decl)) (not (:no-constructor (:flags decl))))   ; a constructor
+                 (and t (#{:function :property} (:kind decl))
+                      (not (:nullable? t)) (not (:type-param t)) (not (:star? t))
+                      (not (#{"kotlin/Unit" "kotlin/Nothing"} (:class t))))))))
+
+(defn- closed-type?
+  "Is the Kotlin type `t` fully known: no type parameter and no star projection in it?"
+  [t]
+  (not-any? #(or (:type-param %) (:star? %)) (tree-seq map? #(concat (:args %) (some-> (:fn-type %) (as-> f (concat (:args f) [(:return f)])))) t)))
+
 (defn- nested-call-info
   "Info for a form that is itself a call of a kt var: when exactly one declaration fits, its
   Kotlin return type. Errors are left for the expansion of that inner call."
@@ -214,7 +229,13 @@
                                        (typed-return-class (:decl r) (types/resolve-forms *ns* (:tform r)))
                                        (return-class (:decl r)))))
               ;; Kotlin declares the result as a read-only collection (see `applicability*`)
-              (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)))
+              (and (:decl r) (read-only-kotlin (:class (:return (:decl r))))) (assoc :read-only true)
+              ;; Kotlin declares the result as a type that is not nullable: the value is not nil
+              (and (:decl r) (not (contains? r :tform)) (non-nil-result? (:decl r))) (assoc :non-nil true)
+              ;; the declared Kotlin type, with its type arguments, when it is fully known (`infer-type-args`)
+              (and (:decl r) (not (contains? r :tform)) (#{:function :property} (:kind (:decl r)))
+                   (:class (:return (:decl r))) (seq (:args (:return (:decl r)))) (closed-type? (:return (:decl r))))
+              (assoc :ktype (:return (:decl r)))))
           (catch clojure.lang.ExceptionInfo e
             (if (:kt/error (ex-data e)) {} (throw e))))))))
 
@@ -531,6 +552,16 @@
           b (first (remove #(nullable-type? decl %) (:bounds tp)))]
       (str (:type-param t) " : " (if b (meta/type-text b) "Any")))))
 
+(defn- plain-nn
+  "{:type text} for a parameter or receiver of the plain non-null Kotlin type `t` (not a type parameter: `nonnull-tparam`)
+  whose JVM slot `jt` holds a reference: a nil for it is a `kt:` error. nil for a nullable type, a primitive, `Unit`/`Nothing`,
+  a value class (`vc-arg` checks it) and a type parameter."
+  [decl t jt]
+  (when (and t jt (not (:type-param t)) (not (:star? t)) (not (:value-class? t)) (not (:value-class t))
+             (not (nullable-type? decl t)) (not (contains? prim-classes jt))
+             (not (#{"kotlin/Unit" "kotlin/Nothing"} (:class t))))
+    {:type (meta/type-text t)}))
+
 (defn slots
   "One slot per receiver, then per parameter: {:name :class :nullable? :companion-of :adapt :kotlin-type}.
   `:class` is the class of the Clojure argument: for a value-class type it is the value class
@@ -822,8 +853,10 @@
   ([decl called]
    (cond
      (and (= :class (:kind decl)) (:value-class decl)) {:vc (:value-class decl) :nullable? false}
-     ;; the JVM result of a suspend function is Object: a value class is the object itself
-     (:suspend (:flags decl)) nil
+     ;; the JVM result of a suspend function is Object: the box when the call suspended and was resumed, the underlying
+     ;; value when it returned at once (a class over a reference type), the box again over a primitive. Either way the
+     ;; result is the value-class object (`:suspend?`: `box-form`, `ckway.rt/suspend-boxer`)
+     (:suspend (:flags decl)) (some-> (vc-conv (:return decl) "java.lang.Object") (assoc :suspend? true))
      :else (let [jt (or (some-> (:desc called) meta/desc-types :return) (return-jvm-name decl))]
              (when-not (and called (= "java.lang.Object" jt)
                             (not= "java.lang.Object" (:jvm-underlying (:value-class (:return decl)))))
@@ -1321,6 +1354,33 @@
             (str "(" (or (:call-class member) (:class member)) "/" (:name member) (when (pos? n) (str " " (names n))) ")")
             (str "(." (:name member) " " (names (max 1 n)) ")")))))))
 
+(defn- pkg-alias
+  "The alias that the namespace being compiled (`*ns*`; the namespace of the caller, also at run time in a REPL or a test)
+  uses for the namespace of the Kotlin package `pkg` (`kt/require`), or nil."
+  [^String pkg]
+  (let [target (str "ckway.pkg." (if (str/blank? pkg) "<root>" pkg))]
+    (some (fn [[a n]] (when (= target (str (ns-name n))) a)) (ns-aliases *ns*))))
+
+(defn- class-var-text
+  "The class var of the Kotlin class `internal` (`org/http4k/routing/RoutingHandler`) as the caller writes it: `r/RoutingHandler`
+  when the namespace of its package has an alias in the calling namespace, else the full name."
+  [^String internal]
+  (let [i (.lastIndexOf internal "/")
+        pkg (if (neg? i) "" (str/replace (subs internal 0 i) "/" "."))
+        simple (subs internal (inc i))]
+    (if-let [a (pkg-alias pkg)]
+      (str a "/" simple)
+      (if (str/blank? pkg) simple (str pkg "." simple)))))
+
+(defn- call-name-text
+  "The name of the var `var-name` of the Kotlin package of the declaration `d`, with the alias of the calling namespace."
+  [var-name d]
+  (let [owner (str (:owner d))
+        i (.lastIndexOf owner ".")]
+    (if-let [a (pkg-alias (if (neg? i) "" (subs owner 0 i)))]
+      (str a "/" var-name)
+      var-name)))
+
 (defn- ambiguity-help
   "The explanation that follows the list of the `best` candidates of an ambiguous call, or nil. Two cases are
   understood: a function and a property of one name (one var), and declarations that differ only in what the JVM
@@ -1351,12 +1411,15 @@
              "Kotlin tells them apart by its syntax (`" var-name "(a)` or `a." var-name "`), a var call has only one form. kt does not guess."
              "\n  Way out:"
              (if fname
-               (str "\n    the function: name a parameter, `(" var-name " :" fname " ...)`: a property has no parameter"
+               (str "\n    the function: name a parameter, `(" (call-name-text var-name fun) " :" fname " ...)`: a property has no parameter"
                     "\n    ")
                "\n    ")
              (if recv
-               (str "the property: `((kt/ref X " var-name ") x)`, which is Kotlin `X::" var-name "`; `X` is the class var of `"
-                    (meta/type-text (:type recv)) "`")
+               (if-let [c (:class (:type recv))]
+                 (str "the property: `((kt/ref " (class-var-text c) " " var-name ") x)`, which is Kotlin `"
+                      (subs c (inc (.lastIndexOf ^String c "/"))) "::" var-name "`")
+                 (str "the property: `((kt/ref X " var-name ") x)`, which is Kotlin `X::" var-name "`; `X` is the class var of `"
+                      (meta/type-text (:type recv)) "`"))
                "the property has no receiver, so kt has no form that names it alone")
              (when-not (and fname recv)
                (str "\n  Or call one of them with Java interop:\n" (listing)))))
@@ -1618,8 +1681,11 @@
           ;; member, also when the arguments do not fit it (`Two : A<Int>` with `f(x: Int)`: `A<T>.f(x: T)` is gone)
           overridden (overridden-ids (filter receiver-fits? checked))
           viable (remove #(or (no-reason %) (contains? overridden (meta/jvm-member-id (:decl %)))) checked)
-          ;; a candidate that fits by the usual binding always wins over one that fits only with a trailing lambda
-          viable (if (some (complement :trailing) viable) (remove :trailing viable) viable)]
+          ;; a candidate that fits by the usual binding for sure always wins over one that fits only with a trailing
+          ;; lambda. One that only could fit (unknown types at compile time) does not: the run time decides (`choose`)
+          viable (if (some #(and (not (:trailing %)) (every? (fn [c] (= :ok (first c))) (:checks %))) viable)
+                   (remove :trailing viable)
+                   (if (and (some (complement :trailing) viable) (not compile?)) (remove :trailing viable) viable))]
       (when (empty? viable)
         (fail (reasons-text var-name args (concat (map #(hash-map :decl (:decl %) :reason (:error %)) failed)
                                                   (map #(hash-map :decl (:decl %) :reason (no-reason %)) checked)))
@@ -1746,7 +1812,14 @@
   A call that this fails for may still be one with a trailing lambda (`bind`): that binding is tried only then, so a call
   that is selected without it is never changed. Its error is the first one, except an ambiguity between candidates."
   [var-name decls parsed compile?]
-  (try (choose-hinted var-name decls parsed compile? false)
+  (try (let [r (choose-hinted var-name decls parsed compile? false)]
+         ;; the usual binding selected a candidate whose types only COULD fit (unknown at compile time), and another
+         ;; declaration fits with a trailing lambda: the values decide at run time, which can try both
+         (if (and compile? (not (:dynamic? r)) (seq (:positional parsed)) (some trailing-lambda? decls)
+                  (some #(not= :ok (first %)) (:checks r)))
+           (let [r2 (try (choose-hinted var-name decls parsed compile? true) (catch clojure.lang.ExceptionInfo _ nil))]
+             (if (:dynamic? r2) r2 r))
+           r))
        (catch clojure.lang.ExceptionInfo e
          (if (and (:kt/error (ex-data e)) (seq (:positional parsed)) (some trailing-lambda? decls))
            (try (choose-hinted var-name decls parsed compile? true)
@@ -1853,10 +1926,12 @@
         other (for [[r it] (map vector recvs ritems) :when (not= :dispatch (:role r))]
                 (cond-> {:entry (comp-entry r it) :jvm-type (:jvm-type r)}
                   (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver"))
-                  (assoc :vc (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver")))))
+                  (assoc :vc (arg-conv (:type r) (:jvm-type r) (or (:name r) "receiver")))
+                  (and (not (:companion-of r)) (plain-nn decl (:type r) (:jvm-type r))) (assoc :nn (plain-nn decl (:type r) (:jvm-type r)))))
         self (when-let [jt (:jvm-type disp-recv)]
                (cond-> {:entry disp-item :jvm-type jt}
-                 (arg-conv (:type disp-recv) jt "this") (assoc :vc (arg-conv (:type disp-recv) jt "this"))))
+                 (arg-conv (:type disp-recv) jt "this") (assoc :vc (arg-conv (:type disp-recv) jt "this"))
+                 (and (not (:companion-of disp-recv)) (plain-nn decl (:type disp-recv) jt)) (assoc :nn (plain-nn decl (:type disp-recv) jt))))
         params (:params decl)
         omitted (set (keep-indexed #(when (:omitted %2) %1) pitems))
         defaults? (seq omitted)
@@ -1877,7 +1952,8 @@
                               vc (arg-conv (:type p) (:jvm-type p) (:name p))]
                           (cond-> {:entry it :jvm-type (:jvm-type p) :pname (:name p) :ptext (meta/type-text (:type p))}
                             ad (assoc :adapt ad) vc (assoc :vc vc)
-                            (nonnull-tparam decl (:type p)) (assoc :nn (nonnull-tparam decl (:type p)))))))
+                            (nonnull-tparam decl (:type p)) (assoc :nn (nonnull-tparam decl (:type p)))
+                            (and (not vc) (plain-nn decl (:type p) (:jvm-type p))) (assoc :nn (plain-nn decl (:type p) (:jvm-type p)))))))
         nmask (max 1 (quot (+ (count params) 31) 32))
         masks (for [m (range nmask)]
                 {:mask (unchecked-int (reduce (fn [acc i] (bit-or acc (bit-shift-left 1 (- i (* 32 m)))))
@@ -1904,6 +1980,9 @@
            (not-any? #(and (:entry %) (= (:idx (:entry %)) (:idx disp-item))) (:args p)))
       (update :ignored (fnil conj []) disp-item)
       (:suspend (:flags decl)) (assoc :suspend? true)
+      ;; the dispatch receiver of a member takes no nil
+      (and disp-recv (not companion?) (not (:companion-of disp-recv)) (plain-nn decl (:type disp-recv) "java.lang.Object"))
+      (assoc :target-nn (plain-nn decl (:type disp-recv) "java.lang.Object"))
       ret-vc (assoc :ret-vc ret-vc)
       (:fn-type (:return decl)) (assoc :ret-td (type-descriptor (:return decl))))))
 
@@ -2065,13 +2144,24 @@
        ~(if (and nullable? (not (contains? prim-classes raw))) `(when ~v ~un) un))))
 
 (defn box-form
-  "Form that gives the value-class object for the underlying value `x` (a form that returns it)."
-  [{:keys [vc nullable?]} x]
+  "Form that gives the value-class object for the underlying value `x` (a form that returns it). The result of a suspend
+  call (`:suspend?`) is the object already, or the underlying value (`Object` in the JVM signature): the object stays."
+  [{:keys [vc nullable? suspend?]} x]
   (let [raw (:jvm-underlying vc)
-        b (bridge-sym (:box vc))]
-    (if (and nullable? (not (contains? prim-classes raw)))
+        b (bridge-sym (:box vc))
+        cls (symbol (:class vc))]
+    (cond
+      suspend? (let [o (gensym "o")
+                     arg (if (contains? prim-classes raw)
+                           `(~(symbol "clojure.core" (case raw "char" "char" "boolean" "boolean" raw)) ~o)
+                           (with-meta o {:tag raw}))]
+                 `(let [~o ~x]
+                    (if (or (instance? ~cls ~o) ~(and nullable? `(nil? ~o)))
+                      ~o
+                      (. ~b (~'call ~arg)))))
+      (and nullable? (not (contains? prim-classes raw)))
       (let [r (with-meta (gensym "r") {:tag raw})] `(let [~r ~x] (when ~r (. ~b (~'call ~r)))))
-      `(. ~b (~'call ~x)))))
+      :else `(. ~b (~'call ~x)))))
 
 (defn- arg-form [bindings-by-idx a]
   (cond
@@ -2109,7 +2199,7 @@
                                       (:vararg a))
                      (:vararg-coll a) [[(:vararg-coll a) nil]]))
         target (:target p)]
-    (concat (when target [[(companion-entry target) (:class p) nil nil "the receiver"]])
+    (concat (when target [[(companion-entry target) (:class p) nil nil "the receiver" (:target-nn p)]])
             (mapcat from-arg (:args p))
             (map (fn [e] [e nil]) (:ignored p)))))
 
@@ -2263,16 +2353,24 @@
   "Is the argument sure not to be nil? A literal, a number cast or a trusted entry is; a hint, a class that Clojure
   inferred and a call are not."
   [info]
-  (boolean (or (:trusted info)
+  (boolean (or (:trusted info) (:non-nil info)
+               (some-> ^Class (:class info) .isPrimitive)
                (and (:class info) (not (:upper info)) (not (:static info))))))
 
 (defn- nn-guard
-  "The entry `e`, whose argument form is wrapped in a check for nil when the parameter is a type parameter with the
-  non-null bound `nn` (`T : Any`) and the argument may be nil: a nil that is only known at run time is a `kt:` error,
-  as the nil that is known at compile time is, not the NullPointerException of Kotlin."
+  "The entry `e`, whose argument form is wrapped in a check for nil when the parameter takes no nil and the argument may
+  be nil: `nn` is the text of the non-null bound of a type parameter (`T : Any`), or {:type text} for a parameter of a plain
+  non-null type. A nil that is only known at run time is a `kt:` error, as the nil that is known at compile time is, not
+  the NullPointerException of Kotlin. The check is a plain `nil?` test in the expansion: the error call is only in the branch
+  that fails (no var lookup and no allocation on the way of a value that is not nil)."
   [e nn what p]
-  (if (and nn (not (known-non-nil? (:info e))))
-    (update e :arg (fn [f] `(ckway.rt/nn-arg '~{:call (:call-text p) :sig (:sig p) :what (or what "a vararg element") :bound nn} ~f)))
+  (if (and nn (not (known-non-nil? (:info e)))
+           ;; the var of an object whose initialiser failed throws its own error (`guard-failed-objects`)
+           (not (and (seq? (:arg e)) (= `ckway.rt/live (first (:arg e))))))
+    (let [v (gensym "v")
+          site (merge {:call (:call-text p) :sig (:sig p) :what (or what "a vararg element")}
+                      (if (map? nn) nn {:bound nn}))]
+      (update e :arg (fn [f] `(let* [~v ~f] (if (nil? ~v) (ckway.rt/nn-fail '~site) ~v)))))
     e))
 
 (defn emit
@@ -2620,16 +2718,39 @@
                          (concat nm (map clause more))))
       (meta form))))
 
+(defn- infer-type-args
+  "{type parameter name -> <type>} of the function `decl` that the static Kotlin types of the written arguments fix, through
+  their supertypes: `fun <P, B : Any, F : Any> P.install(plugin: Plugin<P, B, F>, configure: B.() -> Unit)` and the argument
+  `(sp/StatusPages)` of the type `ApplicationPlugin<StatusPagesConfig>`, which is `Plugin<Application, StatusPagesConfig,
+  PluginInstance>`: `B` is `StatusPagesConfig`. Only a type argument that is exactly a type parameter of `decl`, and a known
+  type (no star, no type parameter) at that place. A variable that two arguments fix to different types gets none. The
+  type is used as an upper bound only (`type-literals`)."
+  [decl items]
+  (let [own (set (map :name (:type-params decl)))
+        found (for [[slot item] (map vector (slots decl) items)
+                    :let [pt (:kotlin-type slot) at (:ktype (:info item))]
+                    :when (and pt at (:class pt) (seq (:args pt)) (not (:fn-type pt)) (:class at))
+                    :let [aargs (if (= (:class pt) (:class at)) (:args at) (meta/supertype-args (:class at) (:args at) (:class pt)))]
+                    :when (= (count aargs) (count (:args pt)))
+                    [pa aa] (map vector (:args pt) aargs)
+                    :when (and (contains? own (:type-param pa)) (:class aa) (closed-type? aa))]
+                [(:type-param pa) aa])]
+    (into {} (for [[n vs] (group-by first found)
+                   :when (= 1 (count (distinct (map (comp meta/type-text second) vs))))]
+               [n (second (first vs))]))))
+
 (defn type-literals
   "A `fn` literal at an adapter slot gets the Kotlin parameter types as local type information, so
-  kt calls on its parameters are resolved statically (the static path, see README How it works)."
+  kt calls on its parameters are resolved statically (the static path, see README How it works). A type parameter of the
+  declaration that the other arguments fix (`infer-type-args`) is the type there."
   [decl items]
-  (vec (map (fn [slot item]
-              (let [ad (:adapt slot)]
-                (if (and ad (not (:feature ad)) (fn-literal? (:arg item)))
-                  (update item :arg hint-fn-literal (param-hints ad (:kotlin-type slot)))
-                  item)))
-            (slots decl) items)))
+  (let [tmap (infer-type-args decl items)]
+    (vec (map (fn [slot item]
+                (let [ad (:adapt slot)]
+                  (if (and ad (not (:feature ad)) (fn-literal? (:arg item)))
+                    (update item :arg hint-fn-literal (param-hints ad (cond->> (:kotlin-type slot) (seq tmap) (types/subst tmap))))
+                    item)))
+              (slots decl) items))))
 
 (defn companion-unknown?
   "Does the call pass a receiver of unknown type where the class var of a companion is expected?

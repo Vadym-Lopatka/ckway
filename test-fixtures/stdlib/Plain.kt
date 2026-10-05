@@ -21,3 +21,9 @@ fun runPlainFi(b: PBefore): Int = runPlain { b.before(it) }
 suspend fun usePBefore(b: PBefore, x: Int): Int = b.before(x)
 fun plainFn(): suspend (Int) -> Int = { x -> plainAsync(x) }
 fun threadName(): String = Thread.currentThread().toString()
+
+// a suspend function that returns a value class: the result is the object (D2)
+@JvmInline value class PlainVc(val a: Any?)
+suspend fun plainVcAsync(x: Any?): PlainVc = suspendCoroutine { c -> Thread { Thread.sleep(10); c.resume(PlainVc(x)) }.start() }
+suspend fun plainVcSync(x: Any?): PlainVc = PlainVc(x)
+fun plainVcValue(v: PlainVc): Any? = v.a
