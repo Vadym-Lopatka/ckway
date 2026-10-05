@@ -1,0 +1,14 @@
+{:paths ["src"]
+ :deps {ckway/ckway {:local/root "../.."}
+        org.clojure/clojure {:mvn/version "1.12.1"}
+        io.insert-koin/koin-core-jvm {:mvn/version "4.2.2"}}
+ :aliases
+ {;; only to COMPILE a `:<>` call (reified Koin functions). A stored bridge needs no compiler.
+  :kotlinc {:extra-deps {org.jetbrains.kotlin/kotlin-compiler-embeddable
+                         {:mvn/version "2.4.20" :exclusions [org.jetbrains.kotlin/kotlin-reflect]}}}
+  :test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :jvm-opts ["-Dckway.cache.dir=target/cache"]
+         :main-opts ["-m" "cognitect.test-runner"]}
+  :run {:jvm-opts ["-Dckway.cache.dir=target/cache"]
+        :main-opts ["-m" "spike.koin.core"]}}}
