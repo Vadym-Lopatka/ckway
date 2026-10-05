@@ -1345,6 +1345,33 @@
             (str "(" (or (:call-class member) (:class member)) "/" (:name member) (when (pos? n) (str " " (names n))) ")")
             (str "(." (:name member) " " (names (max 1 n)) ")")))))))
 
+(defn- pkg-alias
+  "The alias that the namespace being compiled (`*ns*`; the namespace of the caller, also at run time in a REPL or a test)
+  uses for the namespace of the Kotlin package `pkg` (`kt/require`), or nil."
+  [^String pkg]
+  (let [target (str "ckway.pkg." (if (str/blank? pkg) "<root>" pkg))]
+    (some (fn [[a n]] (when (= target (str (ns-name n))) a)) (ns-aliases *ns*))))
+
+(defn- class-var-text
+  "The class var of the Kotlin class `internal` (`org/http4k/routing/RoutingHandler`) as the caller writes it: `r/RoutingHandler`
+  when the namespace of its package has an alias in the calling namespace, else the full name."
+  [^String internal]
+  (let [i (.lastIndexOf internal "/")
+        pkg (if (neg? i) "" (str/replace (subs internal 0 i) "/" "."))
+        simple (subs internal (inc i))]
+    (if-let [a (pkg-alias pkg)]
+      (str a "/" simple)
+      (if (str/blank? pkg) simple (str pkg "." simple)))))
+
+(defn- call-name-text
+  "The name of the var `var-name` of the Kotlin package of the declaration `d`, with the alias of the calling namespace."
+  [var-name d]
+  (let [owner (str (:owner d))
+        i (.lastIndexOf owner ".")]
+    (if-let [a (pkg-alias (if (neg? i) "" (subs owner 0 i)))]
+      (str a "/" var-name)
+      var-name)))
+
 (defn- ambiguity-help
   "The explanation that follows the list of the `best` candidates of an ambiguous call, or nil. Two cases are
   understood: a function and a property of one name (one var), and declarations that differ only in what the JVM
@@ -1375,12 +1402,15 @@
              "Kotlin tells them apart by its syntax (`" var-name "(a)` or `a." var-name "`), a var call has only one form. kt does not guess."
              "\n  Way out:"
              (if fname
-               (str "\n    the function: name a parameter, `(" var-name " :" fname " ...)`: a property has no parameter"
+               (str "\n    the function: name a parameter, `(" (call-name-text var-name fun) " :" fname " ...)`: a property has no parameter"
                     "\n    ")
                "\n    ")
              (if recv
-               (str "the property: `((kt/ref X " var-name ") x)`, which is Kotlin `X::" var-name "`; `X` is the class var of `"
-                    (meta/type-text (:type recv)) "`")
+               (if-let [c (:class (:type recv))]
+                 (str "the property: `((kt/ref " (class-var-text c) " " var-name ") x)`, which is Kotlin `"
+                      (subs c (inc (.lastIndexOf ^String c "/"))) "::" var-name "`")
+                 (str "the property: `((kt/ref X " var-name ") x)`, which is Kotlin `X::" var-name "`; `X` is the class var of `"
+                      (meta/type-text (:type recv)) "`"))
                "the property has no receiver, so kt has no form that names it alone")
              (when-not (and fname recv)
                (str "\n  Or call one of them with Java interop:\n" (listing)))))

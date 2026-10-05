@@ -77,8 +77,8 @@
 (deftest a1-the-message-names-the-ways-out
   (let [m (:error (dynamic #'d/routes9 [route]))]
     (is (str/includes? m "(routes9 :list ...)") "the function: name its parameter")
-    (is (str/includes? m "((kt/ref X routes9) x)") "the property: kt/ref")
-    (is (str/includes? m "`fx.r9.Route9`") "the class var that X stands for"))
+    ;; (D4) the class var as written: no alias of the package in the namespace that runs the test, so the full name
+    (is (str/includes? m "((kt/ref fx.r9.Route9 routes9) x)") "the property: kt/ref"))
   (testing "a function without parameters and a property without receiver: no kt form names the property alone"
     (let [m (:error (dynamic #'d/zero9 []))]
       (is (str/includes? m "Java interop") m)
@@ -1456,4 +1456,64 @@
     (is (error-has? (static '(let [v (identity nil)] (d/ovNil9b v))) "nil where Kotlin expects a non-null value of the type parameter `T : Any`")))
   (testing "a Clojure value of a wrong class is still the old error"
     (is (error-has? (static '(let [v (identity 5.5)] (d/welcome9 v))) "`name`" "String"))))
+
+;; ---------------------------------------------------------------- D4
+
+;; The way out for "a function and a property" named `X` for the class: `((kt/ref X routes) x)`. Nobody can type `X`: it is the
+;; class var, as the caller writes it (`r/RoutingHandler`: the alias that the calling namespace uses for the package), else the
+;; full name. The function way out has the alias of the var too.
+
+(defn- in-scratch-ns
+  "Run `f` with `*ns*` a namespace that has the aliases `aliases` ({alias package}) for packages that `kt/require` made."
+  [aliases f]
+  (let [n (create-ns (gensym "ckway.d4-scratch"))]
+    (try
+      (doseq [[a pkg] aliases] (.addAlias n a (the-ns (symbol (str "ckway.pkg." pkg)))))
+      (binding [*ns* n] (f))
+      (finally (remove-ns (ns-name n))))))
+
+(deftest d4-the-class-var-is-written-as-the-caller-writes-it
+  (testing "the class is in the package of the var, the caller has an alias: `d/Route9`"
+    (let [m (:error (in-scratch-ns {'q "fx.r9"} #(dynamic #'d/routes9 [route])))]
+      (is (str/includes? m "((kt/ref q/Route9 routes9) x)") m)
+      (is (str/includes? m "(q/routes9 :list ...)") m)))
+  (testing "the compile error of the static path: the alias of the namespace being compiled"
+    (let [m (compile-error '(d/routes9 ^fx.r9.Route9 (identity nil)))]
+      (is (str/includes? (str m) "((kt/ref d/Route9 routes9) x)") m)
+      (is (str/includes? (str m) "(d/routes9 :list ...)") m)))
+  (testing "no alias for the package: the full name"
+    (let [m (:error (in-scratch-ns {} #(dynamic #'d/routes9 [route])))]
+      (is (str/includes? m "((kt/ref fx.r9.Route9 routes9) x)") m)
+      (is (str/includes? m "(routes9 :list ...)") m)))
+  (testing "a member property of a class and a function: the same"
+    (let [m (compile-error '(d/items9 ^fx.r9.Box9 (identity nil)))]
+      (is (str/includes? (str m) "((kt/ref d/Box9 items9) x)") m)))
+  (testing "no X in the text"
+    (is (not (str/includes? (str (compile-error '(d/routes9 ^fx.r9.Route9 (identity nil)))) " X ")))))
+
+(deftest d4-the-class-is-in-another-package-than-the-var
+  (let [call (fn [] (:error (dynamic #'b9/ambo9 [route])))]
+    (testing "the caller requires both packages"
+      (let [m (in-scratch-ns {'q "fx.r9b" 'p "fx.r9"} call)]
+        (is (str/includes? m "((kt/ref p/Route9 ambo9) x)") m)
+        (is (str/includes? m "(q/ambo9 :list ...)") m)))
+    (testing "the caller has no alias for the package of the class: the full name"
+      (let [m (in-scratch-ns {'q "fx.r9b"} call)]
+        (is (str/includes? m "((kt/ref fx.r9.Route9 ambo9) x)") m)
+        (is (str/includes? m "(q/ambo9 :list ...)") m)))))
+
+(deftest d4-the-ways-out-work
+  (is (= "ambo-fun:1" (b9/ambo9 :list [route])))
+  (is (= ["ambo-prop:x"] ((kt/ref d/Route9 ambo9) route)) "the property, as the message writes it")
+  (is (= ["routes-prop:x"] ((kt/ref d/Route9 routes9) route))))
+
+(deftest d4-nothing-else-changed
+  (testing "a function without parameters and a property without receiver: still no kt form for the property"
+    (let [m (:error (dynamic #'d/zero9 []))]
+      (is (str/includes? m "Java interop") m)
+      (is (not (str/includes? m "kt/ref")) m)))
+  (testing "the first line and the candidates"
+    (let [m (:error (dynamic #'d/routes9 [route]))]
+      (is (str/includes? m "is ambiguous. Candidates:"))
+      (is (str/includes? m "val fx.r9.Route9.routes9")))))
 

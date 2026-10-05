@@ -11,3 +11,7 @@ fun far9(): Far9 = Far9()
 interface ExtFar9<in IN, out OUT> : (IN) -> OUT { override operator fun invoke(target: IN): OUT }
 class ExtFarImpl9 : ExtFar9<String, String> { override fun invoke(target: String): String = "ext-far:$target" }
 fun extFar9(): ExtFarImpl9 = ExtFarImpl9()
+
+// Batch D (D4): a function and a property of one name whose receiver class is in another package than the var
+fun ambo9(vararg list: fx.r9.Route9): String = "ambo-fun:" + list.size
+val fx.r9.Route9.ambo9: List<String> get() = listOf("ambo-prop:" + name)
