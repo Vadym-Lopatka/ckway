@@ -148,8 +148,8 @@
     (is (re-find #"is ambiguous" msg))
     (is (re-find #"function and a property" msg) msg)
     ;; the ways out (round9, A1): the function by a named argument, the property by a reference
-    (is (re-find #"\(name :a \.\.\.\)" msg) msg)
-    (is (re-find #"\(\(kt/ref X name\) x\)" msg) msg)))
+    (is (re-find #"\(p/name :a \.\.\.\)" msg) msg)
+    (is (re-find #"\(\(kt/ref p/A name\) x\)" msg) msg)))
 
 ;; ---------------------------------------------------------------- an integer literal that fits Int is an Int
 
