@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs the tests of the Ktor spike. The bridge cache is private to this directory (target/cache, mode 700),
+# so the bridge cache of the user is never touched.
+set -e
+cd "$(dirname "$0")/.."
+mkdir -p target/cache
+chmod 700 target/cache
+exec clojure -M:test:kotlinc "$@"
