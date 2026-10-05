@@ -104,4 +104,11 @@ A member is in the namespace of the package of the class that declares it (`call
 | `response.status.value` | `(http/value (cst/status response))` |
 | `client.close()` | `(cl/.close client)` |
 
-Not possible: `status(HttpStatusCode.NotFound) { call, _ -> ... }` of StatusPages. See `FINDINGS.md`, row 4.
+Not possible with the `kt` form: `status(HttpStatusCode.NotFound) { call, _ -> ... }` of StatusPages. Two overloads have the same JVM
+signature, so kt stops with an "ambiguous" error (the error is raised when the module runs, and `start` throws it; it is never a wrong call).
+Plain Java interop works: `(.status ^StatusPagesConfig cfg (into-array HttpStatusCode [code]) (reify kotlin.jvm.functions.Function3 (invoke [_ call status k] ... kotlin.Unit/INSTANCE)))`.
+The handler then gets an `ApplicationCall`. `.statusWithContext` gets a `StatusContext`. The spike does not use it: the
+suspend calls in such a handler block a Ktor thread, and nothing cancels them. It uses a catch-all route.
+
+One difference to a usual Ktor app: the catch-all route `{...}` answers 404 for every method, so a known path with a wrong
+method (for example `PUT /products`) gives 404 `{"error":"not found"}`, not 405.

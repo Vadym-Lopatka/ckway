@@ -163,7 +163,10 @@
   (let [s (core/start! {})]
     (core/stop! s)
     (core/stop! s)
-    (is true)))
+    (is true))
+  (testing "a system map with no server"
+    (is (nil? (core/stop! {})))
+    (is (nil? (core/stop! nil)))))
 
 (deftest concurrent-requests
   (with-system [s {}]

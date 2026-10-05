@@ -20,8 +20,7 @@
             '[io.ktor.server.request :as req]
             '[io.ktor.server.plugins.statuspages :as sp]
             '[io.ktor.server.plugins.calllogging :as cl]
-            '[io.ktor.http :as http]
-            '[io.ktor.util :as ku])
+            '[io.ktor.http :as http])
 
 (def default-config
   {:host "127.0.0.1"
@@ -178,8 +177,9 @@
 (defn stop!
   "Stops the server of a system map made by `start!`. Safe to call twice."
   [{:keys [^EmbeddedServer server config]}]
-  ;; Kotlin: server.stop(gracePeriodMillis = 100, timeoutMillis = 2000)
-  (eng/.stop server (:grace-ms config) (:timeout-ms config))
+  (when server
+    ;; Kotlin: server.stop(gracePeriodMillis = 100, timeoutMillis = 2000)
+    (eng/.stop server (long (:grace-ms config 100)) (long (:timeout-ms config 2000))))
   nil)
 
 (defn- await-port
