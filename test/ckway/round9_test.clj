@@ -327,6 +327,101 @@
                      t))]
            {:error (ex-message t)}))))
 
+;; ---------------------------------------------------------------- B1
+
+;; Kotlin: `Req9("GET", "/a")` calls `operator fun invoke` of the companion when no constructor fits.
+
+(deftest b1-a-companion-invoke-as-a-constructor-form
+  (testing "an interface: two invoke overloads (static path, dynamic path, var as a value, the old form)"
+    (is (= "GET /a" (.getText (d/Req9 "GET" "/a"))))
+    (is (= "GET /b" (.getText (d/Req9 "/b"))))
+    (is (= "GET /a" (.getText ^fx.r9.Req9 (dynamic #'d/Req9 ["GET" "/a"]))))
+    (is (= "GET /b" (.getText ^fx.r9.Req9 (dynamic #'d/Req9 ["/b"]))))
+    (is (= "PUT /z" (.getText ^fx.r9.Req9 (as-value #'d/Req9 "PUT" "/z"))))
+    (is (= ["GET /1" "GET /2"] (mapv #(.getText ^fx.r9.Req9 %) (map d/Req9 ["/1" "/2"]))))
+    (is (= "GET /a" (.getText (d/.invoke d/Req9 "GET" "/a"))) "(d/.invoke d/Req9 ...) still works"))
+  (testing "a named argument; the receiver (the class var) shifts nothing"
+    (is (= "GET /n" (.getText (d/Req9 :uri "/n"))))
+    (is (= "PATCH /n" (.getText (d/Req9 "PATCH" :uri "/n"))))
+    (is (= "GET /n" (.getText ^fx.r9.Req9 (dynamic #'d/Req9 [] {"uri" "/n"})))))
+  (testing "the result is typed: no reflection on it"
+    (let [warnings (java.io.StringWriter.)]
+      (binding [*err* warnings *warn-on-reflection* true]
+        (eval-here '(.getText (d/Req9 "GET" "/w"))))
+      (is (not (str/includes? (str warnings) "Reflection warning")) (str warnings))))
+  (testing "a named companion, an abstract class"
+    (is (= "factory:3" (.getTag (d/Named9 3))))
+    (is (= "factory:3" (.getTag ^fx.r9.Named9 (dynamic #'d/Named9 [3]))))
+    (is (= "abs:s" (.getTag (d/Abs9 "s"))))
+    (is (= "abs:s" (.getTag ^fx.r9.Abs9 (dynamic #'d/Abs9 ["s"])))))
+  (testing "an extension invoke on the Companion that the package declares"
+    (is (= "ext-invoke:4" (d/Ext9 4) (dynamic #'d/Ext9 [4]) (as-value #'d/Ext9 4)))
+    (is (= "ext" (.getTag (d/Ext9))) "the constructor of Ext9 still works")))
+
+(deftest b1-a-constructor-that-fits-always-wins
+  (testing "primary and secondary constructor, and an invoke that takes the same Int"
+    (is (= "x" (.getTag (d/Both9 "x"))))
+    (is (= "ctor-int:3" (.getTag (d/Both9 3))))
+    (is (= "ctor-int:3" (.getTag ^fx.r9.Both9 (dynamic #'d/Both9 [3]))))
+    (is (= "ctor-int:3" (.getTag ^fx.r9.Both9 (as-value #'d/Both9 3)))))
+  (testing "no constructor fits: the invoke that does"
+    (is (= "invoke-flag:true" (.getTag (d/Both9 true))))
+    (is (= "invoke-flag:false" (.getTag ^fx.r9.Both9 (dynamic #'d/Both9 [false]))))
+    (is (= "invoke-two:ab" (.getTag (d/Both9 "a" "b"))))
+    (is (= "invoke-two:ab" (.getTag ^fx.r9.Both9 (dynamic #'d/Both9 ["a" "b"]))))))
+
+(deftest b1-the-error-lists-both-kinds
+  (testing "an interface: no constructor, and no invoke that fits (static: a compile error)"
+    (let [m (compile-error '(d/Req9 1 2 3))]
+      (is (str/includes? (str m) "(Req9 1 2 3) fits no constructor and no `operator fun invoke` of the companion object") m)
+      (is (str/includes? m "As a constructor:") m)
+      (is (str/includes? m "`Req9` has no public constructor: it is an interface") m)
+      (is (str/includes? m "As a companion `invoke`") m)
+      (is (str/includes? m "operator fun fx.r9.Req9.Companion.invoke(method: String, uri: String): fx.r9.Req9") m)
+      (is (str/includes? m "operator fun fx.r9.Req9.Companion.invoke(uri: String): fx.r9.Req9") m)))
+  (testing "the dynamic path: the same error"
+    (is (error-has? (dynamic #'d/Req9 [1 2 3]) "fits no constructor and no `operator fun invoke`" "As a constructor:"
+                    "operator fun fx.r9.Req9.Companion.invoke(uri: String)"))
+    (is (error-has? (dynamic #'d/Req9 [1]) "(Req9 1) fits no constructor" "`uri` is String but got Long")))
+  (testing "a class with constructors: they are listed too, with the reason"
+    (let [r (dynamic #'d/Both9 [1.5])]
+      (is (error-has? r "(Both9 1.5) fits no constructor and no `operator fun invoke`" "class Both9(tag: String)"
+                      "class Both9(n: Int)" "operator fun fx.r9.Both9.Companion.invoke(flag: Boolean)"
+                      "the class var is the first argument here") r)))
+  (testing "an invoke of an extension that fits the arguments but not the class var: not a candidate"
+    (is (error-has? (dynamic #'d/Ext9 ["s"]) "(Ext9 \"s\") fits no constructor" "operator fun fx.r9.Ext9.Companion.invoke(x: Int)"))))
+
+(deftest b1-nothing-else-changed
+  (testing "an invoke that is no operator is not called as a constructor form"
+    (let [r (static '(d/NoOp9 1))]
+      (is (error-has? r "no Kotlin declaration of `NoOp9` fits") r)
+      (is (not (str/includes? (:error r) "companion")) r))
+    (is (= "noop:1" (.getTag (d/.invoke d/NoOp9 1))) "the member call by name still works")
+    (is (= "p" (.getTag (d/NoOp9 "p")))))
+  (testing "a class with a companion without invoke: the error is the old one"
+    (is (error-has? (static '(d/Plain9 1 2)) "too many arguments"))
+    (is (not (str/includes? (:error (static '(d/Plain9 1 2))) "companion object")))
+    (is (= "p" (.getTag (d/Plain9 "p"))))
+    (is (= "other:1" (.getTag (d/.other d/Plain9 1)))))
+  (testing "an interface without a companion invoke: the old message"
+    (is (error-has? (static '(d/Router9 "x")) "has no public constructor: it is an interface"))
+    (is (not (str/includes? (:error (static '(d/Router9 "x"))) "fits no constructor"))))
+  (testing "an ambiguity between the constructors is not hidden by the fallback"
+    (is (error-has? (static '(d/Req9 :uri)) "names a parameter but has no value"))))
+
+(deftest b1-an-object-with-invoke
+  (testing "`Obj9(1)` is `Obj9.invoke(1)`: the var holds the instance and the call form is the invoke"
+    (is (= "obj-invoke:5" (d/Obj9 5)))
+    (is (= "obj-invoke:5" (d/.invoke d/Obj9 5)))
+    (is (= "obj-plain" (d/.plain d/Obj9)))
+    (is (instance? fx.r9.Obj9 d/Obj9)))
+  (testing "an extension invoke on the object"
+    (is (= "objext-invoke:q" (d/ObjExt9 "q"))))
+  (testing "an invoke that does not fit: the error is the one of the call of `.invoke`"
+    (is (error-has? (static '(d/Obj9 "no")) "no Kotlin declaration of `.invoke` fits")))
+  (testing "an object without an invoke: the old error"
+    (is (error-has? (static '(d/NoInv9 1)) "`NoInv9` is an object, not a function: it cannot be called"))))
+
 ;; ---------------------------------------------------------------- B3
 
 ;; `val Prop9.Companion.zero9`, `var Prop9.Companion.level9`: the class var is the receiver, as it is for the members of a

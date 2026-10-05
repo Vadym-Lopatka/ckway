@@ -222,7 +222,13 @@ A constructor parameter counts as a property when the class has a public propert
 * A declaration without a JVM member, and a `fun interface` without exactly one abstract method, when a Clojure
   function has to be adapted to it (from the code).
 * An `object` or an enum entry is a value, not a function: `(f/Registry)` is a compile error. `apply` on one is a
-  `ClassCastException`.
+  `ClassCastException`. An `object` with an `operator fun invoke` (its own or inherited, or an extension of the same
+  package) is callable as `(f/Registry 1)`; `(f/.invoke f/Registry 1)` works too. `apply` on the var is still an error.
+* The call of a class var falls back to the `operator fun invoke` of the companion object when no constructor fits
+  (rule 3). It reads the members of the companion of that class and the extensions on its `Companion` that the package
+  of the class var declares. An `invoke` that the companion inherits from a supertype, and an extension `invoke` that
+  another package declares, are not seen: write `(alias/.invoke alias/Name ...)`. A type alias of a class in another
+  package does not see the companion `invoke` of its target either.
 ## 11. Kotlin metadata
 
 `kt` reads metadata with `kotlin-metadata-jvm` 2.4.20 (`readStrict`). Classes compiled by Kotlin 2.2.0, 2.4.0, 2.4.20,

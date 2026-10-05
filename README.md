@@ -113,6 +113,13 @@ A class var means what the bare class name means in Kotlin (call it to construct
 
 Examples 02 and 03.
 
+A call of a class var follows Kotlin: the constructors first; when none fits (an interface has none), the `operator fun invoke` of the companion object, and the `operator fun invoke` extensions on its `Companion` that the same package declares. A constructor that fits always wins. A function that is not an `operator` is not called this way. When neither fits, the error lists both kinds. `(h/.invoke h/Request ...)` still works. An `object` that has an `operator fun invoke` is called the same way (`Foo(1)`).
+
+```clojure
+;; Kotlin: Request(GET, "/a")   -- http4k: interface Request { companion object { operator fun invoke(method: Method, uri: String): Request } }
+(h/Request h/Method.GET "/a")
+```
+
 The class var is also the receiver of an extension on a `Companion`, a function or a property (`val Filter.Companion.NoOp`; `kt/set!` writes a `var`):
 
 ```clojure

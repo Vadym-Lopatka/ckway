@@ -112,6 +112,73 @@ fun withHost9(block: (Host9) -> String): String = block(Host9())
 
 // ================================================================ Batch B: declarations and function values
 
+// ---- B1: a companion `operator fun invoke` is a constructor form (http4k: `Request(GET, "/a")`)
+interface Req9 {
+    val text: String
+
+    companion object {
+        operator fun invoke(method: String, uri: String): Req9 = object : Req9 { override val text = "$method $uri" }
+        operator fun invoke(uri: String): Req9 = invoke("GET", uri)
+        // not an operator: Kotlin does not call it as `Req9(...)`
+        fun make(uri: String): Req9 = invoke("MAKE", uri)
+    }
+}
+
+// a constructor and a companion invoke: a constructor that fits always wins
+class Both9(val tag: String) {
+    constructor(n: Int) : this("ctor-int:$n")
+
+    companion object {
+        operator fun invoke(flag: Boolean): Both9 = Both9("invoke-flag:$flag")
+        operator fun invoke(a: String, b: String): Both9 = Both9("invoke-two:$a$b")
+        // an invoke that fits what the constructor fits as well: the constructor still wins
+        operator fun invoke(n: Int, extra: Int = 0): Both9 = Both9("invoke-int:$n")
+    }
+}
+
+// an invoke that is no operator: Kotlin does not call it as `NoOp9(...)`
+class NoOp9(val tag: String) {
+    companion object { fun invoke(x: Int): NoOp9 = NoOp9("noop:$x") }
+}
+
+// a named companion
+class Named9(val tag: String) {
+    companion object Factory {
+        operator fun invoke(x: Int): Named9 = Named9("factory:$x")
+    }
+}
+
+// a class with a constructor and a companion, but no invoke
+class Plain9(val tag: String) {
+    companion object { fun other(x: Int) = Plain9("other:$x") }
+}
+
+// an abstract class with a companion invoke
+abstract class Abs9 {
+    abstract val tag: String
+    companion object {
+        operator fun invoke(s: String): Abs9 = object : Abs9() { override val tag = "abs:$s" }
+    }
+}
+
+// an extension invoke on a Companion that the package declares
+class Ext9 {
+    val tag: String = "ext"
+    companion object
+}
+operator fun Ext9.Companion.invoke(x: Int): String = "ext-invoke:$x"
+fun Ext9.Companion.build9(x: Int): String = "ext-fun:$x"
+
+// an object with an invoke
+object Obj9 {
+    operator fun invoke(x: Int): String = "obj-invoke:$x"
+    fun plain(): String = "obj-plain"
+}
+object NoInv9 { fun plain(): String = "noinv" }
+// an extension invoke on an object
+object ObjExt9
+operator fun ObjExt9.invoke(x: String): String = "objext-invoke:$x"
+
 // ---- B3: the class var as the receiver of an extension property on a Companion (http4k: `Filter.NoOp`)
 class Prop9(val tag: String = "p") {
     companion object

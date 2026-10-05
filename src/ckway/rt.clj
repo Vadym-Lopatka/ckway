@@ -779,9 +779,19 @@
          parsed {:positional (vec (map-indexed (fn [i x] {:arg x :info (info i x) :idx i}) pos))
                  :named (vec (map-indexed (fn [i [k x]] [k {:arg x :info (cond-> (info k x) elems? (as-> inf (if-let [es (elements x)] (assoc inf :elems es) inf))) :idx (+ n i)}]) named))
                  :strict-elems elems?}]
-     (try (let [{:keys [decl items checks]} (r/choose var-name decls parsed false)]
+     (try (let [invokes (:kt/invokes (meta v))
+                root (when (seq invokes) (.getRawRoot v))
+                {:keys [decl items checks via-invoke]}
+                (r/choose-call var-name decls invokes parsed #(r/with-class-first % (r/var-form v) (r/value-info root)) false)]
             (r/check-supported! decl checks)
-            (prepare (r/plan decl items)))
+            (let [call (prepare (r/plan decl items))]
+              ;; the class var is the receiver of the companion `invoke`: the first value
+              (if via-invoke
+                (fn [^objects a] (let [b (object-array (inc (alength a)))]
+                                   (aset b 0 root)
+                                   (System/arraycopy a 0 b 1 (alength a))
+                                   (call b)))
+                call)))
           (catch clojure.lang.ExceptionInfo e
             (if (and (not elems?) (:kt/elements-needed (ex-data e)))
               (element-call v decls n (mapv first named) lits)

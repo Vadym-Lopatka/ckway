@@ -1689,6 +1689,66 @@
                 (catch clojure.lang.ExceptionInfo e2 (if (:kt/ambiguous (ex-data e2)) (throw e2) (throw e))))
            (throw e)))))
 
+;; ---------------------------------------------------------------- the call of a class var
+
+(defn var-form
+  "The form that reads the var `v` from the current namespace: `alias/Name` when the namespace has an alias for it."
+  [^clojure.lang.Var v]
+  (let [alias (some (fn [[a n]] (when (= n (.ns v)) a)) (ns-aliases *ns*))]
+    (symbol (if alias (str alias) (str (ns-name (.ns v)))) (str (.sym v)))))
+
+(defn with-class-first
+  "`parsed` with the class var `form` (its value `root`) as a new first positional argument: the receiver of a companion
+  member. The positions of the written arguments move by one."
+  [parsed form info]
+  (let [up (fn [e] (update e :idx inc))]
+    {:positional (into [{:arg form :info info :idx 0}] (map up) (:positional parsed))
+     :named (mapv (fn [[n e]] [n (up e)]) (:named parsed))
+     :strict-elems (:strict-elems parsed)}))
+
+(defn- indent-text [msg n]
+  (str/join "\n" (map #(str (apply str (repeat n \space)) %) (str/split-lines (str/replace-first msg #"^kt: " "")))))
+
+(defn choose-call
+  "`choose` for the call of a class var, which Kotlin resolves as: the constructors first; when none is applicable (or
+  the class has none), the `operator fun invoke` members of its companion object, and the `operator fun invoke`
+  extensions on the Companion (`invokes`: the declarations, see `ckway.core`). A constructor that fits always wins; an
+  ambiguity is an error of its own kind. When neither fits, the error shows both. `with-class` makes the parsed call that
+  has the class var as the receiver. The result of the `invoke` choice has `:via-invoke true`: its items start with the class
+  var."
+  [var-name decls invokes parsed with-class compile?]
+  (try (choose var-name decls parsed compile?)
+       (catch clojure.lang.ExceptionInfo e
+         (let [d (ex-data e)]
+           (if (or (empty? invokes) (not (:kt/error d)) (:kt/ambiguous d) (:kt/elements-needed d))
+             (throw e)
+             (try (assoc (choose ".invoke" invokes (with-class parsed) compile?) :via-invoke true)
+                  (catch clojure.lang.ExceptionInfo e2
+                    (let [d2 (ex-data e2)]
+                      (if (or (not (:kt/error d2)) (:kt/ambiguous d2) (:kt/elements-needed d2))
+                        (throw e2)
+                        (fail (str "kt: " (call-text var-name (concat (map :arg (:positional parsed))
+                                                                      (mapcat (fn [[n e]] [(keyword n) (:arg e)]) (:named parsed))))
+                                   " fits no constructor and no `operator fun invoke` of the companion object.\n"
+                                   "  As a constructor:\n" (indent-text (ex-message e) 4) "\n"
+                                   "  As a companion `invoke` (Kotlin calls it for `" var-name "(...)`; the class var is the first argument here):\n" (indent-text (ex-message e2) 4))
+                              {:kt/candidates (concat (:kt/candidates d) (:kt/candidates d2)) :kt/no-fit true}))))))))))
+
+(defn object-invoke?
+  "Has the object `obj` (a declaration of kind :object) an `operator fun invoke`, a member of it or of a supertype, or
+  an extension on it? `invokes` are the `.invoke` declarations of the package."
+  [obj invokes]
+  (let [^Class oc (jvm-class (:owner obj))]
+    (boolean
+     (when oc
+       (some (fn [d]
+               (and (contains? (:flags d) :operator)
+                    (= 1 (count (:receivers d)))
+                    (let [r (first (:receivers d))
+                          rc (jvm-class (if (= :dispatch (:role r)) (:owner d) (or (:jvm-type r) (some-> (:class (:type r)) meta/internal->binary))))]
+                      (and rc (not (:companion-of r)) (.isAssignableFrom ^Class rc oc)))))
+             invokes)))))
+
 ;; ---------------------------------------------------------------- plan
 
 (declare plan*)
@@ -2523,7 +2583,9 @@
         decls (:kt/decls (meta v))
         var-name (str (.sym ^clojure.lang.Var v))
         parsed (parse-args var-name decls forms (fn [f] {:arg f :info (form-info env f)}))
-        {:keys [decl items checks] :as r} (try (choose var-name decls parsed true)
+        invokes (:kt/invokes (meta v))
+        {:keys [decl items checks] :as r} (try (choose-call var-name decls invokes parsed
+                                                            #(with-class-first % (var-form v) (value-info (.getRawRoot ^clojure.lang.Var v))) true)
                                                (catch clojure.lang.ExceptionInfo e
                                                  ;; the elements of a collection passed as a whole to a vararg choose at run time
                                                  (if (and (:kt/elements-needed (ex-data e)) (not-any? #(= "<>" (first %)) (:named parsed)))
