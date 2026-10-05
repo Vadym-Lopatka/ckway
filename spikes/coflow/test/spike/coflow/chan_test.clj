@@ -11,6 +11,7 @@
 (kt/require '[kotlinx.coroutines :as co]
             '[kotlinx.coroutines.channels :as kch]
             '[kotlinx.coroutines.flow :as kflow]
+            '[kotlinx.coroutines.selects :as sel]
             '[kotlin.coroutines :as kc])
 
 (defn- with-scope [f]
@@ -167,3 +168,133 @@
     (is (= "a" (kch/.getOrNull (kch/.receiveCatching c))))
     (kch/.close c)
     (is (nil? (kch/.getOrNull (kch/.receiveCatching c))) "closed")))
+
+;; ---------------------------------------------------------------------------------------------------------------
+;; capacity is exact after abandoned takes: no value is out of the Kotlin channel without a taker that committed
+
+(deftest sliding-port-holds-exactly-its-capacity-after-racing-abandoned-takes
+  (with-scope
+    (fn [scope]
+      (dotimes [round 150]
+        (let [cap 10
+              p (cc/port scope (cc/sliding cap))
+              got (atom [])
+              stop (atom false)
+              reader (future (while (not @stop)
+                               (let [[v c] (a/alts!! [p (a/timeout (rand-int 2))])]
+                                 (when (and (some? v) (identical? c p)) (swap! got conj v)))))]
+          (dotimes [i 300] (a/>!! p i) (when (zero? (rem i 7)) (Thread/yield)))
+          (reset! stop true)
+          @reader
+          (dotimes [i 50] (a/>!! p (+ 1000 i)))
+          (cc/close! p)
+          (let [rest-of (cc/drain p)]
+            (is (= (range 1040 1050) rest-of) (str "round " round ": exactly the newest " cap))
+            (is (apply < -1 (concat @got rest-of)) "order, no duplicate")))))))
+
+(deftest fixed-port-holds-exactly-its-capacity-after-an-abandoned-take
+  (with-scope
+    (fn [scope]
+      (dotimes [round 50]
+        (let [p (cc/port scope 5)]
+          (is (= :timeout (let [[v c] (a/alts!! [p (a/timeout 2)])] (if (identical? c p) v :timeout))))
+          (let [accepted (count (take-while true? (map #(a/offer! p %) (range 20))))]
+            (is (= 5 accepted) "an abandoned take leaves no extra slot"))
+          (is (= [0 1 2 3 4] (vec (repeatedly 5 #(a/<!! p)))) "in order, nothing lost"))))))
+
+(deftest abandoned-takes-fixed-port-storm-no-loss-no-duplicate
+  (with-scope
+    (fn [scope]
+      (dotimes [round 20]
+        (let [p (cc/port scope 7)
+              got (atom [])
+              stop (atom false)
+              reader (future (loop []
+                               (let [[v c] (a/alts!! [p (a/timeout (rand-int 2))])]
+                                 (cond (and (nil? v) (identical? c p)) :closed
+                                       (identical? c p) (do (swap! got conj v) (recur))
+                                       :else (recur)))))]
+          (dotimes [i 2000] (a/>!! p i))
+          (cc/close! p)
+          (is (= :closed (deref reader 20000 :hang)))
+          (is (= (range 2000) @got)))))))
+
+(deftest a-waiting-taker-is-served-by-every-send-path
+  (with-scope
+    (fn [scope]
+      (testing "core.async put"
+        (let [p (cc/port scope 3) f (future (a/<!! p))]
+          (Thread/sleep 30) (a/>!! p :put)
+          (is (= :put (deref f 2000 :hang)))))
+      (testing "put! with a callback"
+        (let [p (cc/port scope 3) f (future (a/<!! p))]
+          (Thread/sleep 30) (a/put! p :put-cb)
+          (is (= :put-cb (deref f 2000 :hang)))))
+      (testing "Kotlin-side send from a proc (send! / send1! / try-send1! / sent!)"
+        (doseq [[nm send] [["send!" #(cc/send! %1 %2)]
+                           ["send1!" #(cc/send1! %1 %2)]
+                           ["try-send1!" #(cc/try-send1! %1 %2)]
+                           ["select onSend + sent!" (fn [p v]
+                                                      ;; Kotlin: select { ch.onSend(v) { } }
+                                                      (sel/select
+                                                       (fn [sb] (sel/.invoke sb (kch/onSend (cc/->kotlin p)) v (fn [_] (cc/sent! p))))))]]
+                [buf mk] [[3 identity] [(cc/sliding 3) identity] [(cc/dropping 3) identity]]]
+          (let [p (cc/port scope buf) f (future (a/<!! p))]
+            (Thread/sleep 30) (send p :k)
+            (is (= :k (deref f 2000 :hang)) nm))))
+      (testing "put pump: the put waited because the buffer was full"
+        (let [p (cc/port scope 1)]
+          (a/>!! p :a)
+          (let [pr (future (a/>!! p :b))]
+            (Thread/sleep 30)
+            (is (= :a (a/<!! p)))
+            (is (= :b (deref (future (a/<!! p)) 2000 :hang)))
+            (is (true? (deref pr 2000 :hang))))))
+      (testing "close with buffered values: values first, then nil"
+        (let [p (cc/port scope 5)]
+          (a/>!! p 1) (a/>!! p 2) (cc/close! p)
+          (is (= [1 2 nil] [(a/<!! p) (a/<!! p) (a/<!! p)]))))
+      (testing "close wakes a waiting taker with nil"
+        (let [p (cc/port scope 5) f (future (a/<!! p))]
+          (Thread/sleep 30) (cc/close! p)
+          (is (nil? (deref f 2000 :hang))))))))
+
+(deftest alts-over-two-ports-and-over-a-port-and-a-core-async-channel
+  (with-scope
+    (fn [scope]
+      (let [p1 (cc/port scope 3) p2 (cc/port scope 3) c (a/chan 3)]
+        (dotimes [_ 200]
+          (let [f (future (a/alts!! [p1 p2 c]))]
+            (Thread/sleep 1)
+            (a/>!! p2 :two)
+            (let [[v ch] (deref f 2000 [:hang nil])]
+              (is (= :two v)) (is (identical? ch p2)))))
+        (dotimes [_ 200]
+          (let [f (future (a/alts!! [p1 c]))]
+            (Thread/sleep 1)
+            (a/>!! c :chan)
+            (let [[v ch] (deref f 2000 [:hang nil])]
+              (is (= :chan v)) (is (identical? ch c)))))
+        (testing "two takers on two ports, one value each: no loss, no double take"
+          (dotimes [_ 100]
+            (let [fs (vec (for [_ (range 2)] (future (a/alts!! [p1 p2 (a/timeout 50)]))))]
+              (a/>!! p1 :x)
+              (let [rs (mapv deref fs)
+                    got (filter #(and (some? (first %)) (not= :timeout (first %))) rs)]
+                (is (<= (count got) 1))
+                (when (empty? got) (is (= :x (a/<!! p1))))
+                (is (nil? (a/poll! p1)))))))))))
+
+(deftest rendezvous-port-hands-over-to-a-waiting-taker
+  (with-scope
+    (fn [scope]
+      (let [p (cc/port scope 0) f (future (a/<!! p))]
+        (Thread/sleep 30) (a/>!! p :by-put)
+        (is (= :by-put (deref f 2000 :hang))))
+      (let [p (cc/port scope 0) f (future (a/<!! p))]
+        (Thread/sleep 30) (cc/send! p :by-send)
+        (is (= :by-send (deref f 2000 :hang))))
+      (let [p (cc/port scope 0) f (future (a/>!! p :late))]
+        (Thread/sleep 30)
+        (is (= :late (a/<!! p)))
+        (is (true? (deref f 2000 :hang)))))))

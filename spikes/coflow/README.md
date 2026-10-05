@@ -86,8 +86,7 @@ flow; `(running-scope g)` gives its `CoroutineScope`.
   A channel commits a take or a put only if the flag is still free, under the lock, and the commit makes it busy. So exactly
   one source wins, nothing is taken from a user's channel that the proc does not consume, and nothing is put into it that the
   proc does not write. Our own ports take part through their `ReadPort`/`WritePort` implementation (the take path of
-  `KPort`): a value that a pump took for a handler that is no longer free stays in the port (the stash), in its place, and
-  counts in its capacity. A proc with no user ports keeps the Kotlin `select` fast path. Paused procs, procs that wait in a
+  `KPort`): a pump takes a value out of the channel only for a handler that commits, so nothing is held outside the port. A proc with no user ports keeps the Kotlin `select` fast path. Paused procs, procs that wait in a
   transform, inputs that the filter excludes and flows that were never started take nothing.
   If a proc is cancelled by force while it waits (opt-in grace, or `Job.cancel`), a handler that had already committed
   has delivered its message to a wait that no longer exists: that message is lost. A stop is not a cancel: the proc takes the
@@ -106,19 +105,21 @@ controlled moment: control wins then the channel gives nothing; the channel wins
 only if control did not win; 1000 races; a proc waiting on the user's channel and paused/stopped takes nothing; the stop race
 in all arms with loss 0) and `item-2-in-ports-lose-nothing-with-stops-in-the-flood` in `fixes_test.clj`.
 
-### The report channel and the hand-held value
+### The report channel and the pump
 
 A take of a core.async user on a port first tries the Kotlin channel (`tryReceive`: a message that is there is given at once),
-and otherwise registers the handler; a pump coroutine then receives from the Kotlin channel only while a handler waits. If that
-handler is no longer free when the value arrives (an `alts!!` took another branch), the pump keeps the value (the *stash*), and
-the next take gets it first, so it is never lost or reordered. The stash counts as one slot of the capacity for the sliding
-and dropping ports (the flow's own report and error channels are sliding): when buffer plus stash is full, a sliding port drops
-the stash (the oldest) and a dropping port drops the new value.
-**Open (found under CPU load, 1 failure in about 10 runs of `item-3-abandoned-takes-never-lose-or-reorder-and-add-no-capacity`):** on a sliding port, a send that races the pump's receive can leave the port with its capacity plus one (101 values instead of the newest 100). Order and "nothing lost" hold. Cause: the count of the Kotlin channel is decremented after the pump's receive returns, so a send in between sees a stale count. Not fixed.
-**What is left:** a *fixed-buffer* port that a user builds with `chan/port` can hold one value more than its capacity in this case.
-Why it cannot go: a Kotlin `Channel` has no peek, so a value has to leave the channel before a handler can be offered it; to count
-it we would have to make the suspending `send` of the Kotlin channel refuse while the stash is full, and `Channel.send` has no
-such hook. (The `send` that the flow itself uses on its channels is not affected: they are not read through the pump.)
+and otherwise registers the handler. One lock (`plock`) guards the Kotlin channel, the takers and every receive of a core.async
+reader. The channel is only used with non-suspending calls under that lock.
+A pump coroutine waits only on a conflated `wake` channel. A taker, every put into the channel (core.async put, `send!`,
+`send1!`, `try-send1!`, the put pump, the `sent!` hook after a proc's `select`) and a close all wake it. On a wake the pump
+loops under `plock`: while a taker waits and the channel has an item, it locks the taker's handler, checks that it is still
+active, and only then does `tryReceive` and `commit`. A taker that gave up (a timeout, an `alts!!` that took another branch)
+is dropped and takes nothing. The callbacks run after the lock is released.
+So a value is never out of the channel without a taker that committed. There is no hand-held value, and the capacity is exact
+for every buffer kind (sliding and dropping use the Kotlin `DROP_OLDEST` / `DROP_LATEST` of the channel itself). A close
+delivers the buffered values first; a waiting taker gets nil only when the channel is closed and empty.
+One exception in cost: a rendezvous port (no buffer) cannot be signalled by a suspended Kotlin `send`, so its pump looks again
+every millisecond while a taker waits.
 
 ### Where the quirks of the original come from
 
