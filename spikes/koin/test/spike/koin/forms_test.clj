@@ -101,6 +101,8 @@
       (is (identical? store (k/.get koin store-class)))
       (is (identical? store (k/.getOrNull koin store-class))))))
 
+(declare aot-interface?)
+
 (defn- compiler-present? []
   (try (Class/forName "org.jetbrains.kotlin.cli.jvm.K2JVMCompiler") true
        (catch ClassNotFoundException _ false)))
@@ -109,7 +111,8 @@
   ;; Kotlin: single<ProductStore> { store }
   ;; The interface is made by `defprotocol` at run time: it is not a file on the class path, so the
   ;; Kotlin compiler (which ckway runs for a `:<>` call) cannot name it.
-  (let [msg (try (eval '(do (ckway.core/require '[org.koin.core.module :as m])
+  (when-not (aot-interface?) ; with AOT it compiles: see the last test
+   (let [msg (try (eval '(do (ckway.core/require '[org.koin.core.module :as m])
                             (m/.single (org.koin.dsl.ModuleDSLKt/module false (fn [_] nil))
                                        :definition (fn [_ _] nil)
                                        :<> spike.koin.domain.ProductStore)))
@@ -118,7 +121,7 @@
       (do (is (re-find #"Kotlin compiler rejected" (str msg)))
           (is (re-find #"unresolved reference 'domain'" (str msg))))
       ;; no compiler (the run without :kotlinc): a new `:<>` call cannot be compiled at all
-      (is (re-find #"needs the Kotlin compiler" (str msg))))))
+      (is (re-find #"needs the Kotlin compiler" (str msg)))))))
 
 (deftest any-plus-bind-is-the-public-api-route
   ;; Kotlin: single<Any> { store } bind ProductStore::class
@@ -280,3 +283,21 @@
         app (dsl/koinApplication :appDeclaration (fn [^org.koin.core.KoinApplication a] (k/.modules a ^org.koin.core.module.Module mod)))]
     (k/.close app)
     (is (= [nil] @closed))))
+
+(defn- aot-interface?
+  "True when the interface of the protocol is a class file (AOT-compiled, `target/classes` on the class path)."
+  []
+  (not (instance? clojure.lang.DynamicClassLoader (.getClassLoader ^Class (:on-interface d/ProductStore)))))
+
+(deftest with-aot-the-protocol-is-a-reified-type
+  ;; Kotlin: single<ProductStore> { store }; koin.get<ProductStore>()
+  ;; Only with the alias :aot and `(compile 'spike.koin.domain)` into target/classes. Skipped otherwise.
+  (when (and (aot-interface?) (compiler-present?))
+    (is (= :ok (binding [*ns* (the-ns 'spike.koin.forms-test)] (eval '(let [store (d/memory-store)
+                            mod (dsl/module :moduleDeclaration
+                                            (fn [^org.koin.core.module.Module m]
+                                              (m/.single m :definition (fn [_ _] store) :<> spike.koin.domain.ProductStore)))
+                            app (dsl/koinApplication (fn [^org.koin.core.KoinApplication a]
+                                                       (k/.modules a ^org.koin.core.module.Module mod)))]
+                        (try (when (identical? store (k/.get (k/koin app) :<> spike.koin.domain.ProductStore)) :ok)
+                             (finally (k/.close app))))))))))

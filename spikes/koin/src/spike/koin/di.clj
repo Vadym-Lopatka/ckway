@@ -4,7 +4,11 @@
   Why they exist: Koin keys a definition by a Kotlin class. The `single<T> { }` of Koin is
   `inline reified`, so `T` must be a class that the Kotlin compiler can see. The interface of a
   Clojure protocol is made at run time, so the compiler cannot see it. `single-of` and
-  `factory-of` take the class as a value (a `KClass`) and so work for a protocol."
+  `factory-of` take the class as a value (a `KClass`) and so work for a protocol.
+
+  They do what Koin's own `single` does. That function is `inline`, so its body (`BeanDefinition`,
+  `SingleInstanceFactory`, `Module.indexPrimaryType`, `ScopeRegistry.rootScopeQualifier`) is copied into the
+  bytecode of every Koin user. So these calls are de facto stable ABI, although Koin marks them as internal."
   (:require [ckway.core :as kt]))
 
 (set! *warn-on-reflection* true)
@@ -22,9 +26,10 @@
   ;; Kotlin: ProductStore::class
   (kjvm/kotlin ^Class (:on-interface protocol)))
 
-;; Koin names its root scope "_root_". A definition outside a `scope { }` belongs to it.
-;; Kotlin: ScopeRegistry.rootScopeQualifier   (not reachable: internal API of Koin, so we write the name)
-(def ^:private root-scope (q/named "_root_"))
+;; Koin's root scope. A definition outside a `scope { }` belongs to it.
+;; Kotlin: ScopeRegistry.rootScopeQualifier   (`@PublishedApi internal`: no kt var, but a public JVM method)
+(def ^:private ^org.koin.core.qualifier.Qualifier root-scope
+  (.getRootScopeQualifier org.koin.core.registry.ScopeRegistry/Companion))
 
 (defn single-of
   "Kotlin: `single(qualifier) { scope, params -> ... }`, but keyed by the class `kclass`.

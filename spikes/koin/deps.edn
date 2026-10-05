@@ -1,5 +1,5 @@
 {:paths ["src"]
- :deps {ckway/ckway {:local/root "../.."}
+ :deps {io.github.vadym-lopatka/ckway {:local/root "../.."}
         org.clojure/clojure {:mvn/version "1.12.1"}
         io.insert-koin/koin-core-jvm {:mvn/version "4.2.2"}}
  :aliases
@@ -10,5 +10,7 @@
          :extra-deps {io.github.cognitect-labs/test-runner {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
          :jvm-opts ["-Dckway.cache.dir=target/cache"]
          :main-opts ["-m" "cognitect.test-runner"]}
+  ;; only for the AOT experiment: classes from `(compile 'spike.koin.domain)`
+  :aot {:extra-paths ["target/classes"]}
   :run {:jvm-opts ["-Dckway.cache.dir=target/cache"]
         :main-opts ["-m" "spike.koin.core"]}}}

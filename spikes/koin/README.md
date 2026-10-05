@@ -85,6 +85,13 @@ Every alias sets `-Dckway.cache.dir=target/cache`, so the bridge cache of the us
 | `startKoin { ... }` / `stopKoin()` | `(ctx/startKoin (fn [^KoinApplication a] ...))` / `(ctx/stopKoin)` |
 | `GlobalContext.get()` | `(ctx/.get ctx/GlobalContext)` |
 
+## Why `single-of` is acceptable
+
+Koin's `single` is `inline`. Its body is copied into the bytecode of every user of Koin. The body calls
+`BeanDefinition`, `SingleInstanceFactory`, `Module.indexPrimaryType` and `ScopeRegistry.rootScopeQualifier`.
+`single-of` makes the same calls, so they are de facto stable ABI. `rootScopeQualifier` is `@PublishedApi internal`:
+`kt` gives it no var, so `di.clj` calls its public JVM getter with plain Java interop.
+
 ## Which reads better: reified or the `KClass` twin?
 
 * The reified call, `(k/.get koin :<> T)`, is the same as the Kotlin text. It needs a class that the Kotlin compiler can see, and a compiler or a stored bridge. A generic class needs type arguments: `(java.util.ArrayList String)`.
@@ -95,3 +102,15 @@ Every alias sets `-Dckway.cache.dir=target/cache`, so the bridge cache of the us
 
 `clojure -M:test` (no `:kotlinc`) passes after the bridges are in `target/cache`. A `:<>` call that has no stored bridge says: `kt compiles a small Kotlin bridge for it, which needs the Kotlin compiler on the class path`.
 For a real deployment, run once with `:kotlinc`, or AOT-compile the namespaces (see the README of ckway).
+
+## With AOT (an experiment, not used by the design)
+
+If the interface of the protocol is a class file, the reified call works for it: `single<ProductStore> { }` and `koin.get<ProductStore>()` with `:<> spike.koin.domain.ProductStore`.
+Make the class file, then run with the alias `:aot`:
+
+```sh
+clojure -M:aot -e "(binding [*compile-path* \"target/classes\"] (compile 'spike.koin.domain) (compile 'spike.koin.catalog))"
+clojure -M:test:aot:kotlinc -n spike.koin.forms-test    # `with-aot-the-protocol-is-a-reified-type` runs
+```
+
+Without `target/classes` on the class path, that test does nothing. `bin/test` does not use AOT.
